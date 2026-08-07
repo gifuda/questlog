@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+target/
+
+# Data files (NEVER commit — contains user's projects/todos/plans)
+.todos.json
+.todo-board.json
+.epics.json
+
+# Tool-generated indexes (contains personal project structure)
+.codebase-memory/
+
+# Hook state (contains session IDs)
+.questlog-hook/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Tool / editor caches
+.zcode/
+
+# Logs
+*.log

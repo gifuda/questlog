@@ -1,0 +1,30 @@
+# Dependency update automation — see https://docs.github.com/code-security/dependabot
+version: 2
+updates:
+  # npm dependencies for both packages (lockfiles now resolve against the
+  # official registry via the project-scoped .npmrc).
+  - package-ecosystem: "npm"
+    directory: "/mcp-server"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "npm"
+    directory: "/desktop-app"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  # Rust crates (Tauri backend)
+  - package-ecosystem: "cargo"
+    directory: "/desktop-app/src-tauri"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  # GitHub Actions — keep pinned SHAs reviewed
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

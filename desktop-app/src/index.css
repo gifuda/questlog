@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+@theme {
+  --color-page: var(--c-page);
+  --color-surface: var(--c-surface);
+  --color-elevated: var(--c-elevated);
+  --color-chip: var(--c-chip);
+  --color-line: var(--c-line);
+  --color-line-hover: var(--c-line-hover);
+  --color-heading: var(--c-heading);
+  --color-body: var(--c-body);
+  --color-muted: var(--c-muted);
+  --color-faint: var(--c-faint);
+  --color-accent: var(--c-accent);
+  --color-accent-bg: var(--c-accent-bg);
+  --color-success: var(--c-success);
+  --color-danger: var(--c-danger);
+}
+
+/* ── Dark (default) ── */
+:root {
+  background: transparent;
+  --c-page: #030712;
+  --c-surface: #1f2937;
+  --c-elevated: #374151;
+  --c-chip: #374151;
+  --c-line: #1f2937;
+  --c-line-hover: #6b7280;
+  --c-heading: #f3f4f6;
+  --c-body: #d1d5db;
+  --c-muted: #9ca3af;
+  --c-faint: #6b7280;
+  --c-accent: #60a5fa;
+  --c-accent-bg: rgba(30, 58, 138, 0.4);
+  --c-success: #4ade80;
+  --c-danger: #f87171;
+}
+
+/* ── Light ── */
+[data-theme="light"] {
+  --c-page: #f3f4f6;
+  --c-surface: #ffffff;
+  --c-elevated: #e5e7eb;
+  --c-chip: #f3f4f6;
+  --c-line: #e5e7eb;
+  --c-line-hover: #9ca3af;
+  --c-heading: #111827;
+  --c-body: #374151;
+  --c-muted: #6b7280;
+  --c-faint: #9ca3af;
+  --c-accent: #3b82f6;
+  --c-accent-bg: #eff6ff;
+  --c-success: #16a34a;
+  --c-danger: #dc2626;
+}

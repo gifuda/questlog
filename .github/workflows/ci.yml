@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  # ── MCP server (TypeScript) — pure-logic tests via vitest ──
+  mcp-server-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      # SHA-pinned actions — see SECURITY.md. Bump by looking up the tag's
+      # commit on GitHub and updating the SHA + comment together.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+
+      - run: npm ci
+
+      # Build first to ensure type-check passes, then run tests.
+      - run: npm run build
+
+      - run: npm test
+
+  # ── Tauri Rust backend — pure-logic tests via cargo test ──
+  rust-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop-app/src-tauri
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      # Pin the action code (v1) while still tracking Rust's stable channel
+      # via the `toolchain` input below — supply-chain safety without freezing
+      # the compiler version.
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      # Tauri's system dependencies on Linux. We only need the libraries that
+      # the crate links against; we are NOT building a full GUI binary here,
+      # but cargo test still compiles the Tauri dependency graph.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.7.8
+        with:
+          workspaces: desktop-app/src-tauri
+
+      - run: cargo test
+
+  # ── Desktop frontend (React + Vite) — type-check, i18n tests, build ──
+  desktop-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop-app
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+
+      - run: npm ci
+
+      # Type-check (also validates zh/en locale key parity via CustomTypeOptions)
+      - run: npx tsc --noEmit
+
+      # Locale integrity + i18n key reference tests
+      - run: npm test
+
+      # Production build
+      - run: npm run build
+
+  # ── Rust code quality — fmt + clippy gates on the same dependency install ──
+  rust-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop-app/src-tauri
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.7.8
+        with:
+          workspaces: desktop-app/src-tauri
+
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+
+  # ── Setup script — shellcheck on setup-mcp.sh ──
+  setup-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: shellcheck setup-mcp.sh
