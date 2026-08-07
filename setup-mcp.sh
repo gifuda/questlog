@@ -24,16 +24,6 @@ print_help() {
   sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
 }
 
-# Resolve an absolute, symlink-stripped path. Falls back to the input if realpath
-# is unavailable or the target doesn't exist yet.
-norm_path() {
-  if command -v realpath >/dev/null 2>&1; then
-    realpath "$1" 2>/dev/null || printf '%s' "$1"
-  else
-    printf '%s' "$1"
-  fi
-}
-
 # Idempotent JSON merge via a throwaway .mjs file (never node -e string concat,
 # so paths containing spaces / unicode / quotes survive the bash→node boundary).
 # Args: <configFile> <keyPath...> <serverJson>
