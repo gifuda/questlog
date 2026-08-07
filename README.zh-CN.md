@@ -54,7 +54,7 @@ bash setup-mcp.sh   # 自动检测已装的 MCP 客户端，注册服务器，�
 ```
 
 构建产物在 `desktop-app/src-tauri/target/release/bundle/`。打开任意 MCP 兼容
-的编码会话（Claude Code、Codex、OpenCode、Cursor、ZCode…），说**「帮我记一下」**——搞定。
+的编码会话（Claude Code、Codex、OpenCode、Cursor、ZCode…），说 **「帮我记一下」** ——搞定。
 
 `setup-mcp.sh` 会自动检测已装的客户端，把服务器写进各自的用户级配置。要指定子集，用 flag 覆盖：
 
