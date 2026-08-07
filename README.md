@@ -105,7 +105,7 @@ Three types: **📘 Know-how** (validated experience) · **✅ Todo** (actionabl
 
 ```
 P0  Refactor auth                              56%  🔵
-├── S1  Audit current flow         ████████░░    50%  ◑ coded        ← 可做
+├── S1  Audit current flow         ████████░░    50%  ◑ coded        ← actionable
 ├── S2  Design new schema          ███░░░░░░░    25%  ◐ designed
 └── S3  Migrate users (depends S2) ░░░░░░░░░░     0%  ☐ pending      🔗
 ```
