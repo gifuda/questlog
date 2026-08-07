@@ -1,30 +1,66 @@
-# Dependency update automation — see https://docs.github.com/code-security/dependabot
+# Dependabot configuration — conservative for a solo open-source project.
+#
+# Strategy:
+#   - Scan monthly (not weekly) to keep the PR queue quiet.
+#   - Lower open-PR limits so the queue never floods.
+#   - Ignore major version bumps for core libs (typescript, vitest, notify,
+#     tauri, @types/node, github actions) — those need manual testing before
+#     upgrade. Patch/minor bumps still come through as PRs.
+# See https://docs.github.com/code-security/dependabot
+
 version: 2
 updates:
-  # npm dependencies for both packages (lockfiles now resolve against the
-  # official registry via the project-scoped .npmrc).
+  # ── MCP server (npm) ──
   - package-ecosystem: "npm"
     directory: "/mcp-server"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
+  # ── Desktop app frontend (npm) ──
   - package-ecosystem: "npm"
     directory: "/desktop-app"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
-  # Rust crates (Tauri backend)
+  # ── Desktop app backend (cargo) ──
   - package-ecosystem: "cargo"
     directory: "/desktop-app/src-tauri"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "notify"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tauri"
+        update-types: ["version-update:semver-major"]
 
-  # GitHub Actions — keep pinned SHAs reviewed
+  # ── GitHub Actions (SHA-pinned, review carefully) ──
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(ci)"
