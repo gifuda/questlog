@@ -21,7 +21,7 @@ log = "0.4"
 tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2"
-notify = { version = "7", features = ["macos_fsevent"] }
+notify = { version = "8", features = ["macos_fsevent"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
