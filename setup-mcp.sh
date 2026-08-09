@@ -155,16 +155,36 @@ reg_cursor() {
 }
 
 reg_zcode() {
-  local f="$HOME/.zcode/cli/config.json"
-  if ! command -v zcode >/dev/null 2>&1 && [ ! -f "$f" ]; then
+  # ZCode v2 reads MCP config from ~/.zcode/v2/config.json, while older CLI
+  # builds used ~/.zcode/cli/config.json. Write to both so the server is
+  # registered regardless of which version is running. The v2 path takes
+  # priority — if only one write succeeds, v2 is the one that matters.
+  local f_cli="$HOME/.zcode/cli/config.json"
+  local f_v2="$HOME/.zcode/v2/config.json"
+  if ! command -v zcode >/dev/null 2>&1 && [ ! -f "$f_cli" ] && [ ! -f "$f_v2" ]; then
     echo "skip	(not installed, no config)"; return
   fi
-  local out
-  if out=$(merge_json "$f" "mcp.servers" "$SERVER_JSON" 2>&1); then
-    echo "ok	$out"
-  else
-    echo "fail	($out)"
+  local out=""
+  # Write to v2 first (the one the running instance actually reads).
+  if [ -f "$f_v2" ] || [ -d "$HOME/.zcode/v2" ]; then
+    local v2_out
+    if v2_out=$(merge_json "$f_v2" "mcp.servers" "$SERVER_JSON" 2>&1); then
+      out="ok	v2: $v2_out"
+    else
+      out="fail	v2: ($v2_out)"
+    fi
   fi
+  # Also write to cli config for backward compatibility (older builds).
+  if [ -f "$f_cli" ] || [ -d "$HOME/.zcode/cli" ]; then
+    local cli_out
+    if cli_out=$(merge_json "$f_cli" "mcp.servers" "$SERVER_JSON" 2>&1); then
+      out="${out:+$out; }ok	cli: $cli_out"
+    else
+      out="${out:+$out; }fail	cli: ($cli_out)"
+    fi
+  fi
+  if [ -z "$out" ]; then echo "fail	(no config dir found)"; return; fi
+  echo "$out"
 }
 
 reg_codex() {
