@@ -286,6 +286,7 @@ server.tool(
     "| priority | P0 (最高) / P1 / P2 / P3 |",
     "| depends_on | 依赖的其他 epic id 列表（必须先完成才能启动本方案）|",
     "| parent_id | 可选。作为子方案挂到父方案下（需要父方案已存在）|",
+    "| acceptance | 可选但强烈推荐。验收条件，自由文本（如\"所有步骤 observed 且观察 3 天无复发\"）。由本对话设定，done 前需确认满足 |",
   ].join("\n"),
   {
     title: z.string().describe("Epic title — pure title, NO priority prefix (priority goes in the priority field)"),
@@ -293,6 +294,7 @@ server.tool(
     priority: z.enum(["P0", "P1", "P2", "P3"]).optional().describe("Priority — P0 highest"),
     depends_on: z.array(z.string()).optional().describe("Epic IDs this epic depends on (must complete first)"),
     parent_id: z.string().optional().describe("Parent epic ID to attach as a child plan (max 3 levels: top → child → step)"),
+    acceptance: z.string().optional().describe("验收条件，自由文本。由创建方案的对话设定，done 前需确认满足。例：\"所有步骤 observed 且线上观察 3 天无复发\""),
     project_dir: z.string().optional().describe("Override auto-detection: absolute path of the target project directory"),
   },
   async (input) => {
@@ -328,6 +330,12 @@ server.tool(
     "## Auto-derived: blocked status",
     "If an epic's depends_on includes any epic NOT in 'done' status, it is automatically set to 'blocked'. When all dependencies reach 'done', a blocked epic auto-releases to 'draft'. You don't need to manage blocked manually.",
     "",
+    "## Done gate (CRITICAL — prevents \"75% but shown as done\")",
+    "设 status='done' 时系统校验当前进度：",
+    "- 进度 = 100%（所有步骤 observed）→ 直接放行",
+    "- 进度 < 100% → 必须同时传 close_reason（收尾原因），否则报错拒绝。",
+    "这是唯一阻止\"进度未满却显示完成\"的硬门禁。提前收尾是合法的（方向变更、合并），但必须有显式原因。",
+    "",
     "## Typical workflow",
     "1. User starts working on an epic → update_epic status='active'",
     "2. Code done, entering verification → status='verifying'",
@@ -344,6 +352,8 @@ server.tool(
     links_doc: z.string().optional().describe("Document URL/path"),
     links_branch: z.string().optional().describe("Code branch name"),
     links_note: z.string().optional().describe("Memo / memory notes"),
+    acceptance: z.string().optional().describe("验收条件，自由文本。done 前需确认满足"),
+    close_reason: z.string().optional().describe("收尾原因。进度<100% 提前标 done 时必填，否则被系统拒绝"),
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
@@ -411,8 +421,12 @@ server.tool(
     "## When to advance",
     "- Finished designing → stage='designed'",
     "- Finished coding → stage='coded'",
-    "- Ran verification → stage='verified'",
+    "- Ran verification → stage='verified' (AI 验证通过即可推进到这)",
     "- Observation window passed → stage='observed' (step fully done)",
+    "",
+    "## verified vs observed（重要语义）",
+    "- verified（75%）：AI 验证通过（测试跑过、实跑确认）。AI 可以自主推进到这。",
+    "- observed（100%）：跨会话确认稳定。观察期约定写在所属 epic 的 acceptance 字段里（如\"观察 3 天无复发\"），由用户确认稳定后再推进。",
     "",
     "## Completion writeback",
     "When ALL steps of an epic reach 'observed', consider updating the epic itself to status='done' via update_epic (this unblocks dependents).",
@@ -441,10 +455,14 @@ server.tool(
     if (step) {
       const progress = epicProgress(step.epic_id, data);
       const epic = data.epics.find((e) => e.id === step.epic_id);
+      // 推进到 observed 时提醒验收条件（防止跳过观察期）
+      const acceptanceHint = step.stage === "observed" && epic?.acceptance
+        ? `\n📌 验收条件提醒：「${epic.acceptance}」请确认已满足（observed = 跨会话确认稳定）。`
+        : "";
       return {
         content: [{
           type: "text",
-          text: `Updated step ${id} → ${step.stage}.\nEpic "${epic?.title ?? step.epic_id}" progress now: ${progress}%.`,
+          text: `Updated step ${id} → ${step.stage}.\nEpic "${epic?.title ?? step.epic_id}" progress now: ${progress}%.${acceptanceHint}`,
         }],
       };
     }

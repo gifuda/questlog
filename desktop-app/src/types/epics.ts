@@ -54,6 +54,10 @@ export interface Epic {
   child_count: number;
   links: EpicLinks;
   max_active?: number | null;
+  /** 验收条件（自由文本，由创建方案的对话显式填写）。 */
+  acceptance: string;
+  /** 收尾原因。progress<100% 提前标 done 时必填。 */
+  close_reason: string;
   created_at: string;
   updated_at: string;
   steps: EpicStep[];

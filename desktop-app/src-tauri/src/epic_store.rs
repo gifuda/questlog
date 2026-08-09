@@ -326,13 +326,15 @@ mod tests {
             priority: "P1".into(),
             parent_id: None,
             depends_on: vec![],
-            blocks: vec![],
-            links: EpicLinks::default(),
-            max_active: None,
-            created_at: BASE_TS.into(),
-            updated_at: BASE_TS.into(),
-        }
+        blocks: vec![],
+        links: EpicLinks::default(),
+        max_active: None,
+        acceptance: "".into(),
+        close_reason: "".into(),
+        created_at: BASE_TS.into(),
+        updated_at: BASE_TS.into(),
     }
+}
 
     fn step(id: &str, epic_id: &str) -> Step {
         Step {

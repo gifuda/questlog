@@ -5,7 +5,20 @@ import crypto from "node:crypto";
 import { TodosFile, TodoItem, validateItem, validateTransition } from "./schema.js";
 
 const FILENAME = ".todos.json";
-const REGISTRY_PATH = path.join(os.homedir(), ".todo-board.json");
+/**
+ * Registry path. Lazily resolved on each access (not captured at import time)
+ * so that tests can redirect it. Two redirection mechanisms:
+ *   1. QUESTLOG_REGISTRY env var — absolute override (used by test setup, most
+ *      reliable: no dependency on vi.mock hoisting timing).
+ *   2. os.homedir() — the normal production path.
+ * Relying solely on vi.mock("node:os") is fragile because store.js's eager
+ * import can resolve the real os before the mock factory runs, leaking test
+ * temp-dirs into the user's real ~/.todo-board.json.
+ */
+function registryPath(): string {
+  if (process.env.QUESTLOG_REGISTRY) return process.env.QUESTLOG_REGISTRY;
+  return path.join(os.homedir(), ".todo-board.json");
+}
 const SKIP_DIRS = new Set(["node_modules", ".git", ".vscode", ".idea", ".Trash", "__pycache__", "dist", "target", "build"]);
 
 /** Weak/vague suggestion phrases that add no value. */
@@ -171,7 +184,7 @@ async function writeStore(filePath: string, data: TodosFile): Promise<void> {
 async function readRegistry(): Promise<Registry> {
   let raw: string;
   try {
-    raw = await fs.readFile(REGISTRY_PATH, "utf-8");
+    raw = await fs.readFile(registryPath(), "utf-8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { projects: [] };
     console.warn(`[store] failed to read registry: ${(err as Error).message}`);
@@ -180,15 +193,16 @@ async function readRegistry(): Promise<Registry> {
   try {
     return JSON.parse(raw) as Registry;
   } catch {
-    await backupCorruptFile(REGISTRY_PATH, "registry");
+    await backupCorruptFile(registryPath(), "registry");
     return { projects: [] };
   }
 }
 
 async function writeRegistry(registry: Registry): Promise<void> {
-  const tmp = REGISTRY_PATH + ".tmp-" + crypto.randomUUID();
+  const regPath = registryPath();
+  const tmp = regPath + ".tmp-" + crypto.randomUUID();
   await fs.writeFile(tmp, JSON.stringify(registry, null, 2), "utf-8");
-  await fs.rename(tmp, REGISTRY_PATH);
+  await fs.rename(tmp, regPath);
 }
 
 /**

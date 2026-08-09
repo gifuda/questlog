@@ -31,6 +31,8 @@ export interface EpicSeed {
   dependsOn?: string[];
   blocks?: string[];
   priority?: string;
+  acceptance?: string;
+  closeReason?: string;
 }
 
 export interface StepSeed {
@@ -56,6 +58,8 @@ export function makeEpic(seed: EpicSeed): Epic {
     depends_on: seed.dependsOn ?? [],
     blocks: seed.blocks ?? [],
     links: {},
+    acceptance: seed.acceptance ?? "",
+    close_reason: seed.closeReason ?? "",
     created_at: BASE_TS,
     updated_at: BASE_TS,
   };

@@ -21,7 +21,7 @@ export function useEpics(projectPath: string | null) {
   }, [refresh]);
 
   // ── Mutations ──
-  async function addEpic(title: string, opts?: { description?: string; priority?: string; dependsOn?: string[]; parentId?: string }) {
+  async function addEpic(title: string, opts?: { description?: string; priority?: string; dependsOn?: string[]; parentId?: string; acceptance?: string }) {
     if (!projectPath) return;
     const file = await invoke<EpicsFile>("add_epic", {
       projectPath,
@@ -30,6 +30,7 @@ export function useEpics(projectPath: string | null) {
       priority: opts?.priority,
       dependsOn: opts?.dependsOn,
       parentId: opts?.parentId,
+      acceptance: opts?.acceptance,
     });
     setData(file);
   }
@@ -37,6 +38,7 @@ export function useEpics(projectPath: string | null) {
   async function updateEpic(id: string, patch: {
     title?: string; description?: string; status?: EpicStatus; priority?: string;
     dependsOn?: string[]; linksDoc?: string; linksBranch?: string; linksNote?: string;
+    acceptance?: string; closeReason?: string;
   }) {
     if (!projectPath) return;
     const file = await invoke<EpicsFile>("update_epic", {
@@ -44,6 +46,7 @@ export function useEpics(projectPath: string | null) {
       title: patch.title, description: patch.description, status: patch.status,
       priority: patch.priority, dependsOn: patch.dependsOn,
       linksDoc: patch.linksDoc, linksBranch: patch.linksBranch, linksNote: patch.linksNote,
+      acceptance: patch.acceptance, closeReason: patch.closeReason,
     });
     setData(file);
   }

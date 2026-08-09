@@ -129,7 +129,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
 // ══════════════════════════════════════════════
 // EpicCard — 单个方案卡，可展开看步骤
 // ══════════════════════════════════════════════
-type EpicPatch = { title?: string; description?: string; status?: EpicStatus; priority?: string; dependsOn?: string[]; linksDoc?: string; linksBranch?: string; linksNote?: string };
+type EpicPatch = { title?: string; description?: string; status?: EpicStatus; priority?: string; dependsOn?: string[]; linksDoc?: string; linksBranch?: string; linksNote?: string; acceptance?: string; closeReason?: string };
 
 interface EpicCardProps {
   epic: Epic;
@@ -166,6 +166,14 @@ function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep,
           <span className={`text-[9px] px-1 py-px rounded shrink-0 ${priorityBadge(epic.priority)}`}>
             {epic.priority}
           </span>
+          {epic.close_reason && (
+            <span
+              className="text-[8px] px-1 py-px rounded shrink-0 bg-yellow-500/15 text-yellow-300"
+              title={`${t("epic.earlyClose")}: ${epic.close_reason}`}
+            >
+              ⚠️{t("epic.earlyClose")}
+            </span>
+          )}
           <span className="text-[10px] text-muted shrink-0">{epic.progress}%</span>
           <span className={`text-[9px] px-1.5 py-0.5 rounded ${badge.bg} ${badge.text} shrink-0`}>
             {t(epicStatusKey[epic.status])}
@@ -261,6 +269,18 @@ function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep,
               {epic.blocks_titles.length > 0 && (
                 <div className="text-[10px] text-faint mb-1">
                   {t("epic.blocking")} <span className="text-muted">{epic.blocks_titles.join("、")}</span>
+                </div>
+              )}
+
+              {/* 验收条件 */}
+              {epic.acceptance && (
+                <div className="text-[10px] text-yellow-300/90 mb-1 leading-relaxed">
+                  📌 {t("epic.acceptance")}{epic.acceptance}
+                </div>
+              )}
+              {epic.close_reason && (
+                <div className="text-[10px] text-yellow-400/80 mb-1 leading-relaxed">
+                  ⚠️ {t("epic.closeReason")}{epic.close_reason}
                 </div>
               )}
 
@@ -387,7 +407,7 @@ function StepRow({ step, onUpdate, onDelete }: {
 function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
   existingTitles: { id: string; title: string }[];
   onCancel: () => void;
-  onSubmit: (title: string, opts: { description?: string; priority?: string; dependsOn?: string[] }) => void;
+  onSubmit: (title: string, opts: { description?: string; priority?: string; dependsOn?: string[]; acceptance?: string }) => void;
   compact?: boolean;
 }) {
   const { t } = useTranslation();
@@ -395,6 +415,7 @@ function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState("P1");
   const [dependsOn, setDependsOn] = useState<string[]>([]);
+  const [acceptance, setAcceptance] = useState("");
 
   return (
     <div className={`rounded-lg border border-accent/40 bg-accent-bg/30 ${compact ? "p-2" : "p-3"}`}>
@@ -405,7 +426,7 @@ function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && title.trim()) onSubmit(title.trim(), { description: description.trim() || undefined, priority, dependsOn: dependsOn.length ? dependsOn : undefined });
+          if (e.key === "Enter" && title.trim()) onSubmit(title.trim(), { description: description.trim() || undefined, priority, dependsOn: dependsOn.length ? dependsOn : undefined, acceptance: acceptance.trim() || undefined });
           if (e.key === "Escape") onCancel();
         }}
       />
@@ -414,6 +435,12 @@ function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
         placeholder={t("epic.descPlaceholder")}
         value={description}
         onChange={(e) => setDescription(e.target.value)}
+      />
+      <input
+        className="w-full bg-transparent px-1 py-1 mt-0.5 text-[10px] text-yellow-300/80 focus:outline-none"
+        placeholder={t("epic.acceptancePlaceholder")}
+        value={acceptance}
+        onChange={(e) => setAcceptance(e.target.value)}
       />
       <div className="flex items-center gap-2 mt-2">
         <select
@@ -447,7 +474,7 @@ function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
         <button
           className="text-[11px] px-2 py-1 bg-accent text-white rounded hover:opacity-90 disabled:opacity-40"
           disabled={!title.trim()}
-          onClick={() => onSubmit(title.trim(), { description: description.trim() || undefined, priority, dependsOn: dependsOn.length ? dependsOn : undefined })}
+          onClick={() => onSubmit(title.trim(), { description: description.trim() || undefined, priority, dependsOn: dependsOn.length ? dependsOn : undefined, acceptance: acceptance.trim() || undefined })}
         >
           {t("epic.create")}
         </button>
@@ -464,7 +491,7 @@ function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
 function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
   epic: Epic;
   allEpics: Epic[];
-  onSubmit: (patch: { title?: string; description?: string; status?: EpicStatus; priority?: string; dependsOn?: string[]; linksDoc?: string; linksBranch?: string; linksNote?: string }) => void;
+  onSubmit: (patch: { title?: string; description?: string; status?: EpicStatus; priority?: string; dependsOn?: string[]; linksDoc?: string; linksBranch?: string; linksNote?: string; acceptance?: string; closeReason?: string }) => void;
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
@@ -476,6 +503,8 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
   const [linksDoc, setLinksDoc] = useState(epic.links.doc ?? "");
   const [linksBranch, setLinksBranch] = useState(epic.links.branch ?? "");
   const [linksNote, setLinksNote] = useState(epic.links.note ?? "");
+  const [acceptance, setAcceptance] = useState(epic.acceptance ?? "");
+  const [closeReason, setCloseReason] = useState(epic.close_reason ?? "");
 
   return (
     <div className="flex flex-col gap-2 py-1">
@@ -534,6 +563,24 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
         <input className="bg-transparent border-b border-line px-1 py-0.5 text-[10px] text-muted focus:outline-none" placeholder={t("epic.branchPlaceholder")} value={linksBranch} onChange={(e) => setLinksBranch(e.target.value)} />
         <input className="bg-transparent border-b border-line px-1 py-0.5 text-[10px] text-muted focus:outline-none" placeholder={t("epic.notePlaceholder")} value={linksNote} onChange={(e) => setLinksNote(e.target.value)} />
       </div>
+      {/* 验收条件 + 收尾原因 */}
+      <div className="flex flex-col gap-1">
+        <textarea
+          className="bg-transparent border-b border-line px-1 py-0.5 text-[10px] text-yellow-300/90 focus:outline-none resize-none"
+          rows={2}
+          placeholder={t("epic.acceptancePlaceholder")}
+          value={acceptance}
+          onChange={(e) => setAcceptance(e.target.value)}
+        />
+        {status === "done" && (
+          <input
+            className="bg-transparent border-b border-line px-1 py-0.5 text-[10px] text-yellow-400/80 focus:outline-none"
+            placeholder={t("epic.closeReasonPlaceholder")}
+            value={closeReason}
+            onChange={(e) => setCloseReason(e.target.value)}
+          />
+        )}
+      </div>
       <div className="flex items-center gap-3">
         <button
           className="text-[11px] px-2 py-1 bg-accent text-white rounded hover:opacity-90"
@@ -542,6 +589,7 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
             status, priority,
             dependsOn,
             linksDoc, linksBranch, linksNote,
+            acceptance, closeReason: closeReason,
           })}
         >
           {t("epic.save")}

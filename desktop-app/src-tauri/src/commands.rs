@@ -52,14 +52,21 @@ pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, St
     let projects = state.projects.lock().map_err(|e| e.to_string())?;
     let mut result = vec![];
     for (name, path) in projects.iter() {
+        // A corrupt .todos.json must NOT hide the whole project from the board.
+        // read_todos already salvages valid items when possible; if even that
+        // fails, show the project tab with zero counts rather than dropping it.
         let data = match store::read_todos(path) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!(
-                    "[get_projects] failed to read '{name}' at {}: {e}",
+                    "[get_projects] failed to read '{name}' at {}: {e} — showing with empty data",
                     path.display()
                 );
-                continue;
+                crate::models::TodosFile {
+                    version: 1,
+                    project: name.clone(),
+                    items: vec![],
+                }
             }
         };
         let (knowhow, todo, idea) = store::count_active(&data);
@@ -445,6 +452,7 @@ pub fn add_epic(
     priority: Option<String>,
     depends_on: Option<Vec<String>>,
     parent_id: Option<String>,
+    acceptance: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let path = validate_project_path(&project_path, &state)?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -474,6 +482,8 @@ pub fn add_epic(
         blocks: vec![],
         links: Default::default(),
         max_active: None,
+        acceptance: acceptance.unwrap_or_default(),
+        close_reason: String::new(),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -500,6 +510,8 @@ pub fn update_epic(
     links_doc: Option<String>,
     links_branch: Option<String>,
     links_note: Option<String>,
+    acceptance: Option<String>,
+    close_reason: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let path = validate_project_path(&project_path, &state)?;
     let new_status = match &status {
@@ -508,6 +520,22 @@ pub fn update_epic(
     };
 
     let data = epic_store::mutate_epics(&path, |file| {
+        // done 门禁：进度<100% 且 close_reason 空 → 拒绝。
+        // 必须在设置 epic.status 之前算进度（progress 不受 status 影响，只受 step stage 影响，
+        // 所以取 set 之前的进度值和最终的等价）。
+        if new_status == Some(EpicStatus::Done) {
+            let progress = epic_store::epic_progress(&id, file);
+            if progress < 100 {
+                let reason = close_reason.as_deref().unwrap_or("").trim();
+                if reason.is_empty() {
+                    return Err(format!(
+                        "进度 {}% 未达 100%，提前收尾需填写 close_reason（收尾原因，如\"方向调整\"）",
+                        progress
+                    ));
+                }
+            }
+        }
+
         let epic = file
             .epics
             .iter_mut()
@@ -536,6 +564,12 @@ pub fn update_epic(
         }
         if let Some(v) = links_note {
             epic.links.note = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Some(a) = acceptance {
+            epic.acceptance = a;
+        }
+        if let Some(r) = close_reason {
+            epic.close_reason = r;
         }
         epic.updated_at = chrono::Utc::now().to_rfc3339();
         Ok(())
@@ -797,6 +831,8 @@ fn epics_to_json(data: &crate::models::EpicsFile, project_path: &str) -> serde_j
                         "note": e.links.note,
                     },
                     "max_active": e.max_active,
+                    "acceptance": e.acceptance,
+                    "close_reason": e.close_reason,
                     "created_at": e.created_at,
                     "updated_at": e.updated_at,
                     "steps": epic_steps,

@@ -1,4 +1,4 @@
-use crate::models::{ItemStatus, TodosFile};
+use crate::models::{ItemStatus, TodoItem, TodosFile};
 use std::path::Path;
 
 const FILENAME: &str = ".todos.json";
@@ -8,6 +8,13 @@ static UNIQUE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 
 /// Read .todos.json from a project directory.
 /// Returns default empty structure if file doesn't exist.
+///
+/// Resilience: if strict deserialization fails (e.g. one item has an unknown
+/// status value like `"pending"`), the whole file normally becomes unparseable
+/// and the entire project vanishes from the board. To prevent one bad item from
+/// nuking a whole project, we fall back to per-item parsing: keep the items that
+/// deserialize cleanly, drop the ones that don't (logged to stderr). This way a
+/// single corrupt item costs one todo, not the whole project.
 pub fn read_todos(project_dir: &Path) -> Result<TodosFile, String> {
     let path = project_dir.join(FILENAME);
     if !path.exists() {
@@ -21,7 +28,127 @@ pub fn read_todos(project_dir: &Path) -> Result<TodosFile, String> {
         });
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("read error: {e}"))?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse error: {e}"))
+    // Fast path: strict parse succeeds → return as-is.
+    match serde_json::from_str::<TodosFile>(&raw) {
+        Ok(d) => Ok(d),
+        Err(strict_err) => {
+            // Slow path: try to salvage items individually so one bad record
+            // doesn't hide the whole project.
+            let salvaged = salvage_todos(&raw, project_dir);
+            match salvaged {
+                Some(d) if !d.items.is_empty() => {
+                    eprintln!(
+                        "[store] {} strict parse failed ({}); recovered {}/{} items",
+                        path.display(),
+                        strict_err,
+                        d.items.len(),
+                        count_items_in_raw(&raw),
+                    );
+                    Ok(d)
+                }
+                _ => Err(format!("parse error: {strict_err}")),
+            }
+        }
+    }
+}
+
+/// Count how many items the raw JSON claims to have (best-effort, for logging).
+fn count_items_in_raw(raw: &str) -> usize {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("items").and_then(|i| i.as_array()).map(|a| a.len()))
+        .unwrap_or(0)
+}
+
+/// Try to parse a TodosFile loosely: parse the JSON as a generic Value, then
+/// deserialize each item individually, keeping only the valid ones. Returns None
+/// if the file isn't even valid JSON (truly corrupt, not just one bad field).
+///
+/// Before per-item deserialization, we coerce bad enum values to safe defaults
+/// (e.g. status "pending" → "active"). This means a bad enum value — the most
+/// common real-world data corruption — is fixed in place rather than dropping
+/// the item. Only items with structural damage (missing required fields, wrong
+/// JSON types) are dropped.
+fn salvage_todos(raw: &str, project_dir: &Path) -> Option<TodosFile> {
+    let root: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let project = root
+        .get("project")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            project_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
+    let items_arr = root.get("items").and_then(|v| v.as_array())?;
+    let mut items: Vec<TodoItem> = Vec::new();
+    for item_val in items_arr {
+        let id = item_val
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let title = item_val
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+
+        // Coerce bad enum values to safe defaults so the item survives.
+        // Without this, a single unknown variant (e.g. status="pending") would
+        // fail deserialization and the item would be dropped.
+        let coerced = coerce_enum_fields(item_val.clone());
+
+        match serde_json::from_value::<TodoItem>(coerced) {
+            Ok(item) => items.push(item),
+            Err(e) => {
+                // Even after coercion the item is structurally broken (missing
+                // required field, wrong type). Drop it but log so it's traceable.
+                eprintln!(
+                    "[store] dropped bad todo item id={} title=\"{}\": {}",
+                    id, title, e
+                );
+            }
+        }
+    }
+    Some(TodosFile {
+        version: root
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .unwrap_or(1),
+        project,
+        items,
+    })
+}
+
+/// Coerce unknown enum values in a todo item's JSON to safe defaults.
+/// - status: unknown → "active" (the item stays visible and actionable)
+/// - type:   unknown → "todo"
+/// - priority: unknown → "medium"
+/// Returns the value unchanged if it's not an object or the fields are absent.
+fn coerce_enum_fields(mut val: serde_json::Value) -> serde_json::Value {
+    let obj = match val.as_object_mut() {
+        Some(o) => o,
+        None => return val,
+    };
+    if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
+        if !["active", "completed", "archived", "converted"].contains(&status) {
+            obj.insert("status".into(), serde_json::Value::String("active".into()));
+        }
+    }
+    if let Some(t) = obj.get("type").and_then(|v| v.as_str()) {
+        if !["knowhow", "todo", "idea"].contains(&t) {
+            obj.insert("type".into(), serde_json::Value::String("todo".into()));
+        }
+    }
+    if let Some(p) = obj.get("priority").and_then(|v| v.as_str()) {
+        if !["high", "medium", "low"].contains(&p) {
+            obj.insert("priority".into(), serde_json::Value::String("medium".into()));
+        }
+    }
+    val
 }
 
 /// Write .todos.json atomically to a project directory.
@@ -169,5 +296,101 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(entries, vec![FILENAME.to_string()]);
+    }
+
+    /// Regression: an item with an unknown status value (e.g. "pending") must
+    /// NOT be dropped — it should be coerced to a safe default ("active") and
+    /// kept. This was the root cause of the ymos project vanishing from the
+    /// board: a single bad status made serde fail the entire file.
+    #[test]
+    fn read_todos_coerces_bad_enum_and_keeps_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = r#"{
+            "version": 1,
+            "project": "victim",
+            "items": [
+                {
+                    "id": "good-1", "type": "todo", "title": "A", "content": "",
+                    "suggestion": "", "tags": [], "status": "active",
+                    "priority": "medium", "source_session": "",
+                    "created_at": "2026", "updated_at": "2026"
+                },
+                {
+                    "id": "bad-status", "type": "todo", "title": "B", "content": "",
+                    "suggestion": "", "tags": [], "status": "pending",
+                    "priority": "medium", "source_session": "",
+                    "created_at": "2026", "updated_at": "2026"
+                },
+                {
+                    "id": "bad-type", "type": "feature", "title": "C", "content": "",
+                    "suggestion": "", "tags": [], "status": "active",
+                    "priority": "high", "source_session": "",
+                    "created_at": "2026", "updated_at": "2026"
+                },
+                {
+                    "id": "bad-prio", "type": "idea", "title": "D", "content": "",
+                    "suggestion": "", "tags": [], "status": "active",
+                    "priority": "urgent", "source_session": "",
+                    "created_at": "2026", "updated_at": "2026"
+                }
+            ]
+        }"#;
+        std::fs::write(dir.path().join(FILENAME), raw).unwrap();
+
+        let data = read_todos(dir.path()).unwrap();
+        // ALL 4 items survive — none are dropped for bad enum values.
+        assert_eq!(data.items.len(), 4);
+        assert_eq!(data.project, "victim");
+
+        // The bad enum values are coerced to safe defaults.
+        let by_id: std::collections::HashMap<&str, &TodoItem> =
+            data.items.iter().map(|i| (i.id.as_str(), i)).collect();
+        assert_eq!(by_id["bad-status"].status, ItemStatus::Active, "pending → active");
+        assert_eq!(by_id["bad-type"].item_type, ItemType::Todo, "feature → todo");
+        assert_eq!(by_id["bad-prio"].priority, Priority::Medium, "urgent → medium");
+        // Good items are untouched.
+        assert_eq!(by_id["good-1"].status, ItemStatus::Active);
+    }
+
+    /// Structurally broken items (missing a required field) are still dropped —
+    /// coercion only fixes bad enum values, not missing data.
+    #[test]
+    fn read_todos_drops_structurally_broken_items() {
+        let dir = tempfile::tempdir().unwrap();
+        // "broken-1" is missing "title" (a required String field) — cannot be
+        // salvaged, must be dropped. "ok-1" is fine and survives.
+        let raw = r#"{
+            "version": 1, "project": "mix",
+            "items": [
+                {
+                    "id": "broken-1", "type": "todo", "content": "",
+                    "suggestion": "", "tags": [], "status": "active",
+                    "priority": "medium", "source_session": "",
+                    "created_at": "2026", "updated_at": "2026"
+                },
+                {
+                    "id": "ok-1", "type": "todo", "title": "Fine", "content": "",
+                    "suggestion": "", "tags": [], "status": "active",
+                    "priority": "medium", "source_session": "",
+                    "created_at": "2026", "updated_at": "2026"
+                }
+            ]
+        }"#;
+        std::fs::write(dir.path().join(FILENAME), raw).unwrap();
+
+        let data = read_todos(dir.path()).unwrap();
+        assert_eq!(data.items.len(), 1, "broken item dropped, good one kept");
+        assert_eq!(data.items[0].id, "ok-1");
+    }
+
+    /// Truly corrupt JSON (not even valid JSON) still returns an error, not a
+    /// silent empty file — the salvage path only triggers on valid JSON with a
+    /// bad item, not on garbage.
+    #[test]
+    fn read_todos_returns_error_for_truly_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILENAME), "{ not valid json at all").unwrap();
+        let err = read_todos(dir.path()).unwrap_err();
+        assert!(err.starts_with("parse error"), "got: {err}");
     }
 }

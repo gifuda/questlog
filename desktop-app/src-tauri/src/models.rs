@@ -261,6 +261,12 @@ pub struct Epic {
     pub links: EpicLinks,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_active: Option<u32>,
+    /// 验收条件（自由文本，由创建方案的对话显式填写）。人类可读，代码不解析。
+    #[serde(default)]
+    pub acceptance: String,
+    /// 收尾原因。progress<100% 提前标 done 时强制必填。
+    #[serde(default)]
+    pub close_reason: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -446,6 +452,8 @@ mod tests {
             blocks: vec![],
             links: EpicLinks::default(),
             max_active: None,
+            acceptance: "".into(),
+            close_reason: "".into(),
             created_at: "2026".into(),
             updated_at: "2026".into(),
         };

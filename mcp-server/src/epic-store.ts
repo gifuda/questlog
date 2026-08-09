@@ -39,6 +39,10 @@ export interface Epic {
   blocks: string[];
   links: EpicLinks;
   max_active?: number;
+  /** 验收条件（自由文本，由创建方案的对话显式填写）。人类可读，代码不解析。 */
+  acceptance?: string;
+  /** 收尾原因。progress<100% 提前标 done 时强制必填。 */
+  close_reason?: string;
   created_at: string;
   updated_at: string;
 }
@@ -200,6 +204,7 @@ export async function pushEpic(cwd: string, input: {
   priority?: string;
   depends_on?: string[];
   parent_id?: string;
+  acceptance?: string;
 }): Promise<{ epic: Epic } | { error: string }> {
   const title = input.title.trim();
   if (!title) return { error: "title is required" };
@@ -225,6 +230,8 @@ export async function pushEpic(cwd: string, input: {
     depends_on: input.depends_on ?? [],
     blocks: [],
     links: {},
+    acceptance: input.acceptance?.trim() ?? "",
+    close_reason: "",
     created_at: now,
     updated_at: now,
   };
@@ -248,11 +255,26 @@ export async function updateEpic(cwd: string, id: string, patch: {
   links_doc?: string;
   links_branch?: string;
   links_note?: string;
+  acceptance?: string;
+  close_reason?: string;
 }): Promise<{ ok: true } | { error: string }> {
   if (patch.status && !VALID_STATUSES.includes(patch.status)) {
     return { error: `invalid status: ${patch.status}` };
   }
   return mutateEpics(cwd, (data) => {
+    // done 门禁：进度<100% 且 close_reason 空 → 拒绝（防止"75% 却显示完成"）。
+    // progress 仅由 step stage 派生，不受 status 影响，改动顺序无妨。
+    if (patch.status === "done") {
+      const progress = epicProgress(id, data);
+      if (progress < 100) {
+        const reason = (patch.close_reason ?? "").trim();
+        if (!reason) {
+          return {
+            error: `进度 ${progress}% 未达 100%，提前收尾需填写 close_reason（收尾原因，如"方向调整"）`,
+          };
+        }
+      }
+    }
     const epic = data.epics.find((e) => e.id === id);
     if (!epic) return { error: `epic '${id}' not found` };
     if (patch.title !== undefined) epic.title = patch.title;
@@ -263,6 +285,8 @@ export async function updateEpic(cwd: string, id: string, patch: {
     if (patch.links_doc !== undefined) epic.links.doc = patch.links_doc || undefined;
     if (patch.links_branch !== undefined) epic.links.branch = patch.links_branch || undefined;
     if (patch.links_note !== undefined) epic.links.note = patch.links_note || undefined;
+    if (patch.acceptance !== undefined) epic.acceptance = patch.acceptance;
+    if (patch.close_reason !== undefined) epic.close_reason = patch.close_reason;
     epic.updated_at = new Date().toISOString();
     return { ok: true as const };
   }).then(({ result }) => result);
