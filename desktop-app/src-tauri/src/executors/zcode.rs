@@ -14,7 +14,7 @@
 //! Config requirement: ~/.zcode/cli/config.json must have a valid provider
 //! with apiKey (the adapter does NOT fake availability if config is missing).
 
-use super::{Executor, ExecutorProbe, ExecutionHandle, ExecutorEvent};
+use super::{ExecutionHandle, Executor, ExecutorEvent, ExecutorProbe};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -113,9 +113,14 @@ impl Executor for ZCodeExecutor {
                 ExecutorProbe {
                     available: true,
                     version: Some(version),
-                    path: Some(self.binary_args.get(0).cloned().unwrap_or_else(|| self.binary.clone())),
-                    supports_resume: true,  // --resume <sessionId>
-                    supports_json: false,   // ZCode uses text output, not JSONL
+                    path: Some(
+                        self.binary_args
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| self.binary.clone()),
+                    ),
+                    supports_resume: true, // --resume <sessionId>
+                    supports_json: false,  // ZCode uses text output, not JSONL
                 }
             }
             _ => ExecutorProbe {
@@ -146,10 +151,10 @@ impl Executor for ZCodeExecutor {
         let stdout_path = output_dir.join("zcode-stdout.txt");
         let stderr_path = output_dir.join("zcode-stderr.log");
 
-        let stdout_file = std::fs::File::create(&stdout_path)
-            .map_err(|e| format!("create stdout: {e}"))?;
-        let stderr_file = std::fs::File::create(&stderr_path)
-            .map_err(|e| format!("create stderr: {e}"))?;
+        let stdout_file =
+            std::fs::File::create(&stdout_path).map_err(|e| format!("create stdout: {e}"))?;
+        let stderr_file =
+            std::fs::File::create(&stderr_path).map_err(|e| format!("create stderr: {e}"))?;
 
         // ZCode non-interactive command:
         // node zcode.cjs --prompt "<task>" --cwd <worktree> --mode <mode>
@@ -157,9 +162,14 @@ impl Executor for ZCodeExecutor {
         // Mode mapping:
         //   workspace-write → yolo (full write access in the worktree)
         //   read-only → plan (no writes)
-        let mode = if sandbox == "read-only" { "plan" } else { "yolo" };
+        let mode = if sandbox == "read-only" {
+            "plan"
+        } else {
+            "yolo"
+        };
 
-        let child = self.build_command()
+        let child = self
+            .build_command()
             .arg("--prompt")
             .arg(task)
             .arg("--cwd")
@@ -179,7 +189,10 @@ impl Executor for ZCodeExecutor {
         })
     }
 
-    fn wait_and_collect(&mut self, mut handle: ExecutionHandle) -> Result<Vec<ExecutorEvent>, String> {
+    fn wait_and_collect(
+        &mut self,
+        mut handle: ExecutionHandle,
+    ) -> Result<Vec<ExecutorEvent>, String> {
         let status = handle
             .child
             .wait()
@@ -243,7 +256,10 @@ mod tests {
         // On this machine, the .cjs file exists at the known path
         let cjs_exists = std::path::Path::new(ZCODE_BINARY_PATHS[0]).exists();
         if cjs_exists {
-            assert!(probe.available, "ZCode CLI should be available when .cjs exists");
+            assert!(
+                probe.available,
+                "ZCode CLI should be available when .cjs exists"
+            );
             assert!(probe.version.is_some());
         }
     }

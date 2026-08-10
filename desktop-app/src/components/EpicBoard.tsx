@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useEpics } from "../hooks/useEpics";
+import { useRunner } from "../hooks/useExecutions";
 import { epicStatusBadge, stageOrder, stageLabel, stageIcon, statusOptions, statusRank } from "../epicConstants";
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
@@ -33,6 +34,7 @@ interface EpicBoardProps {
 export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { t } = useTranslation();
   const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep } = useEpics(projectPath);
+  const { enabled: runnerEnabled, toggle: toggleRunner } = useRunner();
   const [showNewEpic, setShowNewEpic] = useState(false);
 
   // Backend already returns top-level epics newest-first; sort defensively.
@@ -68,6 +70,21 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
           )}
         </div>
       )}
+
+      {/* Runner toggle — always visible, independent of summary */}
+      <div className="px-4 py-1 border-b border-line/50 flex items-center justify-end">
+        <button
+          onClick={toggleRunner}
+          title={runnerEnabled ? t("execution.runnerOn") : t("execution.runnerOff")}
+          className={`px-2 py-0.5 rounded-full text-[9px] font-medium transition-colors shrink-0 ${
+            runnerEnabled
+              ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+              : "bg-elevated text-faint hover:bg-line-hover"
+          }`}
+        >
+          ⚙️ {runnerEnabled ? t("execution.runnerOn") : t("execution.runnerOff")}
+        </button>
+      </div>
 
       {/* 路线图主视图 */}
       <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2.5">

@@ -14,9 +14,8 @@
 
 use crate::file_lock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const RUNTIME_DIRNAME: &str = "questlog-runtime";
 const EXECUTIONS_FILENAME: &str = "executions.json";
@@ -49,8 +48,8 @@ pub enum ExecutionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionLease {
     pub execution_id: String,
-    pub acquired_at: u64,     // unix timestamp
-    pub last_heartbeat: u64,  // unix timestamp
+    pub acquired_at: u64,    // unix timestamp
+    pub last_heartbeat: u64, // unix timestamp
     pub pid: u32,
     pub runner_id: String,
 }
@@ -80,6 +79,23 @@ pub struct Execution {
     pub last_error: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+    // ─── Execution memory fields (backward-compatible via serde defaults) ───
+    /// Attempt number in the retry chain (1 for first attempt).
+    #[serde(default = "default_attempt_no")]
+    pub attempt_no: u32,
+    /// Parent execution ID (for retries). None for first attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_attempt_id: Option<String>,
+    /// Path to the AttemptBundle directory for this execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_path: Option<String>,
+    /// Executor used for this execution (zcode/codex/manual).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<String>,
+}
+
+fn default_attempt_no() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,8 +149,8 @@ fn outputs_dir() -> PathBuf {
 }
 
 fn ensure_runtime_dir() -> Result<(), String> {
-    std::fs::create_dir_all(&runtime_dir()).map_err(|e| format!("mkdir error: {e}"))?;
-    std::fs::create_dir_all(&outputs_dir()).map_err(|e| format!("mkdir outputs error: {e}"))?;
+    std::fs::create_dir_all(runtime_dir()).map_err(|e| format!("mkdir error: {e}"))?;
+    std::fs::create_dir_all(outputs_dir()).map_err(|e| format!("mkdir outputs error: {e}"))?;
     Ok(())
 }
 
@@ -211,6 +227,27 @@ pub fn enqueue_execution(
     project_path: &str,
     base_sha: &str,
 ) -> Result<String, String> {
+    enqueue_execution_with_parent(
+        package_id,
+        epic_id,
+        step_id,
+        project_path,
+        base_sha,
+        None,
+        1,
+    )
+}
+
+/// Enqueue an execution with parent attempt info (for retries).
+pub fn enqueue_execution_with_parent(
+    package_id: &str,
+    epic_id: &str,
+    step_id: &str,
+    project_path: &str,
+    base_sha: &str,
+    parent_attempt_id: Option<&str>,
+    attempt_no: u32,
+) -> Result<String, String> {
     let exec_id = format!("exec_{}", uuid::Uuid::new_v4());
     let now = now_ts();
     let exec = Execution {
@@ -230,6 +267,10 @@ pub fn enqueue_execution(
         last_error: None,
         created_at: now,
         updated_at: now,
+        attempt_no,
+        parent_attempt_id: parent_attempt_id.map(|s| s.to_string()),
+        bundle_path: None,
+        executor: None,
     };
 
     mutate_executions(|data| {
@@ -293,10 +334,7 @@ pub fn find_next_queued(project_path: &str) -> Result<Option<Execution>, String>
 
 /// Acquire a lease on an execution — marks it Running and records the lease.
 /// Fails if another runner already holds the lease.
-pub fn acquire_lease(
-    execution_id: &str,
-    runner_id: &str,
-) -> Result<Execution, String> {
+pub fn acquire_lease(execution_id: &str, runner_id: &str) -> Result<Execution, String> {
     let now = now_ts();
     let pid = std::process::id();
 
@@ -382,7 +420,7 @@ pub fn release_lease(
     error: Option<&str>,
 ) -> Result<(), String> {
     let now = now_ts();
-    let data = mutate_executions(|data| {
+    let _data = mutate_executions(|data| {
         let exec = data
             .executions
             .iter_mut()
@@ -407,10 +445,7 @@ pub fn release_lease(
 }
 
 /// Update execution fields (worktree, branch, candidate SHA, etc.).
-pub fn update_execution(
-    execution_id: &str,
-    updates: ExecutionUpdates,
-) -> Result<(), String> {
+pub fn update_execution(execution_id: &str, updates: ExecutionUpdates) -> Result<(), String> {
     let now = now_ts();
     mutate_executions(|data| {
         let exec = data
@@ -433,6 +468,12 @@ pub fn update_execution(
         if let Some(status) = updates.status {
             exec.status = status;
         }
+        if let Some(bundle) = updates.bundle_path {
+            exec.bundle_path = Some(bundle);
+        }
+        if let Some(executor) = updates.executor {
+            exec.executor = Some(executor);
+        }
         exec.updated_at = now;
         Ok(())
     })?;
@@ -446,6 +487,8 @@ pub struct ExecutionUpdates {
     pub cli_session: Option<String>,
     pub candidate_sha: Option<String>,
     pub status: Option<ExecutionStatus>,
+    pub bundle_path: Option<String>,
+    pub executor: Option<String>,
 }
 
 // ─── Stale lease detection and cleanup ───
@@ -518,6 +561,43 @@ pub fn get_execution(id: &str) -> Result<Execution, String> {
         .ok_or_else(|| format!("execution '{}' not found", id))
 }
 
+/// Create a new retry attempt for a given parent execution.
+///
+/// This preserves the parent execution row (never modifies it) and creates
+/// a new Execution with `attempt_no = parent.attempt_no + 1` and
+/// `parent_attempt_id = parent.id`. The new execution starts at Queued.
+/// The parent is NOT changed — its evidence stays sealed.
+pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
+    let parent = get_execution(parent_exec_id)?;
+
+    let new_id = enqueue_execution_with_parent(
+        &parent.package_id,
+        &parent.epic_id,
+        &parent.step_id,
+        &parent.project_path,
+        &parent.base_sha,
+        Some(&parent.id),
+        parent.attempt_no + 1,
+    )?;
+
+    log_event(&ExecutionEvent {
+        execution_id: new_id.clone(),
+        timestamp: now_ts(),
+        event_type: "retry_created".to_string(),
+        message: format!(
+            "Retry attempt {} created, parent={}",
+            parent.attempt_no + 1,
+            parent.id
+        ),
+        data: Some(serde_json::json!({
+            "parent_attempt_id": parent.id,
+            "attempt_no": parent.attempt_no + 1,
+        })),
+    })?;
+
+    Ok(new_id)
+}
+
 /// Get the output directory for an execution.
 pub fn execution_output_dir(execution_id: &str) -> PathBuf {
     outputs_dir().join(execution_id)
@@ -527,6 +607,10 @@ pub fn execution_output_dir(execution_id: &str) -> PathBuf {
 
 /// Minimal TaskPackage representation for the Runner to consume.
 /// Only the fields the Runner needs — the full schema lives in Node.
+///
+/// This is the **flat projection** of the nested `RawTaskPackage` that Node
+/// actually writes to packages.json.  The `From<RawTaskPackage>` impl below
+/// handles the projection so the Runner never touches the nested shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskPackageSummary {
     pub package_id: String,
@@ -541,14 +625,118 @@ pub struct TaskPackageSummary {
     pub forbidden_paths: Vec<String>,
     pub max_changed_files: u32,
     pub executor_preferred: String,
+    /// Executor policy fields consumed by the Runner (F7 complete).
+    #[serde(default)]
+    pub sandbox: String,
+    #[serde(default)]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub max_attempts: u32,
     pub acceptance_command_ids: Vec<String>,
     pub status: String,
     pub package_hash: String,
 }
 
+/// The nested shape that Node's `savePackage` actually writes to packages.json.
+///
+/// Node `TaskPackage` nests scope/executor/acceptance as objects/arrays.
+/// Rust deserializes this first, then projects to flat `TaskPackageSummary`.
+/// This mirrors `mcp-server/src/task-package.ts` TaskPackage interface exactly.
+#[derive(Debug, Deserialize)]
+pub struct RawTaskPackage {
+    pub package_id: String,
+    pub epic_id: String,
+    pub step_id: String,
+    pub plan_revision: u32,
+    pub project_path: String,
+    pub repo_root: String,
+    pub base_sha: String,
+    pub objective: String,
+    pub scope: RawScope,
+    pub executor: RawExecutor,
+    pub acceptance: Vec<RawAcceptance>,
+    #[serde(default)]
+    pub status: String,
+    pub package_hash: String,
+    // Fields we don't yet consume but must tolerate during deserialization:
+    // schema_version, source_session, context_refs, preconditions, authority,
+    // stop_conditions, rollback, sealed_at — all #[serde(default)] or skipped.
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawScope {
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub forbidden_paths: Vec<String>,
+    #[serde(default)]
+    pub max_changed_files: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawExecutor {
+    #[serde(default = "default_executor")]
+    pub preferred: String,
+    #[serde(default)]
+    pub sandbox: String,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    // fallbacks ignored by Runner (no auto-fallback in production)
+}
+
+fn default_executor() -> String {
+    "zcode".to_string()
+}
+fn default_timeout() -> u64 {
+    3600
+}
+fn default_max_attempts() -> u32 {
+    2
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawAcceptance {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub command_id: Option<String>,
+    // verifier_id ignored by Runner for now
+}
+
+impl From<RawTaskPackage> for TaskPackageSummary {
+    fn from(raw: RawTaskPackage) -> Self {
+        TaskPackageSummary {
+            package_id: raw.package_id,
+            epic_id: raw.epic_id,
+            step_id: raw.step_id,
+            plan_revision: raw.plan_revision,
+            project_path: raw.project_path,
+            repo_root: raw.repo_root,
+            base_sha: raw.base_sha,
+            objective: raw.objective,
+            allowed_paths: raw.scope.allowed_paths,
+            forbidden_paths: raw.scope.forbidden_paths,
+            max_changed_files: raw.scope.max_changed_files,
+            executor_preferred: raw.executor.preferred,
+            sandbox: raw.executor.sandbox,
+            timeout_seconds: raw.executor.timeout_seconds,
+            max_attempts: raw.executor.max_attempts,
+            acceptance_command_ids: raw
+                .acceptance
+                .into_iter()
+                .filter(|a| a.kind == "command")
+                .filter_map(|a| a.command_id)
+                .collect(),
+            status: raw.status,
+            package_hash: raw.package_hash,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PackagesFile {
-    packages: Vec<TaskPackageSummary>,
+    packages: Vec<RawTaskPackage>,
 }
 
 fn packages_path() -> PathBuf {
@@ -557,14 +745,23 @@ fn packages_path() -> PathBuf {
 
 /// Read all ready packages from packages.json (written by Node MCP enqueue_step).
 /// Returns packages with status "ready" — these are the ones the Runner should pick up.
+///
+/// Deserializes the **nested** `RawTaskPackage` shape that Node writes,
+/// then projects to flat `TaskPackageSummary` for the Runner.
 pub fn read_ready_packages() -> Result<Vec<TaskPackageSummary>, String> {
     let path = packages_path();
     if !path.exists() {
         return Ok(vec![]);
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("read packages.json: {e}"))?;
-    let file: PackagesFile = serde_json::from_str(&raw).map_err(|e| format!("parse packages.json: {e}"))?;
-    Ok(file.packages.into_iter().filter(|p| p.status == "ready").collect())
+    let file: PackagesFile =
+        serde_json::from_str(&raw).map_err(|e| format!("parse packages.json: {e}"))?;
+    Ok(file
+        .packages
+        .into_iter()
+        .filter(|p| p.status == "ready")
+        .map(TaskPackageSummary::from)
+        .collect())
 }
 
 /// Mark a package as consumed (status → "passed" or "failed") in packages.json.
@@ -576,7 +773,8 @@ pub fn mark_package_status(package_id: &str, status: &str) -> Result<(), String>
     }
     file_lock::with_file_lock(&path, || {
         let raw = std::fs::read_to_string(&path).map_err(|e| format!("read: {e}"))?;
-        let mut json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("parse: {e}"))?;
+        let mut json: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("parse: {e}"))?;
         if let Some(packages) = json.get_mut("packages").and_then(|p| p.as_array_mut()) {
             for pkg in packages.iter_mut() {
                 if pkg.get("package_id").and_then(|v| v.as_str()) == Some(package_id) {
@@ -652,11 +850,14 @@ mod tests {
     fn find_next_skips_running_project() {
         let (_dir, _guard) = setup_temp_runtime();
         let id1 = enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc1").unwrap();
-        let id2 = enqueue_execution("pkg2", "e2", "s2", "/tmp/proj", "abc2").unwrap();
+        let _id2 = enqueue_execution("pkg2", "e2", "s2", "/tmp/proj", "abc2").unwrap();
         // Acquire lease on first — second should not be picked up (same project)
         let _exec = acquire_lease(&id1, "runner-1").unwrap();
         let next = find_next_queued("/tmp/proj").unwrap();
-        assert!(next.is_none(), "should not pick up from same project while running");
+        assert!(
+            next.is_none(),
+            "should not pick up from same project while running"
+        );
     }
 
     #[test]
@@ -680,5 +881,155 @@ mod tests {
         let stale = cleanup_stale_leases().unwrap();
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0], id);
+    }
+
+    #[test]
+    fn packages_json_nested_deserialization() {
+        // Simulates what Node MCP savePackage actually writes: nested scope/executor/acceptance
+        let (_dir, _guard) = setup_temp_runtime();
+        let nested_json = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "schema_version": 1,
+                "package_id": "pkg_abc",
+                "epic_id": "epic_1",
+                "step_id": "step_1",
+                "plan_revision": 1,
+                "project_path": "/tmp/proj",
+                "repo_root": "/tmp/proj",
+                "base_sha": "deadbeef",
+                "objective": "change value to 42",
+                "context_refs": [],
+                "scope": {
+                    "allowed_paths": ["src.ts"],
+                    "forbidden_paths": ["secrets/**"],
+                    "max_changed_files": 5
+                },
+                "preconditions": [],
+                "executor": {
+                    "preferred": "zcode",
+                    "fallbacks": [],
+                    "sandbox": "workspace-write",
+                    "timeout_seconds": 1800,
+                    "max_attempts": 3
+                },
+                "acceptance": [
+                    {"type": "command", "command_id": "test:mcp"},
+                    {"type": "git_diff_scope"},
+                    {"type": "verifier", "verifier_id": "default"}
+                ],
+                "authority": {
+                    "auto_edit_worktree": true,
+                    "auto_commit_candidate": true,
+                    "auto_merge": false,
+                    "auto_push": false,
+                    "auto_deploy": false
+                },
+                "stop_conditions": ["scope_expanded"],
+                "rollback": {"strategy": "preserve_worktree_and_stop"},
+                "status": "ready",
+                "sealed_at": "2026-08-11T00:00:00Z",
+                "package_hash": "abc123hash"
+            }]
+        });
+        std::fs::write(
+            packages_path(),
+            serde_json::to_string_pretty(&nested_json).unwrap(),
+        )
+        .unwrap();
+
+        let packages = read_ready_packages().unwrap();
+        assert_eq!(packages.len(), 1);
+        let pkg = &packages[0];
+
+        // Flat fields
+        assert_eq!(pkg.package_id, "pkg_abc");
+        assert_eq!(pkg.base_sha, "deadbeef");
+        assert_eq!(pkg.status, "ready");
+
+        // Projected from nested scope
+        assert_eq!(pkg.allowed_paths, vec!["src.ts"]);
+        assert_eq!(pkg.forbidden_paths, vec!["secrets/**"]);
+        assert_eq!(pkg.max_changed_files, 5);
+
+        // Projected from nested executor
+        assert_eq!(pkg.executor_preferred, "zcode");
+        assert_eq!(pkg.sandbox, "workspace-write");
+        assert_eq!(pkg.timeout_seconds, 1800);
+        assert_eq!(pkg.max_attempts, 3);
+
+        // Projected from nested acceptance (only command type, git_diff_scope/verifier excluded)
+        assert_eq!(pkg.acceptance_command_ids, vec!["test:mcp"]);
+    }
+
+    #[test]
+    fn packages_json_flat_legacy_format_still_works() {
+        // The e2e test uses a flat synthetic format — ensure backward compat
+        // by verifying that missing nested fields don't crash (serde defaults).
+        let (_dir, _guard) = setup_temp_runtime();
+        let flat_json = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "package_id": "pkg_flat",
+                "epic_id": "e1",
+                "step_id": "s1",
+                "plan_revision": 1,
+                "project_path": "/tmp/p",
+                "repo_root": "/tmp/p",
+                "base_sha": "aaa",
+                "objective": "do thing",
+                "scope": {
+                    "allowed_paths": ["*.ts"],
+                    "forbidden_paths": [],
+                    "max_changed_files": 10
+                },
+                "executor": {
+                    "preferred": "zcode"
+                },
+                "acceptance": [],
+                "status": "ready",
+                "package_hash": "h1"
+            }]
+        });
+        std::fs::write(
+            packages_path(),
+            serde_json::to_string_pretty(&flat_json).unwrap(),
+        )
+        .unwrap();
+
+        let packages = read_ready_packages().unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].executor_preferred, "zcode");
+        // Defaults should kick in for missing executor subfields
+        assert_eq!(packages[0].timeout_seconds, 3600);
+        assert_eq!(packages[0].max_attempts, 2);
+    }
+
+    #[test]
+    fn create_retry_preserves_parent() {
+        let (_dir, _guard) = setup_temp_runtime();
+        let parent_id = enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc123").unwrap();
+        // Simulate the parent having been processed (running + attempt 1)
+        let _exec = acquire_lease(&parent_id, "runner-1").unwrap();
+        release_lease(&parent_id, ExecutionStatus::Failed, Some("test failure")).unwrap();
+
+        let parent_before = get_execution(&parent_id).unwrap();
+        assert_eq!(parent_before.status, ExecutionStatus::Failed);
+
+        // Create retry
+        let child_id = create_retry_attempt(&parent_id).unwrap();
+        assert_ne!(child_id, parent_id);
+
+        // Parent must be unchanged
+        let parent_after = get_execution(&parent_id).unwrap();
+        assert_eq!(parent_after.status, ExecutionStatus::Failed);
+        assert_eq!(parent_after.attempt_no, 1);
+
+        // Child must have correct linkage
+        let child = get_execution(&child_id).unwrap();
+        assert_eq!(child.attempt_no, 2);
+        assert_eq!(child.parent_attempt_id, Some(parent_id.clone()));
+        assert_eq!(child.status, ExecutionStatus::Queued);
+        assert_eq!(child.package_id, "pkg1");
     }
 }

@@ -157,7 +157,9 @@
     "pause": "暂停",
     "cancel": "取消",
     "retry": "重试",
-    "cannotBypassServer": "UI 不能绕过服务端验证"
+    "cannotBypassServer": "UI 不能绕过服务端验证",
+    "runnerOn": "自动执行 开",
+    "runnerOff": "自动执行 关"
   },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",

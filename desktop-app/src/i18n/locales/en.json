@@ -157,7 +157,9 @@
     "pause": "Pause",
     "cancel": "Cancel",
     "retry": "Retry",
-    "cannotBypassServer": "UI cannot bypass server-side validation"
+    "cannotBypassServer": "UI cannot bypass server-side validation",
+    "runnerOn": "Auto ON",
+    "runnerOff": "Auto OFF"
   },
   "timeline": {
     "undoRemove": "Removed \"{{name}}\"",

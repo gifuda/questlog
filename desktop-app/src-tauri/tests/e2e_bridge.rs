@@ -20,12 +20,32 @@ fn zcode_available() -> bool {
 }
 
 fn init_git_repo(dir: &std::path::Path) -> String {
-    Command::new("git").args(["init"]).current_dir(dir).output().unwrap();
-    Command::new("git").args(["config", "user.email", "test@test.com"]).current_dir(dir).output().unwrap();
-    Command::new("git").args(["config", "user.name", "Test"]).current_dir(dir).output().unwrap();
+    Command::new("git")
+        .args(["init"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
     std::fs::write(dir.join("src.ts"), "export const value = 1;\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(dir).output().unwrap();
-    Command::new("git").args(["commit", "-m", "initial"]).current_dir(dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
 
     let sha = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -52,12 +72,13 @@ fn bridge_ready_package_to_zcode_execution() {
     let base_sha = init_git_repo(repo_dir.path());
 
     // Write packages.json (simulating what Node MCP enqueue_step produces)
+    // Use the **nested** TaskPackage shape that Node's savePackage actually writes.
     // Use an empty acceptance list — the test verifies the Runner correctly
     // REJECTS packages without acceptance commands (anti-fake-green gate).
-    // A full pass test would need a real project with acceptance commands.
     let packages = serde_json::json!({
         "version": 1,
         "packages": [{
+            "schema_version": 1,
             "package_id": "pkg_e2e_test",
             "epic_id": "epic_test",
             "step_id": "step_test",
@@ -66,12 +87,32 @@ fn bridge_ready_package_to_zcode_execution() {
             "repo_root": repo_dir.path().to_string_lossy(),
             "base_sha": base_sha,
             "objective": "Change the value in src.ts from 1 to 42. Only modify src.ts.",
-            "allowed_paths": ["src.ts"],
-            "forbidden_paths": [],
-            "max_changed_files": 5,
-            "executor_preferred": "zcode",
-            "acceptance_command_ids": [],
+            "context_refs": [],
+            "scope": {
+                "allowed_paths": ["src.ts"],
+                "forbidden_paths": [],
+                "max_changed_files": 5
+            },
+            "preconditions": [],
+            "executor": {
+                "preferred": "zcode",
+                "fallbacks": [],
+                "sandbox": "workspace-write",
+                "timeout_seconds": 3600,
+                "max_attempts": 2
+            },
+            "acceptance": [],
+            "authority": {
+                "auto_edit_worktree": true,
+                "auto_commit_candidate": true,
+                "auto_merge": false,
+                "auto_push": false,
+                "auto_deploy": false
+            },
+            "stop_conditions": ["scope_expanded"],
+            "rollback": {"strategy": "preserve_worktree_and_stop"},
             "status": "ready",
+            "sealed_at": "2026-08-11T00:00:00Z",
             "package_hash": "e2e_fake_hash"
         }]
     });
@@ -125,8 +166,14 @@ fn bridge_ready_package_to_zcode_execution() {
 
             // Main repo working tree must be untouched regardless
             let main_content = std::fs::read_to_string(repo_dir.path().join("src.ts")).unwrap();
-            assert!(main_content.contains("1"), "main workspace should be untouched");
-            assert!(!main_content.contains("42"), "main workspace should NOT have the change");
+            assert!(
+                main_content.contains("1"),
+                "main workspace should be untouched"
+            );
+            assert!(
+                !main_content.contains("42"),
+                "main workspace should NOT have the change"
+            );
         }
         Err(e) => {
             panic!("Runner crashed: {}", e);
@@ -135,7 +182,10 @@ fn bridge_ready_package_to_zcode_execution() {
 
     // Verify the package was consumed (no longer "ready")
     let remaining = app_lib::execution_store::read_ready_packages().unwrap();
-    assert!(remaining.is_empty(), "package should have been consumed by the runner");
+    assert!(
+        remaining.is_empty(),
+        "package should have been consumed by the runner"
+    );
 
     // Clean up worktrees
     let _ = Command::new("git")

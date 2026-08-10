@@ -188,20 +188,17 @@ impl std::fmt::Display for ScopeViolation {
 /// Exact paths match exactly.
 pub fn glob_match(pattern: &str, path: &str) -> bool {
     // Normalize: if pattern ends with /**, it matches everything under that dir
-    if pattern.ends_with("/**") {
-        let prefix = &pattern[..pattern.len() - 3];
+    if let Some(prefix) = pattern.strip_suffix("/**") {
         return path.starts_with(prefix);
     }
 
     // If pattern ends with *, it's a prefix + suffix match
-    if pattern.ends_with('*') {
-        let prefix = &pattern[..pattern.len() - 1];
+    if let Some(prefix) = pattern.strip_suffix('*') {
         return path.starts_with(prefix);
     }
 
     // If pattern starts with *, suffix match
-    if pattern.starts_with('*') {
-        let suffix = &pattern[1..];
+    if let Some(suffix) = pattern.strip_prefix('*') {
         return path.ends_with(suffix);
     }
 
@@ -211,6 +208,7 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 
 /// Create a candidate commit in the worktree with QuestLog trailers.
 /// Only commits paths that are in the allowed scope.
+#[allow(clippy::too_many_arguments)]
 pub fn create_candidate_commit(
     worktree_path: &Path,
     epic_id: &str,
@@ -279,7 +277,9 @@ pub fn create_candidate_commit(
         .output()
         .map_err(|e| format!("git rev-parse failed: {e}"))?;
 
-    let sha = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
+    let sha = String::from_utf8_lossy(&sha_output.stdout)
+        .trim()
+        .to_string();
     if sha.is_empty() {
         return Err("empty commit SHA".to_string());
     }

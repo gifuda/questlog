@@ -97,3 +97,46 @@ export interface GlobalEpic extends Epic {
   project: string;
   project_path: string;
 }
+
+// ─── AttemptBundle types (execution memory) ───
+
+/** Manifest for an attempt bundle — the index entry for an execution's evidence. */
+export interface AttemptManifest {
+  execution_id: string;
+  attempt_no: number;
+  parent_attempt_id?: string;
+  package_id: string;
+  plan_revision: number;
+  executor: string;
+  hypothesis?: string;
+  base_sha: string;
+  candidate_sha?: string;
+  epic_id: string;
+  step_id: string;
+  task_package_ref: string;
+  environment_snapshot_ref: string;
+  raw_trace_ref: string;
+  stdout_ref?: string;
+  stderr_ref?: string;
+  diff_ref?: string;
+  candidate_ref?: string;
+  verifier_ref?: string;
+  decisions_ref?: string;
+  outcome: string;
+  integrity_hash?: string;
+  created_at: number;
+  sealed_at?: number;
+}
+
+/** A file within an attempt bundle directory. */
+export interface BundleFile {
+  name: string;
+  size: number;
+}
+
+/** Full detail for a single attempt bundle. */
+export interface AttemptDetail {
+  manifest: AttemptManifest;
+  bundle_dir: string;
+  files: BundleFile[];
+}

@@ -17,7 +17,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 const RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -38,7 +38,7 @@ impl FileLock {
     }
 
     pub fn acquire_with_timeout(data_path: &Path, timeout: Duration) -> Result<Self, String> {
-        let lock_path = data_path.with_extension(
+        let _lock_path = data_path.with_extension(
             data_path
                 .extension()
                 .map(|e| format!("{}.lock", e.to_string_lossy()))
@@ -46,11 +46,7 @@ impl FileLock {
         );
         // Simpler and matches the Node side: just append ".lock" to the full path.
         let lock_path = PathBuf::from(format!("{}.lock", data_path.display()));
-        let lock_id = format!(
-            "{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        );
+        let lock_id = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4());
 
         let deadline = Instant::now() + timeout;
 
@@ -170,7 +166,8 @@ mod tests {
         fs::write(&lock_path, "stale-owner").unwrap();
         // Set modification time to 30 seconds ago.
         let old_time = SystemTime::now() - Duration::from_secs(30);
-        let _ = filetime::set_file_mtime(&lock_path, filetime::FileTime::from_system_time(old_time));
+        let _ =
+            filetime::set_file_mtime(&lock_path, filetime::FileTime::from_system_time(old_time));
 
         // Should acquire despite the stale lock.
         let _lock = FileLock::acquire(&file).unwrap();

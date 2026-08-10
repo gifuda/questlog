@@ -121,10 +121,7 @@ fn salvage_todos(raw: &str, project_dir: &Path) -> Option<TodosFile> {
             .unwrap_or(1),
         project,
         items,
-        revision: root
-            .get("revision")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        revision: root.get("revision").and_then(|v| v.as_u64()).unwrap_or(0),
     })
 }
 
@@ -132,6 +129,7 @@ fn salvage_todos(raw: &str, project_dir: &Path) -> Option<TodosFile> {
 /// - status: unknown → "active" (the item stays visible and actionable)
 /// - type:   unknown → "todo"
 /// - priority: unknown → "medium"
+///
 /// Returns the value unchanged if it's not an object or the fields are absent.
 fn coerce_enum_fields(mut val: serde_json::Value) -> serde_json::Value {
     let obj = match val.as_object_mut() {
@@ -150,7 +148,10 @@ fn coerce_enum_fields(mut val: serde_json::Value) -> serde_json::Value {
     }
     if let Some(p) = obj.get("priority").and_then(|v| v.as_str()) {
         if !["high", "medium", "low"].contains(&p) {
-            obj.insert("priority".into(), serde_json::Value::String("medium".into()));
+            obj.insert(
+                "priority".into(),
+                serde_json::Value::String("medium".into()),
+            );
         }
     }
     val
@@ -220,7 +221,7 @@ mod tests {
 
     #[test]
     fn count_active_splits_by_type_and_skips_non_active() {
-        let mut data = TodosFile {
+        let data = TodosFile {
             version: 1,
             project: "p".into(),
             items: vec![
@@ -238,7 +239,7 @@ mod tests {
 
     #[test]
     fn count_active_returns_zeros_for_empty() {
-        let mut data = TodosFile {
+        let data = TodosFile {
             version: 1,
             project: "p".into(),
             items: vec![],
@@ -355,9 +356,21 @@ mod tests {
         // The bad enum values are coerced to safe defaults.
         let by_id: std::collections::HashMap<&str, &TodoItem> =
             data.items.iter().map(|i| (i.id.as_str(), i)).collect();
-        assert_eq!(by_id["bad-status"].status, ItemStatus::Active, "pending → active");
-        assert_eq!(by_id["bad-type"].item_type, ItemType::Todo, "feature → todo");
-        assert_eq!(by_id["bad-prio"].priority, Priority::Medium, "urgent → medium");
+        assert_eq!(
+            by_id["bad-status"].status,
+            ItemStatus::Active,
+            "pending → active"
+        );
+        assert_eq!(
+            by_id["bad-type"].item_type,
+            ItemType::Todo,
+            "feature → todo"
+        );
+        assert_eq!(
+            by_id["bad-prio"].priority,
+            Priority::Medium,
+            "urgent → medium"
+        );
         // Good items are untouched.
         assert_eq!(by_id["good-1"].status, ItemStatus::Active);
     }

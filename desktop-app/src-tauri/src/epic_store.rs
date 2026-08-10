@@ -333,15 +333,15 @@ mod tests {
             priority: "P1".into(),
             parent_id: None,
             depends_on: vec![],
-        blocks: vec![],
-        links: EpicLinks::default(),
-        max_active: None,
-        acceptance: "".into(),
-        close_reason: "".into(),
-        created_at: BASE_TS.into(),
-        updated_at: BASE_TS.into(),
+            blocks: vec![],
+            links: EpicLinks::default(),
+            max_active: None,
+            acceptance: "".into(),
+            close_reason: "".into(),
+            created_at: BASE_TS.into(),
+            updated_at: BASE_TS.into(),
+        }
     }
-}
 
     fn step(id: &str, epic_id: &str) -> Step {
         Step {
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn parent_progress_is_mean_of_children() {
         // E1 → E1a (62) + E1b (100) → mean = 81
-        let mut top = epic("E1");
+        let top = epic("E1");
         let mut ca = epic("E1a");
         ca.parent_id = Some("E1".into());
         let mut cb = epic("E1b");
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn child_with_no_steps_contributes_zero_to_parent_mean() {
-        let mut top = epic("E1");
+        let top = epic("E1");
         let mut ca = epic("E1a");
         ca.parent_id = Some("E1".into());
         let mut cb = epic("E1b");
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn three_level_nesting_top_from_children_from_steps() {
-        let mut top = epic("E1");
+        let top = epic("E1");
         let mut ca = epic("E1a");
         ca.parent_id = Some("E1".into());
         let mut cb = epic("E1b");
@@ -508,7 +508,7 @@ mod tests {
         // E1 → E2 → E3 → E1 (cycle), plus healthy child E1a of E1.
         // E1's children = [E2, E1a]. E2 → E3 → E1 (visited, cut, 0).
         // E1a observed → 100. E1 = mean(0, 100) = 50.
-        let mut e1 = epic("E1");
+        let e1 = epic("E1");
         let mut e2 = epic("E2");
         e2.parent_id = Some("E1".into());
         let mut e3 = epic("E3");

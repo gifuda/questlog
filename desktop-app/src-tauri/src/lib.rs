@@ -1,8 +1,9 @@
+pub mod attempt_bundle;
 mod commands;
 mod discovery;
 pub mod epic_store;
-pub mod executors;
 pub mod execution_store;
+pub mod executors;
 pub mod file_lock;
 mod models;
 pub mod runner;
@@ -54,6 +55,11 @@ pub fn run() {
             commands::retry_execution,
             commands::pause_execution,
             commands::cleanup_stale_executions,
+            commands::set_runner_enabled,
+            commands::is_runner_running,
+            // 执行记忆 (AttemptBundle Trace Query)
+            commands::get_attempt_bundles,
+            commands::get_attempt_detail,
         ])
         .setup(|app| {
             tray::setup_tray(app);

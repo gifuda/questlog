@@ -784,6 +784,7 @@ fn epics_to_json(data: &crate::models::EpicsFile, project_path: &str) -> serde_j
                         "actionable": actionable_ids.contains(&s.id),
                         "todo_ref": s.links.todo_ref,
                         "doc": s.links.doc,
+                        "package": s.package,
                         "updated_at": s.updated_at,
                     })
                 })
@@ -928,15 +929,64 @@ pub fn cancel_execution(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn retry_execution(id: String) -> Result<(), String> {
-    // Move the execution back to queued for retry
-    crate::execution_store::update_execution(
-        &id,
-        crate::execution_store::ExecutionUpdates {
-            status: Some(crate::execution_store::ExecutionStatus::Queued),
-            ..Default::default()
-        },
-    )
+pub fn retry_execution(id: String) -> Result<String, String> {
+    // Evidence-aware retry: create a NEW attempt preserving the parent's evidence.
+    // The parent execution row is never modified — its bundle stays sealed.
+    crate::execution_store::create_retry_attempt(&id)
+}
+
+/// Get all attempt bundles for a given step (Trace Query).
+/// Returns manifest-level summaries, sorted by attempt_no ascending.
+#[tauri::command]
+pub fn get_attempt_bundles(
+    step_id: String,
+) -> Result<Vec<crate::attempt_bundle::AttemptManifest>, String> {
+    crate::attempt_bundle::list_bundles_for_step(&step_id)
+}
+
+/// Get a single attempt bundle's full manifest + file reference paths.
+/// The frontend reads raw files on-demand from the returned bundle dir.
+#[tauri::command]
+pub fn get_attempt_detail(execution_id: String) -> Result<AttemptDetail, String> {
+    let (manifest, dir) = crate::attempt_bundle::read_bundle(&execution_id)?;
+    Ok(AttemptDetail {
+        manifest,
+        bundle_dir: dir.to_string_lossy().to_string(),
+        files: list_bundle_files(&dir),
+    })
+}
+
+/// Response type for get_attempt_detail.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttemptDetail {
+    pub manifest: crate::attempt_bundle::AttemptManifest,
+    pub bundle_dir: String,
+    pub files: Vec<BundleFile>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BundleFile {
+    pub name: String,
+    pub size: u64,
+}
+
+fn list_bundle_files(dir: &std::path::Path) -> Vec<BundleFile> {
+    std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            // Skip temp files
+            if name.contains("tmp-") {
+                return None;
+            }
+            let size = e.metadata().ok()?.len();
+            Some(BundleFile { name, size })
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -952,6 +1002,16 @@ pub fn pause_execution(id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn cleanup_stale_executions() -> Result<Vec<String>, String> {
     crate::execution_store::cleanup_stale_leases()
+}
+
+#[tauri::command]
+pub fn set_runner_enabled(enabled: bool) -> Result<bool, String> {
+    Ok(crate::runner::set_enabled(enabled))
+}
+
+#[tauri::command]
+pub fn is_runner_running() -> Result<bool, String> {
+    Ok(crate::runner::is_running())
 }
 
 #[cfg(test)]

@@ -21,10 +21,10 @@
 pub mod zcode;
 pub use zcode::ZCodeExecutor;
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 /// Result of probing for an executor.
 #[derive(Debug, Clone, Serialize)]
@@ -125,9 +125,7 @@ impl CodexExecutor {
                     .get("message")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let success = val
-                    .get("success")
-                    .and_then(|v| v.as_bool());
+                let success = val.get("success").and_then(|v| v.as_bool());
                 events.push(ExecutorEvent {
                     event_type,
                     session_id,
@@ -149,9 +147,7 @@ impl Default for CodexExecutor {
 
 impl Executor for CodexExecutor {
     fn probe(&self) -> ExecutorProbe {
-        let output = Command::new(&self.binary)
-            .arg("--version")
-            .output();
+        let output = Command::new(&self.binary).arg("--version").output();
 
         match output {
             Ok(o) if o.status.success() => {
@@ -192,10 +188,10 @@ impl Executor for CodexExecutor {
         let stdout_path = output_dir.join("stdout.jsonl");
         let stderr_path = output_dir.join("stderr.log");
 
-        let stdout_file = std::fs::File::create(&stdout_path)
-            .map_err(|e| format!("create stdout: {e}"))?;
-        let stderr_file = std::fs::File::create(&stderr_path)
-            .map_err(|e| format!("create stderr: {e}"))?;
+        let stdout_file =
+            std::fs::File::create(&stdout_path).map_err(|e| format!("create stdout: {e}"))?;
+        let stderr_file =
+            std::fs::File::create(&stderr_path).map_err(|e| format!("create stderr: {e}"))?;
 
         let child = Command::new(&self.binary)
             .args(["exec", "--json"])
@@ -217,7 +213,10 @@ impl Executor for CodexExecutor {
         })
     }
 
-    fn wait_and_collect(&mut self, mut handle: ExecutionHandle) -> Result<Vec<ExecutorEvent>, String> {
+    fn wait_and_collect(
+        &mut self,
+        mut handle: ExecutionHandle,
+    ) -> Result<Vec<ExecutorEvent>, String> {
         let status = handle
             .child
             .wait()
@@ -257,10 +256,7 @@ impl Executor for CodexExecutor {
 
 /// Find the path of an executable (like `which`).
 fn which(binary: &str) -> Option<String> {
-    let output = Command::new("which")
-        .arg(binary)
-        .output()
-        .ok()?;
+    let output = Command::new("which").arg(binary).output().ok()?;
 
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
