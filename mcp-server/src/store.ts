@@ -206,6 +206,79 @@ async function writeRegistry(registry: Registry): Promise<void> {
 }
 
 /**
+ * Resolve a directory's git common dir without spawning git (pure fs).
+ * Handles both a `.git` directory and a `.git` file (linked worktree):
+ *   - directory → realpath of the .git dir
+ *   - file with `gitdir: <path>` → resolve relative to the .git file's dir;
+ *     if that gitdir has a `commondir` file (linked worktree), resolve it
+ *     relative to the gitdir to get the shared repo root.
+ * Returns the canonical common dir, or null when the path is not in a repo.
+ */
+export async function resolveGitCommonDir(dir: string): Promise<string | null> {
+  let cur = dir;
+  for (;;) {
+    const gitPath = path.join(cur, ".git");
+    try {
+      const st = await fs.stat(gitPath);
+      if (st.isDirectory()) {
+        return await fs.realpath(gitPath);
+      }
+      if (st.isFile()) {
+        const content = await fs.readFile(gitPath, "utf-8");
+        const m = content.match(/^gitdir:\s*(.+)$/m);
+        if (!m) return null;
+        const gitdir = path.resolve(cur, m[1].trim());
+        // Linked worktree: gitdir/commondir points at the shared repo root.
+        try {
+          const commondirRaw = await fs.readFile(path.join(gitdir, "commondir"), "utf-8");
+          return await fs.realpath(path.resolve(gitdir, commondirRaw.trim()));
+        } catch {
+          return await fs.realpath(gitdir);
+        }
+      }
+    } catch {
+      // no .git here
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) return null;
+    cur = parent;
+  }
+}
+
+/**
+ * Route a working directory to the registered project that shares its git
+ * repository (e.g. a checkout/worktree of a registered project). This fixes
+ * the "write-to-checkout, read-from-registry" split: registration calls land
+ * in the .epics.json the desktop board actually reads.
+ *
+ * Matching order:
+ *   1. cwd realpath equals a registered project path → that project.
+ *   2. git common dir equals a registered project's git common dir → the
+ *      first registered match (registration has one entry per repo today).
+ * Returns the registered project's canonical path, or null when no match.
+ */
+export async function resolveRegisteredProject(cwd: string): Promise<string | null> {
+  const registry = await readRegistry();
+  const cwdCanonical = await fs.realpath(cwd).catch(() => cwd);
+
+  // 1. exact path match
+  for (const p of registry.projects) {
+    const pc = await fs.realpath(p.path).catch(() => p.path);
+    if (pc === cwdCanonical) return pc;
+  }
+
+  // 2. same git repository (common dir equality)
+  const cwdGit = await resolveGitCommonDir(cwdCanonical);
+  if (!cwdGit) return null;
+  for (const p of registry.projects) {
+    const pc = await fs.realpath(p.path).catch(() => p.path);
+    const pg = await resolveGitCommonDir(pc);
+    if (pg && pg === cwdGit) return pc;
+  }
+  return null;
+}
+
+/**
  * Validate + canonicalize an explicitly-supplied project directory.
  * Allowed set = the current working directory, its descendants, or a directory
  * already registered in ~/.todo-board.json. Rejects `..` escapes, outside

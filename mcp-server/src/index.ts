@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import path from "node:path";
-import { pushTodo, addAndSave, listTodos, updateAndSave, resolveProjectDir, findSubProjects, searchTodos, suggestSimilarProject, readFeedback, canonicalizeProjectDir } from "./store.js";
+import { pushTodo, addAndSave, listTodos, updateAndSave, resolveProjectDir, findSubProjects, searchTodos, suggestSimilarProject, readFeedback, canonicalizeProjectDir, resolveRegisteredProject } from "./store.js";
 import { pushEpic, updateEpic, pushStep, updateStep, listEpics, epicProgress, actionableSteps } from "./epic-store.js";
 
 const server = new McpServer({
@@ -29,6 +29,20 @@ async function resolveCwd(
     return { error: `project_dir 非法或被拒绝（需为当前工作区子目录或已注册项目）: ${input.project_dir}` };
   }
   return { cwd: canonical };
+}
+
+/**
+ * Fallback for epic-registration tools: route to the registered project that
+ * shares the cwd's git repository (checkout/worktree of a registered project),
+ * so registration lands in the .epics.json the desktop board reads. Falls back
+ * to the tool's original default when there is no registered match.
+ */
+async function epicCwd(
+  fallback: () => Promise<string> | string
+): Promise<{ cwd: string } | { error: string }> {
+  const routed = await resolveRegisteredProject(process.cwd());
+  const cwd = routed ?? (await fallback());
+  return { cwd };
 }
 
 // ─── push_todo ───
@@ -299,7 +313,7 @@ server.tool(
     project_dir: z.string().optional().describe("Override auto-detection: absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await resolveCwd(input, () => resolveProjectDir(process.cwd(), input.title, []));
+    const resolved = await epicCwd(() => resolveProjectDir(process.cwd(), input.title, []));
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const result = await pushEpic(cwd, input);
@@ -358,7 +372,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await resolveCwd(input, () => process.cwd());
+    const resolved = await epicCwd(() => process.cwd());
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const { id, ...patch } = input;
@@ -390,7 +404,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await resolveCwd(input, () => process.cwd());
+    const resolved = await epicCwd(() => process.cwd());
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const result = await pushStep(cwd, input);
@@ -445,7 +459,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await resolveCwd(input, () => process.cwd());
+    const resolved = await epicCwd(() => process.cwd());
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const { id, ...patch } = input;
@@ -496,7 +510,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await resolveCwd(input, () => process.cwd());
+    const resolved = await epicCwd(() => process.cwd());
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const data = await listEpics(cwd);
