@@ -1,8 +1,12 @@
 mod commands;
 mod discovery;
-mod epic_store;
+pub mod epic_store;
+pub mod executors;
+pub mod execution_store;
 pub mod file_lock;
 mod models;
+pub mod runner;
+pub mod runner_git;
 mod store;
 mod tray;
 mod watcher;
