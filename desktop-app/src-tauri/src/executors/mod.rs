@@ -19,6 +19,7 @@
 //! - When a CLI becomes available, the adapter works without changes
 
 pub mod zcode;
+pub use zcode::ZCodeExecutor;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

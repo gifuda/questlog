@@ -523,14 +523,83 @@ pub fn execution_output_dir(execution_id: &str) -> PathBuf {
     outputs_dir().join(execution_id)
 }
 
+// ─── Package bridge: read packages.json written by Node MCP ───
+
+/// Minimal TaskPackage representation for the Runner to consume.
+/// Only the fields the Runner needs — the full schema lives in Node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskPackageSummary {
+    pub package_id: String,
+    pub epic_id: String,
+    pub step_id: String,
+    pub plan_revision: u32,
+    pub project_path: String,
+    pub repo_root: String,
+    pub base_sha: String,
+    pub objective: String,
+    pub allowed_paths: Vec<String>,
+    pub forbidden_paths: Vec<String>,
+    pub max_changed_files: u32,
+    pub executor_preferred: String,
+    pub acceptance_command_ids: Vec<String>,
+    pub status: String,
+    pub package_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackagesFile {
+    packages: Vec<TaskPackageSummary>,
+}
+
+fn packages_path() -> PathBuf {
+    runtime_dir().join("packages.json")
+}
+
+/// Read all ready packages from packages.json (written by Node MCP enqueue_step).
+/// Returns packages with status "ready" — these are the ones the Runner should pick up.
+pub fn read_ready_packages() -> Result<Vec<TaskPackageSummary>, String> {
+    let path = packages_path();
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read packages.json: {e}"))?;
+    let file: PackagesFile = serde_json::from_str(&raw).map_err(|e| format!("parse packages.json: {e}"))?;
+    Ok(file.packages.into_iter().filter(|p| p.status == "ready").collect())
+}
+
+/// Mark a package as consumed (status → "passed" or "failed") in packages.json.
+/// This prevents the Runner from re-picking the same package.
+pub fn mark_package_status(package_id: &str, status: &str) -> Result<(), String> {
+    let path = packages_path();
+    if !path.exists() {
+        return Ok(());
+    }
+    file_lock::with_file_lock(&path, || {
+        let raw = std::fs::read_to_string(&path).map_err(|e| format!("read: {e}"))?;
+        let mut json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("parse: {e}"))?;
+        if let Some(packages) = json.get_mut("packages").and_then(|p| p.as_array_mut()) {
+            for pkg in packages.iter_mut() {
+                if pkg.get("package_id").and_then(|v| v.as_str()) == Some(package_id) {
+                    pkg["status"] = serde_json::Value::String(status.to_string());
+                }
+            }
+        }
+        let tmp = path.with_extension("json.tmp-bridge");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&json).unwrap())
+            .map_err(|e| format!("write tmp: {e}"))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
+        Ok(())
+    })
+}
+
+/// Shared mutex for tests that touch QUESTLOG_RUNTIME env var.
+/// Placed at module level (not in #[cfg(test)]) so cross-module tests can reference it.
+#[cfg(test)]
+pub static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Serialize tests that share the QUESTLOG_RUNTIME env var — Rust runs
-    // tests in parallel by default, and env vars are process-global.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn setup_temp_runtime() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
         let guard = TEST_LOCK.lock().unwrap();

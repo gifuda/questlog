@@ -7,6 +7,8 @@ use tauri::{AppHandle, Emitter, Manager};
 const FILENAME: &str = ".todos.json";
 const EPICS_FILENAME: &str = ".epics.json";
 const REGISTRY_FILENAME: &str = ".todo-board.json";
+const EXECUTIONS_FILENAME: &str = "executions.json";
+const PACKAGES_FILENAME: &str = "packages.json";
 
 pub fn start_watching(app: &AppHandle) {
     let state = app.state::<AppState>();
@@ -53,6 +55,17 @@ pub fn start_watching(app: &AppHandle) {
             } else {
                 log::info!("watching registry: {}", rp.display());
             }
+        }
+    }
+
+    // Watch the Runtime Store directory for execution/package state changes.
+    // This lets the UI refresh when the Runner processes a package.
+    let runtime_dir = crate::execution_store::runtime_dir();
+    if runtime_dir.exists() {
+        if let Err(e) = watcher.watch(&runtime_dir, RecursiveMode::NonRecursive) {
+            log::warn!("failed to watch runtime dir: {e}");
+        } else {
+            log::info!("watching runtime: {}", runtime_dir.display());
         }
     }
 
@@ -108,6 +121,12 @@ pub fn start_watching(app: &AppHandle) {
                                 "registry changed, reloaded {} projects",
                                 new_projects.len()
                             );
+                        }
+
+                        // executions.json or packages.json changed → emit executions-changed
+                        // This lets the ExecutionPanel UI refresh when the Runner updates state.
+                        if fname == EXECUTIONS_FILENAME || fname == PACKAGES_FILENAME {
+                            let _ = app_handle.emit("executions-changed", ());
                         }
                     }
                 }

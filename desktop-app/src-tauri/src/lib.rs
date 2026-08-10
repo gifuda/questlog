@@ -60,6 +60,21 @@ pub fn run() {
             let handle = app.handle().clone();
             watcher::start_watching(&handle);
 
+            // Start the Runner background thread.
+            // Enabled by config: QUESTLOG_RUNNER=1 to turn on.
+            // When disabled, the Runner thread doesn't spawn — zero overhead.
+            let runner_enabled = std::env::var("QUESTLOG_RUNNER")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
+            if runner_enabled {
+                runner::start_runner_thread(runner::RunnerConfig {
+                    enabled: true,
+                    poll_interval: std::time::Duration::from_secs(10),
+                    runner_id: format!("runner-{}", std::process::id()),
+                });
+                log::info!("QuestLog Runner enabled via QUESTLOG_RUNNER=1");
+            }
+
             // Hide main window on close instead of quitting (tray keeps app alive)
             if let Some(main_win) = app.get_webview_window("main") {
                 let win = main_win.clone();

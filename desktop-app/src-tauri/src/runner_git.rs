@@ -219,16 +219,10 @@ pub fn create_candidate_commit(
     plan_revision: u32,
     execution_id: &str,
     allowed_patterns: &[String],
+    base_sha: &str,
 ) -> Result<Option<String>, String> {
-    // Get changed paths
-    let base_sha_output = Command::new("git")
-        .args(["merge-base", "HEAD", "HEAD~0"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| format!("git merge-base: {e}"))?;
-
-    // Get changes relative to the initial state
-    let changed = get_changed_paths(worktree_path, "")?;
+    // Get changes relative to the base SHA
+    let changed = get_changed_paths(worktree_path, base_sha)?;
     if changed.is_empty() {
         return Ok(None); // No changes — no commit
     }
