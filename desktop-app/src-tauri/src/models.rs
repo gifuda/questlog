@@ -99,6 +99,21 @@ pub struct TodosFile {
     pub version: u32,
     pub project: String,
     pub items: Vec<TodoItem>,
+    /// Monotonic revision counter for CAS concurrency control.
+    /// Old files without this field default to 0 (serde default).
+    #[serde(default)]
+    pub revision: u64,
+}
+
+impl Default for TodosFile {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            project: String::new(),
+            items: vec![],
+            revision: 0,
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -310,6 +325,10 @@ pub struct EpicsFile {
     pub project: String,
     pub epics: Vec<Epic>,
     pub steps: Vec<Step>,
+    /// Monotonic revision counter for CAS concurrency control.
+    /// Old files without this field default to 0 (serde default).
+    #[serde(default)]
+    pub revision: u64,
 }
 
 impl Default for EpicsFile {
@@ -319,6 +338,7 @@ impl Default for EpicsFile {
             project: String::new(),
             epics: vec![],
             steps: vec![],
+            revision: 0,
         }
     }
 }

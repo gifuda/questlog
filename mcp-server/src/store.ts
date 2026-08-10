@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { TodosFile, TodoItem, validateItem, validateTransition } from "./schema.js";
+import { withFileLock } from "./file-lock.js";
 
 const FILENAME = ".todos.json";
 /**
@@ -38,6 +39,8 @@ interface RegistryEntry { name: string; path: string }
 interface Registry {
   projects: RegistryEntry[];
   feedback?: Record<string, { pushes?: number; archived_soon?: number }>;
+  /** Monotonic revision for CAS. */
+  revision?: number;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [key: string]: any; // preserve unknown fields (e.g. Rust-side `trash`) on write-back
 }
@@ -139,29 +142,63 @@ export async function findSubProjects(parent: string): Promise<string[]> {
 }
 
 /**
- * Read a JSON store defensively:
- * - File missing (ENOENT) → empty structure (first push creates it).
- * - Corrupt JSON → rename the file to `<name>.bak.<ts>` so the original data is
- *   never silently overwritten, log a warning, and return empty. The backup lets
- *   the user recover; the next write starts fresh instead of clobbering.
+ * Result of a defensive store read.
+ * - `ok` → valid data returned.
+ * - `notFound` → file does not exist (ENOENT) — caller may create it.
+ * - `error` → permission denied, IO failure, or corrupt JSON — the caller
+ *   MUST fail-closed: never fall back to empty data and write over the real
+ *   file, because that would silently destroy the user's data. The corrupt
+ *   file is preserved as a `.bak` backup for recovery.
  */
-async function readStore(filePath: string): Promise<TodosFile> {
+export type ReadResult<T> =
+  | { ok: true; data: T }
+  | { notFound: true }
+  | { error: string };
+
+/**
+ * Read a JSON store with strict fail-closed semantics:
+ * - File missing (ENOENT only) → `{ notFound: true }` — caller may create it.
+ * - Permission denied / IO error → `{ error }` — caller must NOT write.
+ * - Corrupt JSON → rename to `<name>.bak.<ts>`, return `{ error }` — caller
+ *   must NOT write over the backup.
+ * The original data is never silently overwritten; a corrupt file is preserved.
+ */
+export async function readStoreSafe(filePath: string): Promise<ReadResult<TodosFile>> {
   let raw: string;
   try {
     raw = await fs.readFile(filePath, "utf-8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return { version: 1, project: path.basename(path.dirname(filePath)), items: [] };
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return { notFound: true };
     }
-    console.warn(`[store] failed to read ${filePath}: ${(err as Error).message}`);
-    return { version: 1, project: path.basename(path.dirname(filePath)), items: [] };
+    // Permission, IO, or any other non-ENOENT error → fail-closed.
+    return { error: `read error (${code ?? "unknown"}): ${(err as Error).message}` };
   }
   try {
-    return JSON.parse(raw) as TodosFile;
-  } catch {
+    return { ok: true, data: JSON.parse(raw) as TodosFile };
+  } catch (err) {
+    // Corrupt JSON — preserve the file as a backup, then signal error.
     await backupCorruptFile(filePath, "store");
+    return { error: `corrupt JSON (backed up): ${(err as Error).message}` };
+  }
+}
+
+/**
+ * Convenience wrapper: returns the parsed data, or an empty default if the
+ * file is genuinely missing (ENOENT). Throws on permission/IO/corrupt errors.
+ *
+ * The empty-on-ENOENT semantic is safe because a missing file has no data to
+ * lose. All other error paths propagate, ensuring the caller never writes over
+ * real user data after a failed read.
+ */
+export async function readStoreOrThrow(filePath: string): Promise<TodosFile> {
+  const result = await readStoreSafe(filePath);
+  if ("ok" in result) return result.data;
+  if ("notFound" in result) {
     return { version: 1, project: path.basename(path.dirname(filePath)), items: [] };
   }
+  throw new Error(result.error);
 }
 
 /** Rename a corrupt data file to `<name>.bak.<timestamp>` so it survives. */
@@ -175,7 +212,13 @@ export async function backupCorruptFile(filePath: string, label: string): Promis
   }
 }
 
+/**
+ * Write .todos.json atomically. Bumps revision for CAS.
+ * Does NOT acquire a lock — callers needing cross-process safety must
+ * wrap the read+write in withFileLock.
+ */
 async function writeStore(filePath: string, data: TodosFile): Promise<void> {
+  data.revision = (data.revision ?? 0) + 1;
   const tmp = filePath + ".tmp-" + crypto.randomUUID();
   await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
   await fs.rename(tmp, filePath);
@@ -200,9 +243,27 @@ async function readRegistry(): Promise<Registry> {
 
 async function writeRegistry(registry: Registry): Promise<void> {
   const regPath = registryPath();
+  registry.revision = (registry.revision ?? 0) + 1;
   const tmp = regPath + ".tmp-" + crypto.randomUUID();
   await fs.writeFile(tmp, JSON.stringify(registry, null, 2), "utf-8");
   await fs.rename(tmp, regPath);
+}
+
+/**
+ * Lock-protected registry mutation: read, apply, write back.
+ * Used for operations that need read-modify-write atomicity on the registry.
+ */
+async function mutateRegistry<T>(fn: (reg: Registry) => T): Promise<T> {
+  return withFileLock(
+    registryPath(),
+    async () => {
+      const reg = await readRegistry();
+      const result = fn(reg);
+      await writeRegistry(reg);
+      return result;
+    },
+    10_000,
+  );
 }
 
 /**
@@ -315,25 +376,24 @@ export async function canonicalizeProjectDir(dir: string, cwd: string): Promise<
 }
 
 /** Register a project in the central registry (~/.todo-board.json).
- *  Does NOT auto-register if cwd looks like a typo of an existing project. */
+ *  Does NOT auto-register if cwd looks like a typo of an existing project.
+ *  Uses lock-protected mutation for cross-process safety. */
 export async function registerProject(cwd: string): Promise<void> {
   const name = path.basename(cwd);
-  const registry = await readRegistry();
+  return mutateRegistry((registry) => {
+    // Already registered by path
+    if (registry.projects.some((p) => p.path === cwd)) return;
 
-  // Already registered by path
-  if (registry.projects.some((p) => p.path === cwd)) return;
+    // Check for typo — if the name is within edit distance 2 of an existing project,
+    // don't create an orphan.
+    const nameLower = name.toLowerCase();
+    const isTypo = registry.projects.some(
+      (p) => p.name.toLowerCase() !== nameLower && editDistance(nameLower, p.name.toLowerCase()) <= 2,
+    );
+    if (isTypo) return; // Silently skip
 
-  // Check for typo — if the name is within edit distance 2 of an existing project,
-  // don't create an orphan. The item still saves to .todos.json, it just won't
-  // pollute the desktop board.
-  const similar = await suggestSimilarProject(name);
-  if (similar) {
-    // Silently skip registration to avoid orphan projects
-    return;
-  }
-
-  registry.projects.push({ name, path: cwd });
-  await writeRegistry(registry);
+    registry.projects.push({ name, path: cwd });
+  });
 }
 
 export function pushTodo(cwd: string, input: {
@@ -382,35 +442,62 @@ export function pushTodo(cwd: string, input: {
 }
 
 export async function listTodos(cwd: string): Promise<{ data: TodosFile } | { error: string }> {
-  const filePath = resolveTodoPath(cwd);
-  const data = await readStore(filePath);
-  return { data };
+  const result = await readStoreSafe(resolveTodoPath(cwd));
+  if ("ok" in result) return { data: result.data };
+  if ("notFound" in result) {
+    return { data: { version: 1, project: path.basename(cwd), items: [] } };
+  }
+  return { error: result.error };
 }
 
 export async function addAndSave(cwd: string, item: TodoItem): Promise<{ ok: true } | { error: string }> {
   const filePath = resolveTodoPath(cwd);
-  const data = await readStore(filePath);
+  // Acquire cross-process lock for the read-modify-write.
+  return withFileLock(
+    filePath,
+    async () => {
+      // Fail-closed: a corrupt or unreadable file must not be overwritten.
+      const result = await readStoreSafe(filePath);
+      let data: TodosFile;
+      if ("ok" in result) {
+        data = result.data;
+      } else if ("notFound" in result) {
+        data = { version: 1, project: path.basename(cwd), items: [], revision: 0 };
+      } else {
+        return { error: result.error };
+      }
 
-  const dup = data.items.find((i) => i.status === "active" && i.title === item.title);
-  if (dup) return { error: `active item with title '${item.title}' already exists (id: ${dup.id})` };
+      const dup = data.items.find((i) => i.status === "active" && i.title === item.title);
+      if (dup) return { error: `active item with title '${item.title}' already exists (id: ${dup.id})` };
 
-  data.items.push(item);
-  data.project = path.basename(cwd);
-  await writeStore(filePath, data);
-  await registerProject(cwd);
-  await recordPush(cwd);
-
-  return { ok: true };
+      data.items.push(item);
+      data.project = path.basename(cwd);
+      await writeStore(filePath, data);
+      return { ok: true as const };
+    },
+    10_000,
+  ).then(
+    async (res) => {
+      if ("error" in res) return res;
+      // Registration and feedback recording happen outside the data lock
+      // (they touch the registry, not the data file).
+      await registerProject(cwd);
+      await recordPush(cwd);
+      return res;
+    },
+    (err) => ({ error: (err as Error).message }),
+  );
 }
 
-/** Record a push in the quality feedback store (registry). */
+/** Record a push in the quality feedback store (registry).
+ *  Lock-protected for cross-process safety. */
 async function recordPush(cwd: string): Promise<void> {
-  const registry = await readRegistry();
-  registry.feedback = registry.feedback ?? {};
-  const f = registry.feedback[cwd] ?? { pushes: 0, archived_soon: 0 };
-  f.pushes = (f.pushes ?? 0) + 1;
-  registry.feedback[cwd] = f;
-  await writeRegistry(registry);
+  return mutateRegistry((registry) => {
+    registry.feedback = registry.feedback ?? {};
+    const f = registry.feedback[cwd] ?? { pushes: 0, archived_soon: 0 };
+    f.pushes = (f.pushes ?? 0) + 1;
+    registry.feedback[cwd] = f;
+  });
 }
 
 /** Read quality feedback for a project. */
@@ -427,7 +514,19 @@ export async function searchTodos(keyword: string): Promise<(TodoItem & { projec
   const results: (TodoItem & { project: string; project_path: string })[] = [];
 
   for (const entry of registry.projects) {
-    const data = await readStore(path.join(entry.path, FILENAME));
+    // Use fail-closed reader: skip projects with corrupt/unreadable data
+    // rather than treating them as empty (which would silently hide items).
+    const result = await readStoreSafe(path.join(entry.path, FILENAME));
+    let data: TodosFile | null = null;
+    if ("ok" in result) {
+      data = result.data;
+    } else if ("notFound" in result) {
+      continue; // project not initialized — skip
+    } else {
+      // Corrupt or unreadable — log and skip this project, don't crash search
+      console.warn(`[store] skipping project '${entry.name}' during search: ${result.error}`);
+      continue;
+    }
     for (const item of data.items) {
       if (item.status !== "active") continue;
       const haystack = [item.title, item.content, item.suggestion, ...item.tags].join(" ").toLowerCase();
@@ -448,26 +547,41 @@ export async function updateAndSave(
   patch: Partial<Pick<TodoItem, "status" | "content" | "tags" | "priority" | "title" | "processing">>
 ): Promise<{ ok: true } | { error: string }> {
   const filePath = resolveTodoPath(cwd);
-  const data = await readStore(filePath);
-  const item = data.items.find((i) => i.id === id);
-  if (!item) return { error: `item '${id}' not found` };
+  return withFileLock(
+    filePath,
+    async () => {
+      // Fail-closed: a corrupt or unreadable file must not be overwritten.
+      const result = await readStoreSafe(filePath);
+      let data: TodosFile;
+      if ("ok" in result) {
+        data = result.data;
+      } else if ("notFound" in result) {
+        return { error: `item '${id}' not found (file does not exist)` };
+      } else {
+        return { error: result.error };
+      }
+      const item = data.items.find((i) => i.id === id);
+      if (!item) return { error: `item '${id}' not found` };
 
-  if (patch.status) {
-    const err = validateTransition(item.type, patch.status);
-    if (err) return { error: err };
-    item.status = patch.status;
-    // Completing an item also clears its in-progress flag
-    if (patch.status === "completed" || patch.status === "archived" || patch.status === "converted") {
-      item.processing = false;
-    }
-  }
-  if (patch.content !== undefined) item.content = patch.content;
-  if (patch.tags !== undefined) item.tags = patch.tags;
-  if (patch.priority !== undefined) item.priority = patch.priority;
-  if (patch.title !== undefined) item.title = patch.title;
-  if (patch.processing !== undefined) item.processing = patch.processing;
+      if (patch.status) {
+        const err = validateTransition(item.type, patch.status);
+        if (err) return { error: err };
+        item.status = patch.status;
+        // Completing an item also clears its in-progress flag
+        if (patch.status === "completed" || patch.status === "archived" || patch.status === "converted") {
+          item.processing = false;
+        }
+      }
+      if (patch.content !== undefined) item.content = patch.content;
+      if (patch.tags !== undefined) item.tags = patch.tags;
+      if (patch.priority !== undefined) item.priority = patch.priority;
+      if (patch.title !== undefined) item.title = patch.title;
+      if (patch.processing !== undefined) item.processing = patch.processing;
 
-  item.updated_at = new Date().toISOString();
-  await writeStore(filePath, data);
-  return { ok: true };
+      item.updated_at = new Date().toISOString();
+      await writeStore(filePath, data);
+      return { ok: true as const };
+    },
+    10_000,
+  ).catch((err: Error) => ({ error: err.message }));
 }

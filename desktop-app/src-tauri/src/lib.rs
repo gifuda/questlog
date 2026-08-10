@@ -1,6 +1,7 @@
 mod commands;
 mod discovery;
 mod epic_store;
+pub mod file_lock;
 mod models;
 mod store;
 mod tray;

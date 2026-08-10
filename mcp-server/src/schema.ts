@@ -28,6 +28,11 @@ export interface TodosFile {
   version: 1;
   project: string;
   items: TodoItem[];
+  /**
+   * Monotonic revision counter for CAS concurrency control.
+   * Old files without this field default to 0 on read (backward compat).
+   */
+  revision?: number;
 }
 
 const VALID_TYPES: ItemType[] = ["knowhow", "todo", "idea"];

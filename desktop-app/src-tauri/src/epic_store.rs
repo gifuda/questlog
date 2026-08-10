@@ -24,6 +24,7 @@ pub fn read_epics(project_dir: &Path) -> Result<EpicsFile, String> {
                 .unwrap_or_default(),
             epics: vec![],
             steps: vec![],
+            revision: 0,
         });
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("read error: {e}"))?;
@@ -39,12 +40,13 @@ pub fn read_epics(project_dir: &Path) -> Result<EpicsFile, String> {
     Ok(file)
 }
 
-/// Write .epics.json atomically.
+/// Write .epics.json atomically. Bumps revision for CAS.
 /// Temp name is unique per process+time so concurrent writers never clobber
 /// each other's temp file; the last rename wins but the file is never
 /// observed half-written.
-pub fn write_epics(project_dir: &Path, data: &EpicsFile) -> Result<(), String> {
+pub fn write_epics(project_dir: &Path, data: &mut EpicsFile) -> Result<(), String> {
     let path = project_dir.join(FILENAME);
+    data.revision = data.revision.saturating_add(1);
     let tmp = path.with_extension(format!(
         "tmp-{}-{}-{}",
         std::process::id(),
@@ -157,15 +159,20 @@ pub fn derive_dependencies(data: &mut EpicsFile) {
 }
 
 /// Convenience: read → mutate in closure → derive → write.
+/// All steps run while holding a cross-process file lock, ensuring
+/// Node MCP and Tauri UI never race on the same file.
 pub fn mutate_epics<F>(project_dir: &Path, f: F) -> Result<EpicsFile, String>
 where
     F: FnOnce(&mut EpicsFile) -> Result<(), String>,
 {
-    let mut data = read_epics(project_dir)?;
-    f(&mut data)?;
-    derive_dependencies(&mut data);
-    write_epics(project_dir, &data)?;
-    Ok(data)
+    let path = project_dir.join(FILENAME);
+    crate::file_lock::with_file_lock(&path, || {
+        let mut data = read_epics(project_dir)?;
+        f(&mut data)?;
+        derive_dependencies(&mut data);
+        write_epics(project_dir, &mut data)?;
+        Ok(data)
+    })
 }
 
 /// Build the global summary for a project's epics:
@@ -357,6 +364,7 @@ mod tests {
             project: "test-project".into(),
             epics,
             steps,
+            revision: 0,
         }
     }
 

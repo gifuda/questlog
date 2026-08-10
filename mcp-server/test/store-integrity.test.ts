@@ -40,7 +40,7 @@ function corruptFile(p: string, content = "{ not valid json !!") {
 }
 
 describe("corrupt .todos.json", () => {
-  it("backs up the corrupt file, returns empty, and does not overwrite", async () => {
+  it("backs up the corrupt file, returns error, and does not overwrite", async () => {
     const file = path.join(dir, ".todos.json");
     const original = "{ broken data that must survive }";
     await fs.writeFile(file, original, "utf-8");
@@ -48,10 +48,12 @@ describe("corrupt .todos.json", () => {
     // Warning is expected — the test asserts on filesystem state, not logs.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
+    // G0 fail-closed: corrupt data must surface as error, NOT empty data.
+    // Returning empty would allow the next write to silently overwrite
+    // the user's real data.
     const res = await listTodos(dir);
-    expect(res).toHaveProperty("data");
-    const data = res as { data: { items: unknown[] } };
-    expect(data.data.items).toEqual([]);
+    expect(res).toHaveProperty("error");
+    expect((res as { error: string }).error).toContain("corrupt");
 
     // Original content must still exist in a .bak file, never overwritten.
     const entries = await fs.readdir(dir);
@@ -83,14 +85,15 @@ describe("corrupt .todos.json", () => {
 });
 
 describe("corrupt .epics.json", () => {
-  it("backs up the corrupt file and returns empty epics", async () => {
+  it("backs up the corrupt file and returns error (fail-closed)", async () => {
     const file = path.join(dir, ".epics.json");
     const original = "{ corrupted epic data }";
     await fs.writeFile(file, original, "utf-8");
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
+    // G0 fail-closed: corrupt .epics.json returns error, not empty data.
     const res = await listEpics(dir);
-    expect(res.epics).toEqual([]);
+    expect("error" in res).toBe(true);
 
     const entries = await fs.readdir(dir);
     const baks = entries.filter((e) => e.startsWith(".epics.json.bak."));
@@ -99,21 +102,24 @@ describe("corrupt .epics.json", () => {
   });
 });
 
-describe("write after corruption starts fresh but keeps backup", () => {
-  it("addAndSave after a corrupt read writes a valid file alongside the backup", async () => {
+describe("write after corruption is rejected (fail-closed)", () => {
+  it("addAndSave after a corrupt read is rejected, backup preserved, no overwrite", async () => {
     await corruptFile(path.join(dir, ".todos.json"));
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const item = pushTodo(dir, { type: "todo", title: "t", content: "long enough content here" });
     if ("error" in item) throw new Error(item.error);
-    const save = await addAndSave(dir, item.item);
-    expect(save).toHaveProperty("ok");
 
+    // G0 fail-closed: write after corrupt read must be REJECTED, not allowed.
+    // Allowing it would silently overwrite the user's data with a fresh file.
+    const save = await addAndSave(dir, item.item);
+    expect("error" in save).toBe(true);
+
+    // Backup exists
     const entries = await fs.readdir(dir);
     expect(entries.some((e) => e.startsWith(".todos.json.bak."))).toBe(true);
-    // New file is valid JSON now
-    const raw = await fs.readFile(path.join(dir, ".todos.json"), "utf-8");
-    expect(() => JSON.parse(raw)).not.toThrow();
+    // The .todos.json file must NOT have been created (only the .bak exists).
+    expect(entries.some((e) => e === ".todos.json")).toBe(false);
   });
 });
 

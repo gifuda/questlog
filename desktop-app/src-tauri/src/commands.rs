@@ -66,6 +66,7 @@ pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, St
                     version: 1,
                     project: name.clone(),
                     items: vec![],
+                    revision: 0,
                 }
             }
         };
@@ -151,7 +152,7 @@ pub fn update_todo(
 
     item.updated_at = chrono::Utc::now().to_rfc3339();
 
-    store::write_todos(&path, &data)?;
+    store::write_todos(&path, &mut data)?;
 
     if archived_quickly {
         discovery::record_archived_soon(&project_path);
@@ -200,7 +201,7 @@ pub fn add_todo(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    store::write_todos(&path, &data)?;
+    store::write_todos(&path, &mut data)?;
     Ok(item)
 }
 

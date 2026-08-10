@@ -4,6 +4,9 @@ import { z } from "zod";
 import path from "node:path";
 import { pushTodo, addAndSave, listTodos, updateAndSave, resolveProjectDir, findSubProjects, searchTodos, suggestSimilarProject, readFeedback, canonicalizeProjectDir, resolveRegisteredProject } from "./store.js";
 import { pushEpic, updateEpic, pushStep, updateStep, listEpics, epicProgress, actionableSteps } from "./epic-store.js";
+import {
+  prepareTaskPackage, validateTaskPackage, sealTaskPackage, enqueueStep,
+} from "./task-package-ops.js";
 
 const server = new McpServer({
   name: "todo-board",
@@ -468,6 +471,7 @@ server.tool(
 
     // Show recomputed epic progress after step update
     const data = await listEpics(cwd);
+    if ("error" in data) return { content: [{ type: "text", text: `Error reading epics: ${data.error}` }], isError: true };
     const step = data.steps.find((s) => s.id === id);
     if (step) {
       const progress = epicProgress(step.epic_id, data);
@@ -514,6 +518,7 @@ server.tool(
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const data = await listEpics(cwd);
+    if ("error" in data) return { content: [{ type: "text", text: `Error: ${data.error}` }], isError: true };
 
     if (data.epics.length === 0) {
       return { content: [{ type: "text", text: "当前项目还没有方案。创建：push_epic（多步骤改进）或 push_todo（单条行动）。" }] };
@@ -573,7 +578,154 @@ server.tool(
   }
 );
 
+// ════════════════════════════════════════════════════════════════
+// TaskPackage tools — controlled execution hard gates
+// Feature flag: QUESTLOG_EXECUTION_PACKAGES=0 disables these tools.
+// When disabled, all existing Todo/Epic/Step tools continue to work —
+// the feature is purely additive.
+// ════════════════════════════════════════════════════════════════
+
+const EXECUTION_PACKAGES_ENABLED = process.env.QUESTLOG_EXECUTION_PACKAGES !== "0";
+
+if (EXECUTION_PACKAGES_ENABLED) {
+
+// ─── prepare_task_package ───
+server.tool(
+  "prepare_task_package",
+  [
+    "Prepare a draft TaskPackage for a step. The server resolves the real project path, git root, and base SHA — it does NOT trust model-supplied values.",
+    "Returns a draft package with validation issues to fix before sealing. The package is NOT executable until sealed.",
+    "",
+    "## When to call",
+    "- User asks to create an executable task / standard task package",
+    "- After defining a Step that should be auto-executed by the Runner",
+    "- Before enqueue_step — you must prepare → validate → seal first",
+  ].join("\n"),
+  {
+    epic_id: z.string().describe("The epic this package belongs to"),
+    step_id: z.string().describe("The step this package executes"),
+    objective: z.string().describe("Single, verifiable objective — what success looks like"),
+    allowed_paths: z.array(z.string()).describe("Glob patterns for paths the executor MAY modify"),
+    forbidden_paths: z.array(z.string()).optional().describe("Glob patterns for paths the executor MUST NOT touch"),
+    max_changed_files: z.number().optional().describe("Maximum files the executor may change (default 10)"),
+    executor_preferred: z.enum(["codex", "zcode", "manual"]).optional(),
+    executor_timeout_seconds: z.number().optional(),
+    executor_max_attempts: z.number().optional(),
+    acceptance_command_ids: z.array(z.string()).optional().describe("Trusted command IDs from the acceptance registry (e.g. test:mcp, build:mcp)"),
+    context_refs: z.array(z.string()).optional().describe("Reference docs/paths for context"),
+    project_dir: z.string().optional().describe("Override project directory (server validates)"),
+  },
+  async (input) => {
+    const resolved = await epicCwd(() => process.cwd());
+    if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
+    const result = await prepareTaskPackage(resolved.cwd, input);
+    if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+    const lines = [
+      `📦 Draft TaskPackage prepared: ${result.package_id}`,
+      `   Project: ${result.resolved_project_path}`,
+      `   Base SHA: ${result.resolved_base_sha}`,
+      `   Git clean: ${result.git_clean}`,
+      `   Issues: ${result.issues.length} (${result.issues.filter((i) => i.severity === "error").length} errors)`,
+    ];
+    if (result.issues.length > 0) {
+      lines.push("", "Fix these before sealing:");
+      for (const issue of result.issues) {
+        lines.push(`  ${issue.severity === "error" ? "❌" : "⚠️"}  ${issue.field}: ${issue.message}`);
+      }
+    }
+    lines.push("", `Next: validate_task_package → seal_task_package → enqueue_step`);
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// ─── validate_task_package ───
+server.tool(
+  "validate_task_package",
+  [
+    "Validate a TaskPackage against schema, Git state, dependencies, and the trusted command registry.",
+    "Returns all issues (errors block sealing). Checks: content schema, git clean, base SHA drift, step dependencies, command registry membership.",
+  ].join("\n"),
+  {
+    package_id: z.string().describe("The package ID from prepare_task_package"),
+  },
+  async (input) => {
+    const resolved = await epicCwd(() => process.cwd());
+    if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
+    const result = await validateTaskPackage(resolved.cwd, input.package_id);
+    if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+    const lines = [
+      `🔍 Validation: ${result.valid ? "✅ VALID" : "❌ INVALID"}`,
+      `   Package: ${result.package_id}`,
+      `   Git clean: ${result.server_checks.git_clean}`,
+      `   Base SHA current: ${result.server_checks.base_sha_current}`,
+      `   Dependencies met: ${result.server_checks.dependencies_met}`,
+      `   Commands trusted: ${result.server_checks.commands_trusted}`,
+    ];
+    if (result.issues.length > 0) {
+      lines.push("", "Issues:");
+      for (const issue of result.issues) {
+        lines.push(`  ${issue.severity === "error" ? "❌" : "⚠️"}  ${issue.field}: ${issue.message}`);
+      }
+    }
+    if (result.valid) {
+      lines.push("", "✅ Ready to seal. Call seal_task_package next.");
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// ─── seal_task_package ───
+server.tool(
+  "seal_task_package",
+  [
+    "Seal a TaskPackage — freeze its content, compute the final hash, mark as sealed (immutable).",
+    "Only valid packages can be sealed. After sealing, any field change requires a new revision.",
+    "A sealed package is the prerequisite for enqueue_step.",
+  ].join("\n"),
+  {
+    package_id: z.string().describe("The package ID to seal"),
+  },
+  async (input) => {
+    const resolved = await epicCwd(() => process.cwd());
+    if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
+    const result = await sealTaskPackage(resolved.cwd, input.package_id);
+    if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+    const lines = [
+      `🔒 TaskPackage sealed: ${result.package_id}`,
+      `   Revision: ${result.plan_revision}`,
+      `   Hash: ${result.package_hash.slice(0, 16)}...`,
+      `   Sealed at: ${result.sealed_at}`,
+      "",
+      "The package is now immutable. Call enqueue_step to make it available to the Runner.",
+    ];
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// ─── enqueue_step ───
+server.tool(
+  "enqueue_step",
+  [
+    "Enqueue a sealed TaskPackage for Runner execution. Only sealed, valid, dependency-met packages can be enqueued.",
+    "The Runner picks up packages with status 'ready'. This does NOT start execution immediately — it makes the step available.",
+    "Double-checks validity at enqueue time (base SHA may have drifted since seal).",
+  ].join("\n"),
+  {
+    step_id: z.string().describe("The step whose sealed package should be enqueued"),
+  },
+  async (input) => {
+    const resolved = await epicCwd(() => process.cwd());
+    if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
+    const result = await enqueueStep(resolved.cwd, input.step_id);
+    if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+    return { content: [{ type: "text", text: `📋 ${result.message}` }] };
+  }
+);
+
 // ─── start ───
+
+} // end EXECUTION_PACKAGES_ENABLED
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

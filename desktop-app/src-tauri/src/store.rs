@@ -25,6 +25,7 @@ pub fn read_todos(project_dir: &Path) -> Result<TodosFile, String> {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default(),
             items: vec![],
+            revision: 0,
         });
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("read error: {e}"))?;
@@ -120,6 +121,10 @@ fn salvage_todos(raw: &str, project_dir: &Path) -> Option<TodosFile> {
             .unwrap_or(1),
         project,
         items,
+        revision: root
+            .get("revision")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
     })
 }
 
@@ -151,12 +156,13 @@ fn coerce_enum_fields(mut val: serde_json::Value) -> serde_json::Value {
     val
 }
 
-/// Write .todos.json atomically to a project directory.
+/// Write .todos.json atomically to a project directory. Bumps revision for CAS.
 /// Temp name is unique per process+time so concurrent writers never clobber
 /// each other's temp file; the last rename wins but the file is never
 /// observed half-written.
-pub fn write_todos(project_dir: &Path, data: &TodosFile) -> Result<(), String> {
+pub fn write_todos(project_dir: &Path, data: &mut TodosFile) -> Result<(), String> {
     let path = project_dir.join(FILENAME);
+    data.revision = data.revision.saturating_add(1);
     let tmp = path.with_extension(format!(
         "tmp-{}-{}-{}",
         std::process::id(),
@@ -214,7 +220,7 @@ mod tests {
 
     #[test]
     fn count_active_splits_by_type_and_skips_non_active() {
-        let data = TodosFile {
+        let mut data = TodosFile {
             version: 1,
             project: "p".into(),
             items: vec![
@@ -224,6 +230,7 @@ mod tests {
                 item("4", ItemType::Todo, ItemStatus::Completed), // skipped
                 item("5", ItemType::Idea, ItemStatus::Active),
             ],
+            revision: 0,
         };
         let (k, t, i) = count_active(&data);
         assert_eq!((k, t, i), (1, 1, 1));
@@ -231,10 +238,11 @@ mod tests {
 
     #[test]
     fn count_active_returns_zeros_for_empty() {
-        let data = TodosFile {
+        let mut data = TodosFile {
             version: 1,
             project: "p".into(),
             items: vec![],
+            revision: 0,
         };
         assert_eq!(count_active(&data), (0, 0, 0));
     }
@@ -256,12 +264,13 @@ mod tests {
     #[test]
     fn write_then_read_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let original = TodosFile {
+        let mut original = TodosFile {
             version: 1,
             project: "round-trip".into(),
             items: vec![item("x", ItemType::Todo, ItemStatus::Active)],
+            revision: 0,
         };
-        write_todos(dir.path(), &original).unwrap();
+        write_todos(dir.path(), &mut original).unwrap();
         let reread = read_todos(dir.path()).unwrap();
         assert_eq!(reread.project, "round-trip");
         assert_eq!(reread.items.len(), 1);
@@ -282,13 +291,14 @@ mod tests {
     #[test]
     fn write_todos_uses_unique_tmp_names() {
         let dir = tempfile::tempdir().unwrap();
-        let data = TodosFile {
+        let mut data = TodosFile {
             version: 1,
             project: "unique-tmp".into(),
             items: vec![],
+            revision: 0,
         };
-        write_todos(dir.path(), &data).unwrap();
-        write_todos(dir.path(), &data).unwrap();
+        write_todos(dir.path(), &mut data).unwrap();
+        write_todos(dir.path(), &mut data).unwrap();
         // No leftover temp files; the only entry is .todos.json itself.
         let entries: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
