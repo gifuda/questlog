@@ -14,6 +14,7 @@
 use crate::executors::{CodexExecutor, Executor, ZCodeExecutor};
 use crate::execution_store::{self, ExecutionStatus, ExecutionUpdates, TaskPackageSummary};
 use crate::runner_git::{self, ScopeViolation};
+use crate::models::StepStage;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -105,6 +106,8 @@ impl Runner {
                     )?;
                     execution_store::release_lease(execution_id, ExecutionStatus::Passed, None)?;
                     execution_store::mark_package_status(&pkg.package_id, "passed")?;
+                    // Advance step: acceptance passed → verified
+                    Self::advance_step_stage(&pkg.project_path, &pkg.step_id, StepStage::Verified);
                 }
                 Ok(RunResult::NoDiff { execution_id }) => {
                     execution_store::release_lease(execution_id, ExecutionStatus::Failed, Some("CLI produced no diff"))?;
@@ -274,19 +277,97 @@ impl Runner {
             &pkg.base_sha,
         )?;
 
-        match candidate_sha {
-            Some(sha) => Ok(RunResult::Passed {
+        let candidate_sha = match candidate_sha {
+            Some(sha) => sha,
+            None => return Ok(RunResult::NoDiff { execution_id: exec.id.clone() }),
+        };
+
+        // Advance step: candidate commit produced → coded
+        Self::advance_step_stage(&pkg.project_path, &pkg.step_id, StepStage::Coded);
+
+        // 8. Run acceptance commands against the exact candidate commit
+        // This is the anti-fake-green gate: CLI exit 0 + commit is NOT enough.
+        // The acceptance commands must pass on the candidate commit.
+        if pkg.acceptance_command_ids.is_empty() {
+            // No acceptance commands declared → can't verify, don't fake-green
+            return Ok(RunResult::AcceptanceFailed {
                 execution_id: exec.id.clone(),
-                candidate_sha: sha,
-            }),
-            None => Ok(RunResult::NoDiff { execution_id: exec.id.clone() }),
+                reason: "no acceptance commands declared — cannot verify candidate commit".to_string(),
+            });
         }
+
+        for cmd_id in &pkg.acceptance_command_ids {
+            match resolve_and_run_acceptance(cmd_id, &repo_root) {
+                Ok(true) => { /* passed */ }
+                Ok(false) => {
+                    return Ok(RunResult::AcceptanceFailed {
+                        execution_id: exec.id.clone(),
+                        reason: format!("acceptance command '{}' failed", cmd_id),
+                    });
+                }
+                Err(e) => {
+                    return Ok(RunResult::AcceptanceFailed {
+                        execution_id: exec.id.clone(),
+                        reason: format!("acceptance command '{}' error: {}", cmd_id, e),
+                    });
+                }
+            }
+        }
+
+        // All acceptance commands passed → verified
+        Ok(RunResult::Passed {
+            execution_id: exec.id.clone(),
+            candidate_sha,
+        })
     }
 
     /// Shadow mode: report what would be picked up without starting any CLI.
     pub fn shadow_pick() -> Result<Vec<String>, String> {
         let packages = execution_store::read_ready_packages()?;
         Ok(packages.into_iter().map(|p| p.package_id).collect())
+    }
+
+    /// Advance the Step stage in .epics.json based on execution result.
+    ///
+    /// Mapping:
+    ///   candidate commit produced (but acceptance not yet verified) → coded
+    ///   acceptance passed → verified
+    ///   CLI failed / scope violation / no diff → leave stage unchanged
+    ///
+    /// The Runner never auto-advances to `observed` — that requires cross-session
+    /// human confirmation per the plan.
+    fn advance_step_stage(project_path: &str, step_id: &str, stage: StepStage) {
+        let dir = PathBuf::from(project_path);
+        match crate::epic_store::mutate_epics(&dir, |data| {
+            let step = data.steps.iter_mut().find(|s| s.id == step_id);
+            if let Some(step) = step {
+                // Only advance forward, never backward
+                let order = |s: &StepStage| match s {
+                    StepStage::Pending => 0,
+                    StepStage::Designed => 1,
+                    StepStage::Coded => 2,
+                    StepStage::Verified => 3,
+                    StepStage::Observed => 4,
+                };
+                if order(&stage) > order(&step.stage) {
+                    log::info!(
+                        "Advancing step '{}' from {:?} to {:?}",
+                        step_id, step.stage, stage
+                    );
+                    step.stage = stage.clone();
+                    // Sync parent epic updated_at
+                    let now = chrono::Utc::now().to_rfc3339();
+                    step.updated_at = now.clone();
+                    if let Some(epic) = data.epics.iter_mut().find(|e| e.id == step.epic_id) {
+                        epic.updated_at = now;
+                    }
+                }
+            }
+            Ok(())
+        }) {
+            Ok(_) => {}
+            Err(e) => log::warn!("Failed to advance step stage: {}", e),
+        }
     }
 }
 
@@ -329,6 +410,59 @@ pub fn start_runner_thread(config: RunnerConfig) {
 /// Stop the background Runner thread.
 pub fn stop_runner() {
     RUNNER_RUNNING.store(false, Ordering::Relaxed);
+}
+
+/// Trusted acceptance command registry (mirrors the Node-side registry).
+/// command_id → (command, relative cwd).
+/// The Runner resolves command_ids here — it never accepts raw shell strings.
+const ACCEPTANCE_REGISTRY: &[(&str, &str, &str)] = &[
+    ("test:mcp", "npm test", "mcp-server"),
+    ("build:mcp", "npm run build", "mcp-server"),
+    ("test:desktop", "cargo test", "desktop-app/src-tauri"),
+    ("build:web", "npm run build", "desktop-app"),
+    ("lint:mcp", "npx tsc --noEmit", "mcp-server"),
+];
+
+/// Resolve a command_id from the trusted registry and run it.
+/// Returns Ok(true) if the command succeeded, Ok(false) if it failed.
+fn resolve_and_run_acceptance(command_id: &str, repo_root: &PathBuf) -> Result<bool, String> {
+    let entry = ACCEPTANCE_REGISTRY.iter().find(|(id, _, _)| *id == command_id);
+    let (_, command, cwd_rel) = match entry {
+        Some(e) => e,
+        None => return Err(format!("command_id '{}' is not in the trusted acceptance registry", command_id)),
+    };
+
+    let cwd = repo_root.join(cwd_rel);
+    if !cwd.exists() {
+        return Err(format!("acceptance cwd does not exist: {}", cwd.display()));
+    }
+
+    // Parse command into program + args (simple split on spaces — the registry
+    // only contains simple commands like "npm test", "cargo test")
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err("empty acceptance command".to_string());
+    }
+
+    let output = std::process::Command::new(parts[0])
+        .args(&parts[1..])
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("failed to run '{}': {}", command, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!(
+            "acceptance '{}' failed in {}: {}",
+            command_id,
+            cwd.display(),
+            stderr.lines().take(3).collect::<Vec<_>>().join("; ")
+        );
+        return Ok(false);
+    }
+
+    log::info!("acceptance '{}' passed in {}", command_id, cwd.display());
+    Ok(true)
 }
 
 #[cfg(test)]

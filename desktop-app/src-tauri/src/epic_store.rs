@@ -353,6 +353,7 @@ mod tests {
             depends_on: vec![],
             stage: StepStage::Pending,
             links: StepLinks::default(),
+            package: None,
             created_at: BASE_TS.into(),
             updated_at: BASE_TS.into(),
         }

@@ -52,6 +52,9 @@ fn bridge_ready_package_to_zcode_execution() {
     let base_sha = init_git_repo(repo_dir.path());
 
     // Write packages.json (simulating what Node MCP enqueue_step produces)
+    // Use an empty acceptance list — the test verifies the Runner correctly
+    // REJECTS packages without acceptance commands (anti-fake-green gate).
+    // A full pass test would need a real project with acceptance commands.
     let packages = serde_json::json!({
         "version": 1,
         "packages": [{
@@ -102,29 +105,31 @@ fn bridge_ready_package_to_zcode_execution() {
             let exec = &execs[0];
             eprintln!("Execution status: {:?}", exec.status);
 
-            // If it passed, verify the candidate commit
-            if exec.status == app_lib::execution_store::ExecutionStatus::Passed {
-                if let Some(ref sha) = exec.candidate_sha {
-                    eprintln!("Candidate SHA: {}", sha);
-                    assert!(!sha.is_empty());
-                }
+            // Anti-fake-green: no acceptance commands → must NOT be Passed
+            assert_ne!(
+                exec.status,
+                app_lib::execution_store::ExecutionStatus::Passed,
+                "execution without acceptance commands must NOT pass"
+            );
 
-                // Verify the main repo working tree is untouched
-                let main_content = std::fs::read_to_string(repo_dir.path().join("src.ts")).unwrap();
-                assert!(main_content.contains("1"), "main workspace should be untouched");
-                assert!(!main_content.contains("42"), "main workspace should NOT have the change");
-
-                eprintln!("✅ E2E bridge: package → ZCode execution → candidate commit → main workspace untouched");
-            } else {
-                eprintln!("⚠ Execution did not pass (status: {:?}). This may be due to API rate limits.", exec.status);
-                if let Some(ref err) = exec.last_error {
-                    eprintln!("  Error: {}", err);
-                }
+            if let Some(ref err) = exec.last_error {
+                eprintln!("  Error: {}", err);
+                // Verify it's the acceptance gate that caught it
+                assert!(
+                    err.contains("no acceptance commands"),
+                    "should fail on acceptance gate, got: {}",
+                    err
+                );
+                eprintln!("✅ Anti-fake-green gate works: candidate commit rejected without acceptance commands");
             }
+
+            // Main repo working tree must be untouched regardless
+            let main_content = std::fs::read_to_string(repo_dir.path().join("src.ts")).unwrap();
+            assert!(main_content.contains("1"), "main workspace should be untouched");
+            assert!(!main_content.contains("42"), "main workspace should NOT have the change");
         }
         Err(e) => {
-            // The test passes if the runner runs without crashing — API errors are external
-            eprintln!("Runner error (may be external): {}", e);
+            panic!("Runner crashed: {}", e);
         }
     }
 

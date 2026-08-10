@@ -63,6 +63,15 @@ export interface Step {
   depends_on?: string[];
   stage: StepStage;
   links: StepLinks;
+  /** TaskPackage 摘要（seal 后回写）。只存可移植信息，不存绝对路径或 CLI session。 */
+  package?: {
+    package_id: string;
+    plan_revision: number;
+    package_hash: string;
+    objective: string;
+    executor: string;
+    status: string;
+  };
   created_at: string;
   updated_at: string;
 }
@@ -414,6 +423,7 @@ export async function updateStep(cwd: string, id: string, patch: {
   order?: number;
   depends_on?: string[];
   todo_ref?: string;
+  package?: Step["package"];
 }): Promise<{ ok: true } | { error: string }> {
   if (patch.stage && !VALID_STAGES.includes(patch.stage)) {
     return { error: `invalid stage: ${patch.stage}` };
@@ -427,6 +437,7 @@ export async function updateStep(cwd: string, id: string, patch: {
     if (patch.order !== undefined) step.order = patch.order;
     if (patch.depends_on !== undefined) step.depends_on = patch.depends_on;
     if (patch.todo_ref !== undefined) step.links.todo_ref = patch.todo_ref || undefined;
+    if (patch.package !== undefined) step.package = patch.package;
     step.updated_at = new Date().toISOString();
     // 同步父 epic 的 updated_at
     const epic = data.epics.find((e) => e.id === step.epic_id);

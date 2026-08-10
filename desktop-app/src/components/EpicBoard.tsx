@@ -4,6 +4,7 @@ import { useEpics } from "../hooks/useEpics";
 import { epicStatusBadge, stageOrder, stageLabel, stageIcon, statusOptions, statusRank } from "../epicConstants";
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
+import ExecutionPanel from "./ExecutionPanel";
 
 /** i18n keys for epic status labels (statuses stay lowercase in data). */
 const epicStatusKey: Record<EpicStatus, string> = {
@@ -355,47 +356,65 @@ function StepRow({ step, onUpdate, onDelete }: {
 }) {
   const { t } = useTranslation();
   const [hover, setHover] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  const hasPackage = !!step.package;
+
   return (
     <div
-      className="flex items-center gap-2 py-1 px-1.5 rounded hover:bg-elevated/40 group"
+      className="rounded hover:bg-elevated/40 group"
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
-      <span className="text-xs shrink-0 w-4 text-center">{stageIcon[step.stage]}</span>
-      <span className={`text-[11px] flex-1 truncate ${step.stage === "observed" ? "text-faint line-through" : "text-body"}`}>
-        {step.title}
-      </span>
-      {step.actionable && (
-        <span className="text-[8px] text-blue-400 bg-blue-500/10 px-1 py-px rounded shrink-0">{t("epic.actionable")}</span>
-      )}
-      {step.depends_on_titles.length > 0 && (
-        <span className="text-[8px] text-faint shrink-0 hidden md:inline" title={t("epic.waitFor", { names: step.depends_on_titles.join("、") })}>
-          🔗{step.depends_on_titles.length}
+      <div
+        className="flex items-center gap-2 py-1 px-1.5 cursor-pointer"
+        onClick={() => hasPackage && setExpanded(!expanded)}
+      >
+        <span className="text-xs shrink-0 w-4 text-center">{stageIcon[step.stage]}</span>
+        <span className={`text-[11px] flex-1 truncate ${step.stage === "observed" ? "text-faint line-through" : "text-body"}`}>
+          {step.title}
         </span>
-      )}
-      {/* Stage buttons */}
-      <div className="flex items-center gap-0.5 shrink-0">
-        {stageOrder.map((s) => (
-          <button
-            key={s}
-            title={t(stepStageKey[s])}
-            onClick={(e) => { e.stopPropagation(); onUpdate({ stage: s }); }}
-            className={`w-3 h-3 rounded-sm transition-colors ${
-              stageOrder.indexOf(step.stage) >= stageOrder.indexOf(s)
-                ? "bg-blue-500"
-                : "bg-elevated hover:bg-line-hover"
-            }`}
+        {hasPackage && (
+          <span className="text-[8px] text-green-400 bg-green-500/10 px-1 py-px rounded shrink-0" title="Has sealed TaskPackage">
+            📦
+          </span>
+        )}
+        {step.actionable && (
+          <span className="text-[8px] text-blue-400 bg-blue-500/10 px-1 py-px rounded shrink-0">{t("epic.actionable")}</span>
+        )}
+        {step.depends_on_titles.length > 0 && (
+          <span className="text-[8px] text-faint shrink-0 hidden md:inline" title={t("epic.waitFor", { names: step.depends_on_titles.join("、") })}>
+            🔗{step.depends_on_titles.length}
+          </span>
+        )}
+        {/* Stage buttons */}
+        <div className="flex items-center gap-0.5 shrink-0">
+          {stageOrder.map((s) => (
+            <button
+              key={s}
+              title={t(stepStageKey[s])}
+              onClick={(e) => { e.stopPropagation(); onUpdate({ stage: s }); }}
+              className={`w-3 h-3 rounded-sm transition-colors ${
+                stageOrder.indexOf(step.stage) >= stageOrder.indexOf(s)
+                  ? "bg-blue-500"
+                  : "bg-elevated hover:bg-line-hover"
+              }`}
+            />
+          ))}
+        </div>
+        <span className="text-[9px] text-faint w-8 text-right shrink-0">{t(stepStageKey[step.stage])}</span>
+        {hover && (
+          <ConfirmButton
+            label="×"
+            confirmLabel="✓"
+            onConfirm={() => onDelete()}
+            className="w-3.5 h-3.5 flex items-center justify-center text-[8px] text-faint hover:text-danger rounded-full"
           />
-        ))}
+        )}
       </div>
-      <span className="text-[9px] text-faint w-8 text-right shrink-0">{t(stepStageKey[step.stage])}</span>
-      {hover && (
-        <ConfirmButton
-          label="×"
-          confirmLabel="✓"
-          onConfirm={() => onDelete()}
-          className="w-3.5 h-3.5 flex items-center justify-center text-[8px] text-faint hover:text-danger rounded-full"
-        />
+      {/* Execution panel — shows package summary and run timeline */}
+      {expanded && hasPackage && (
+        <ExecutionPanel stepId={step.id} />
       )}
     </div>
   );

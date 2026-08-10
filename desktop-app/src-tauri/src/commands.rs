@@ -633,6 +633,7 @@ pub fn add_step(
         depends_on: depends_on.unwrap_or_default(),
         stage: StepStage::Pending,
         links: Default::default(),
+        package: None,
         created_at: now.clone(),
         updated_at: now,
     };

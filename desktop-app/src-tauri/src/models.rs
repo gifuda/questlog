@@ -315,8 +315,22 @@ pub struct Step {
     pub stage: StepStage,
     #[serde(default)]
     pub links: StepLinks,
+    /// TaskPackage 摘要（seal 后回写）。只存可移植信息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<StepPackageSummary>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Step 上存储的 TaskPackage 摘要（可移植，不含绝对路径或 CLI session）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepPackageSummary {
+    pub package_id: String,
+    pub plan_revision: u32,
+    pub package_hash: String,
+    pub objective: String,
+    pub executor: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

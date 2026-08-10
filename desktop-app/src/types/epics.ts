@@ -27,6 +27,15 @@ export interface EpicStep {
   actionable: boolean;
   todo_ref?: string | null;
   doc?: string | null;
+  /** TaskPackage 摘要（seal 后回写）。 */
+  package?: {
+    package_id: string;
+    plan_revision: number;
+    package_hash: string;
+    objective: string;
+    executor: string;
+    status: string;
+  };
   updated_at: string;
 }
 

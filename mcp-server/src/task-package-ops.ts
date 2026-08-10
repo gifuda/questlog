@@ -349,13 +349,27 @@ export async function sealTaskPackage(
   const saveResult = await savePackage(pkg);
   if ("error" in saveResult) return { error: saveResult.error };
 
+  // Write package summary back to .epics.json on the step
+  const summary = packageSummary(pkg);
+  const { updateStep } = await import("./epic-store.js");
+  await updateStep(cwd, pkg.step_id, {
+    package: {
+      package_id: summary.package_id,
+      plan_revision: summary.plan_revision,
+      package_hash: summary.package_hash,
+      objective: summary.objective,
+      executor: summary.executor,
+      status: summary.status,
+    },
+  });
+
   return {
     package_id: pkg.package_id,
     plan_revision: pkg.plan_revision,
     package_hash: pkg.package_hash,
     status: "sealed",
     sealed_at: pkg.sealed_at,
-    summary: packageSummary(pkg),
+    summary,
   };
 }
 
