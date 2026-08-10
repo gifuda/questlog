@@ -129,6 +129,36 @@
     "stageVerified": "Verified",
     "stageObserved": "Observed"
   },
+  "execution": {
+    "title": "Execution",
+    "package": "Package",
+    "runs": "Runs",
+    "status": {
+      "queued": "Queued",
+      "running": "Running",
+      "candidate": "Candidate",
+      "passed": "Passed",
+      "failed": "Failed",
+      "cancelled": "Cancelled",
+      "blocked": "Blocked",
+      "stale": "Stale"
+    },
+    "baseSha": "Base SHA",
+    "candidateSha": "Candidate commit",
+    "worktree": "Worktree",
+    "branch": "Branch",
+    "attempts": "Attempts",
+    "lastError": "Last error",
+    "noExecutions": "No executions yet",
+    "decisions": "Decision Requests",
+    "decisionQuestion": "Question",
+    "decisionKind": "Kind",
+    "resolve": "Resolve",
+    "pause": "Pause",
+    "cancel": "Cancel",
+    "retry": "Retry",
+    "cannotBypassServer": "UI cannot bypass server-side validation"
+  },
   "timeline": {
     "undoRemove": "Removed \"{{name}}\"",
     "undo": "Undo",

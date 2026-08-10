@@ -129,6 +129,36 @@
     "stageVerified": "已验证",
     "stageObserved": "已观察"
   },
+  "execution": {
+    "title": "执行记录",
+    "package": "任务包",
+    "runs": "运行",
+    "status": {
+      "queued": "排队中",
+      "running": "运行中",
+      "candidate": "待验证",
+      "passed": "通过",
+      "failed": "失败",
+      "cancelled": "已取消",
+      "blocked": "已阻塞",
+      "stale": "已过期"
+    },
+    "baseSha": "基础 SHA",
+    "candidateSha": "候选 commit",
+    "worktree": "工作树",
+    "branch": "分支",
+    "attempts": "尝试次数",
+    "lastError": "最近错误",
+    "noExecutions": "暂无执行记录",
+    "decisions": "待决问题",
+    "decisionQuestion": "问题",
+    "decisionKind": "类型",
+    "resolve": "回答",
+    "pause": "暂停",
+    "cancel": "取消",
+    "retry": "重试",
+    "cannotBypassServer": "UI 不能绕过服务端验证"
+  },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",
     "undo": "撤销",
