@@ -7,6 +7,9 @@ import { pushEpic, updateEpic, pushStep, updateStep, listEpics, epicProgress, ac
 import {
   prepareTaskPackage, validateTaskPackage, sealTaskPackage, enqueueStep,
 } from "./task-package-ops.js";
+import {
+  listDecisionRequests, resolveDecision,
+} from "./decision-request.js";
 
 const server = new McpServer({
   name: "todo-board",
@@ -719,6 +722,76 @@ server.tool(
     const result = await enqueueStep(resolved.cwd, input.step_id);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
     return { content: [{ type: "text", text: `📋 ${result.message}` }] };
+  }
+);
+
+// ─── list_decision_requests ───
+server.tool(
+  "list_decision_requests",
+  [
+    "List unresolved DecisionRequests that need human attention. These are generated when the Runner encounters scope expansion, base SHA drift, repeated failures, or authorization needs.",
+    "Call this when the user asks about blocked steps, pending decisions, or what needs attention. The user can resolve these from any MCP conversation — no context copy-paste needed.",
+  ].join("\n"),
+  {
+    include_resolved: z.boolean().optional().describe("Include already-resolved requests (default: false)"),
+    epic_id: z.string().optional().describe("Filter by epic"),
+    step_id: z.string().optional().describe("Filter by step"),
+  },
+  async (input) => {
+    const reqs = await listDecisionRequests({
+      include_resolved: input.include_resolved,
+      epic_id: input.epic_id,
+      step_id: input.step_id,
+    });
+    if (reqs.length === 0) {
+      return { content: [{ type: "text", text: "No pending decision requests." }] };
+    }
+    const lines = [`🔔 ${reqs.length} decision request(s) pending:`];
+    for (const req of reqs) {
+      lines.push("", `━━━ ${req.request_id} ━━━`);
+      lines.push(`  Kind: ${req.kind}`);
+      lines.push(`  Epic: ${req.epic_id}`);
+      lines.push(`  Step: ${req.step_id}`);
+      lines.push(`  Question: ${req.question}`);
+      if (req.options.length > 0) {
+        lines.push(`  Options: ${req.options.join(" | ")}`);
+      }
+      if (req.evidence_refs.length > 0) {
+        lines.push(`  Evidence: ${req.evidence_refs.join(", ")}`);
+      }
+      lines.push(`  Blocking: ${req.blocking}`);
+      lines.push(`  Created: ${req.created_at}`);
+      if (req.resolved) {
+        lines.push(`  ✅ Resolved by ${req.resolved_by}: ${req.resolution}`);
+      }
+    }
+    lines.push("", "Resolve with: resolve_decision(request_id, resolution)");
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// ─── resolve_decision ───
+server.tool(
+  "resolve_decision",
+  [
+    "Resolve a DecisionRequest — record the human's answer and unblock the step.",
+    "The resolution is stored with the responder's identity and timestamp. After resolving, the Runner can proceed with the step.",
+  ].join("\n"),
+  {
+    request_id: z.string().describe("The decision request ID from list_decision_requests"),
+    resolution: z.string().describe("The answer/approval/direction to give the Runner"),
+  },
+  async (input) => {
+    const result = await resolveDecision(input.request_id, input.resolution);
+    if ("error" in result) {
+      return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+    }
+    return {
+      content: [{
+        type: "text",
+        text: `✅ Decision ${input.request_id} resolved.\nThe Runner will proceed with: "${input.resolution}"`,
+      }],
+    };
   }
 );
 

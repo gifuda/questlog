@@ -47,6 +47,13 @@ pub fn run() {
             commands::add_step,
             commands::update_step,
             commands::delete_step,
+            // 执行状态模块 (G2 — Runner state)
+            commands::get_executions,
+            commands::get_execution,
+            commands::cancel_execution,
+            commands::retry_execution,
+            commands::pause_execution,
+            commands::cleanup_stale_executions,
         ])
         .setup(|app| {
             tray::setup_tray(app);

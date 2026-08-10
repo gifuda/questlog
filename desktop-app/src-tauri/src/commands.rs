@@ -902,6 +902,57 @@ fn arr_len(v: &serde_json::Value) -> u64 {
         .unwrap_or(0)
 }
 
+// ════════════════════════════════════════════════════════════════
+// Execution state commands (G2 — Runner state exposed to UI)
+// These read from the Runtime Store, not .epics.json.
+// ════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+pub fn get_executions() -> Result<Vec<crate::execution_store::Execution>, String> {
+    crate::execution_store::list_executions()
+}
+
+#[tauri::command]
+pub fn get_execution(id: String) -> Result<crate::execution_store::Execution, String> {
+    crate::execution_store::get_execution(&id)
+}
+
+#[tauri::command]
+pub fn cancel_execution(id: String) -> Result<(), String> {
+    crate::execution_store::release_lease(
+        &id,
+        crate::execution_store::ExecutionStatus::Cancelled,
+        Some("cancelled by user"),
+    )
+}
+
+#[tauri::command]
+pub fn retry_execution(id: String) -> Result<(), String> {
+    // Move the execution back to queued for retry
+    crate::execution_store::update_execution(
+        &id,
+        crate::execution_store::ExecutionUpdates {
+            status: Some(crate::execution_store::ExecutionStatus::Queued),
+            ..Default::default()
+        },
+    )
+}
+
+#[tauri::command]
+pub fn pause_execution(id: String) -> Result<(), String> {
+    // Release the lease and mark as blocked (paused by user)
+    crate::execution_store::release_lease(
+        &id,
+        crate::execution_store::ExecutionStatus::Blocked,
+        Some("paused by user"),
+    )
+}
+
+#[tauri::command]
+pub fn cleanup_stale_executions() -> Result<Vec<String>, String> {
+    crate::execution_store::cleanup_stale_leases()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
