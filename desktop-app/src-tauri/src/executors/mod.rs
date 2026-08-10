@@ -1,4 +1,4 @@
-//! Executor interface and Codex CLI adapter.
+//! Executor interface and CLI adapters (Codex, ZCode).
 //!
 //! The executor trait defines a uniform interface for running AI CLI tools
 //! (Codex, ZCode, etc.) in a controlled worktree. The Runner uses this
@@ -10,6 +10,15 @@
 //! - Saves session ID for resume
 //! - Supports timeout and cancel
 //! - Rejects dangerous parameters (danger-full-access, skip-approval)
+//!
+//! ZCode adapter:
+//! - Implements the same Executor trait
+//! - Probes for the ZCode CLI binary and its exec mode
+//! - On machines where ZCode is only a GUI app (no standalone CLI),
+//!   probe() accurately reports unavailable (never fakes availability)
+//! - When a CLI becomes available, the adapter works without changes
+
+pub mod zcode;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
