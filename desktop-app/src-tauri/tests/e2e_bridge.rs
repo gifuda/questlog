@@ -214,6 +214,60 @@ fn bridge_ready_package_to_zcode_execution() {
             );
             assert!(verifier[0]["passed"].as_bool().unwrap_or(false));
 
+            // ─── AttemptBundle 完整性验证 ───
+            let (manifest, bundle_path) = app_lib::attempt_bundle::read_bundle(&exec.id).unwrap();
+            eprintln!("AttemptBundle at: {}", bundle_path.display());
+
+            // 关键文件必须存在
+            for file in [
+                "manifest.json",
+                "task-package.json",
+                "environment-snapshot.json",
+                "events.jsonl",
+                "outcome.json",
+            ] {
+                assert!(
+                    bundle_path.join(file).exists(),
+                    "bundle missing required file: {}",
+                    file
+                );
+            }
+
+            // stdout/stderr 应该有（CLI 产出后被复制进来）
+            if let Some(ref stdout_ref) = manifest.stdout_ref {
+                assert!(bundle_path.join(stdout_ref).exists(), "stdout file missing");
+            }
+            if let Some(ref stderr_ref) = manifest.stderr_ref {
+                assert!(bundle_path.join(stderr_ref).exists(), "stderr file missing");
+            }
+
+            // integrity_hash 必须存在且可复算
+            let hash = manifest
+                .integrity_hash
+                .expect("bundle must be sealed with integrity hash");
+            eprintln!("Integrity hash: {}", &hash[..16]);
+            assert!(
+                app_lib::attempt_bundle::verify_integrity(&bundle_path).unwrap(),
+                "integrity hash verification failed — bundle tampered or incomplete"
+            );
+
+            // outcome 必须是 passed
+            let outcome_str = std::fs::read_to_string(bundle_path.join("outcome.json")).unwrap();
+            let outcome: serde_json::Value = serde_json::from_str(&outcome_str).unwrap();
+            assert_eq!(outcome["outcome"].as_str(), Some("passed"));
+
+            // environment-snapshot 必须有 executor 和 base_sha
+            let env_str =
+                std::fs::read_to_string(bundle_path.join("environment-snapshot.json")).unwrap();
+            let env: serde_json::Value = serde_json::from_str(&env_str).unwrap();
+            assert_eq!(env["executor"].as_str(), Some("zcode"));
+            assert_eq!(env["base_sha"].as_str(), Some(base_sha.as_str()));
+
+            eprintln!(
+                "✓ AttemptBundle fully verified: {} files, sealed, integrity OK",
+                std::fs::read_dir(&bundle_path).unwrap().count()
+            );
+
             // Main repo working tree must be untouched regardless
             let main_content = std::fs::read_to_string(repo_dir.path().join("src.ts")).unwrap();
             assert!(
