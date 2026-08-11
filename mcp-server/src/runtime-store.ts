@@ -145,15 +145,28 @@ export async function getPackage(
 
 /**
  * List all packages for a given step (latest revisions only).
+ *
+ * When multiple package_ids exist for the same step (e.g. a previous
+ * attempt was blocked and a new package was sealed), prefer the one
+ * that is actually actionable (sealed/ready) over terminal states
+ * (blocked/cancelled/passed/failed). Among equally-actionable packages,
+ * the most recently sealed wins.
  */
 export async function getPackagesForStep(stepId: string): Promise<TaskPackage[]> {
   const result = await readPackagesSafe();
   if (!("ok" in result)) return [];
   const all = result.data.packages
-    .filter((p) => p.step_id === stepId && p.status !== "superseded")
-    .sort((a, b) => b.plan_revision - a.plan_revision);
-  // Return only the latest revision
+    .filter((p) => p.step_id === stepId && p.status !== "superseded");
   if (all.length === 0) return [];
+  // Sort: actionable (sealed/ready) first, then by sealed_at desc (newest seal wins)
+  const actionableStatuses = new Set(["sealed", "ready"]);
+  all.sort((a, b) => {
+    const aActionable = actionableStatuses.has(a.status) ? 1 : 0;
+    const bActionable = actionableStatuses.has(b.status) ? 1 : 0;
+    if (aActionable !== bActionable) return bActionable - aActionable;
+    // Both same actionability → newest sealed_at wins
+    return (b.sealed_at || "").localeCompare(a.sealed_at || "");
+  });
   return [all[0]];
 }
 
