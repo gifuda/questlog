@@ -59,6 +59,7 @@ pub fn run() {
             commands::cleanup_stale_executions,
             commands::set_runner_enabled,
             commands::is_runner_running,
+            commands::get_runner_runtime_status,
             commands::get_runner_project_status,
             commands::set_runner_project_enabled,
             commands::get_epic_auto_execute,

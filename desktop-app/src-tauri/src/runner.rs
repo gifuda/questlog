@@ -21,7 +21,7 @@ use crate::executors::{
 use crate::models::{EpicStatus, StepStage};
 use crate::runner_git::{self, ScopeViolation};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -1201,6 +1201,76 @@ static RUNNER_RUNNING: AtomicBool = AtomicBool::new(false);
 /// Set true when a thread spawns, set false when the thread exits.
 static RUNNER_THREAD_ALIVE: AtomicBool = AtomicBool::new(false);
 
+/// Runner heartbeat: last successful poll (unix seconds), total poll count,
+/// and how many packages the last poll processed. Updated on EVERY poll
+/// iteration — an empty poll IS the proof of liveness, so the UI can tell
+/// "running but idle" apart from "dead". In-memory only: after an App restart
+/// the thread is rebuilt from any_project_enabled and the counters reset,
+/// which the UI surfaces as "not yet polled".
+static LAST_POLL_AT: AtomicU64 = AtomicU64::new(0);
+static POLL_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_PROCESSED: AtomicU32 = AtomicU32::new(0);
+static POLL_INTERVAL_SECS: AtomicU64 = AtomicU64::new(10);
+
+/// Live Runner status exposed to the UI via `get_runner_runtime_status`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunnerRuntimeStatus {
+    /// Intent flag: is the Runner supposed to be running?
+    pub running: bool,
+    /// Is the polling thread actually alive? (false right after a crash)
+    pub thread_alive: bool,
+    /// Unix seconds of the last successful poll; None = never polled.
+    pub last_poll_at: Option<u64>,
+    /// Total number of polls since the thread started.
+    pub poll_count: u64,
+    /// Packages processed by the last poll (0 = idle, alive).
+    pub last_processed: u32,
+    /// Poll interval in seconds.
+    pub poll_interval_secs: u64,
+    /// Packages currently in `ready` state waiting for pickup.
+    pub ready_packages: usize,
+    /// Executions currently in flight (running/candidate/verifying/…).
+    pub active_executions: usize,
+}
+
+/// Snapshot the Runner heartbeat for the UI.
+pub fn runtime_status() -> RunnerRuntimeStatus {
+    let last = LAST_POLL_AT.load(Ordering::SeqCst);
+    // Live queue counts: packages waiting for pickup + executions in flight.
+    // Read failures degrade to zero — the heartbeat is the liveness signal;
+    // the counts are informational for the status indicator.
+    let ready_packages = crate::execution_store::read_ready_packages()
+        .map(|pkgs| pkgs.len())
+        .unwrap_or(0);
+    let active_executions = crate::execution_store::list_executions()
+        .map(|execs| {
+            execs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.status,
+                        ExecutionStatus::Running
+                            | ExecutionStatus::Candidate
+                            | ExecutionStatus::Verifying
+                            | ExecutionStatus::CancelRequested
+                            | ExecutionStatus::PauseRequested
+                    )
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    RunnerRuntimeStatus {
+        running: RUNNER_RUNNING.load(Ordering::SeqCst),
+        thread_alive: RUNNER_THREAD_ALIVE.load(Ordering::SeqCst),
+        last_poll_at: if last > 0 { Some(last) } else { None },
+        poll_count: POLL_COUNT.load(Ordering::SeqCst),
+        last_processed: LAST_PROCESSED.load(Ordering::SeqCst),
+        poll_interval_secs: POLL_INTERVAL_SECS.load(Ordering::SeqCst),
+        ready_packages,
+        active_executions,
+    }
+}
+
 /// Spawn a background thread that polls for ready packages every poll_interval.
 /// The thread runs until RUNNER_RUNNING is set to false.
 /// Idempotent: if a thread is already alive, returns without spawning a new one.
@@ -1224,17 +1294,29 @@ pub fn start_runner_thread(config: RunnerConfig) {
     RUNNER_RUNNING.store(true, Ordering::SeqCst);
 
     let interval = config.poll_interval;
+    POLL_INTERVAL_SECS.store(interval.as_secs(), Ordering::SeqCst);
     thread::spawn(move || {
         let mut runner = Runner::new(config);
         log::info!("QuestLog Runner started, polling every {:?}", interval);
 
         while RUNNER_RUNNING.load(Ordering::SeqCst) {
             match runner.poll_once() {
-                Ok(n) if n > 0 => {
-                    log::info!("Runner processed {} package(s)", n);
+                Ok(n) => {
+                    // Heartbeat: every successful poll proves liveness, even
+                    // when there was nothing to process.
+                    LAST_POLL_AT.store(
+                        chrono::Utc::now().timestamp().max(0) as u64,
+                        Ordering::SeqCst,
+                    );
+                    POLL_COUNT.fetch_add(1, Ordering::SeqCst);
+                    LAST_PROCESSED.store(n as u32, Ordering::SeqCst);
+                    if n > 0 {
+                        log::info!("Runner processed {} package(s)", n);
+                    }
                 }
-                Ok(_) => {} // No work — sleep and retry
                 Err(e) => {
+                    // Poll failure is NOT a heartbeat — the UI will surface
+                    // staleness so the user can inspect.
                     log::warn!("Runner poll error: {}", e);
                 }
             }
@@ -1481,6 +1563,114 @@ mod tests {
         let mut runner = Runner::new(RunnerConfig::default());
         let count = runner.poll_once().unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn runtime_status_reports_heartbeat_state() {
+        let (_dir, _guard) = setup();
+        // Other tests in this process may have started a real polling thread
+        // that updates the heartbeat — snapshot before, restore after, so the
+        // test is order-independent.
+        let before = runtime_status();
+
+        // Simulate what the polling loop writes after a successful (idle) poll.
+        LAST_POLL_AT.store(1_700_000_000, Ordering::SeqCst);
+        POLL_COUNT.store(42, Ordering::SeqCst);
+        LAST_PROCESSED.store(0, Ordering::SeqCst);
+        let beat = runtime_status();
+        assert_eq!(beat.running, RUNNER_RUNNING.load(Ordering::SeqCst));
+        assert_eq!(beat.thread_alive, RUNNER_THREAD_ALIVE.load(Ordering::SeqCst));
+        assert_eq!(beat.last_poll_at, Some(1_700_000_000));
+        assert_eq!(beat.poll_count, 42);
+        assert_eq!(beat.last_processed, 0, "idle poll → 0 processed, still alive");
+        assert_eq!(beat.poll_interval_secs, 10);
+
+        // An empty poll must count as a heartbeat — the UI uses last_poll_at
+        // staleness (not processed>0) to tell "idle" from "dead".
+        POLL_COUNT.store(43, Ordering::SeqCst);
+        assert_eq!(runtime_status().poll_count, 43);
+
+        // Restore the snapshot so concurrent threads' history stays intact.
+        LAST_POLL_AT.store(before.last_poll_at.unwrap_or(0), Ordering::SeqCst);
+        POLL_COUNT.store(before.poll_count, Ordering::SeqCst);
+        LAST_PROCESSED.store(before.last_processed, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn runtime_status_counts_queue_and_inflight() {
+        let (dir, _guard) = setup();
+        let runtime = dir.path().join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+
+        // packages.json: 2 ready + 1 sealed → ready_packages must be 2.
+        // Full RawTaskPackage shape (the ready filter parses every ready
+        // package before counting).
+        let package = |id: &str, status: &str| {
+            serde_json::json!({
+                "schema_version": 1,
+                "package_id": id,
+                "epic_id": "e",
+                "step_id": "s",
+                "plan_revision": 1,
+                "project_path": "/tmp/p",
+                "repo_root": "/tmp/p",
+                "base_sha": "0".repeat(40),
+                "objective": "x",
+                "context_refs": [],
+                "scope": {"allowed_paths": ["src/**"], "forbidden_paths": [], "max_changed_files": 5},
+                "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write", "timeout_seconds": 60, "max_attempts": 2},
+                "acceptance": [{"type": "command", "command_id": "verify:candidate"}],
+                "preconditions": [],
+                "authority": {"auto_edit_worktree": true, "auto_commit_candidate": true, "auto_merge": false, "auto_push": false, "auto_deploy": false},
+                "status": status,
+                "sealed_at": "2026-08-11T00:00:00Z",
+                "package_hash": "h"
+            })
+        };
+        let packages = serde_json::json!({
+            "version": 1,
+            "packages": [
+                package("p1", "ready"),
+                package("p2", "ready"),
+                package("p3", "sealed")
+            ]
+        });
+        std::fs::write(runtime.join("packages.json"), packages.to_string()).unwrap();
+
+        // executions.json: 1 running + 1 passed → active_executions must be 1.
+        let exec = |id: &str, status: &str| {
+            serde_json::json!({
+                "id": id,
+                "package_id": "pkg_x",
+                "epic_id": "e",
+                "step_id": "s",
+                "project_path": "/tmp/p",
+                "status": status,
+                "lease": null,
+                "cli_session": null,
+                "worktree_path": null,
+                "branch": null,
+                "base_sha": "0".repeat(40),
+                "candidate_sha": null,
+                "attempts": 1,
+                "last_error": null,
+                "created_at": 1,
+                "updated_at": 1,
+                "attempt_no": 1,
+                "bundle_path": null,
+                "executor": null
+            })
+        };
+        let executions = serde_json::json!({
+            "version": 1,
+            "revision": 0,
+            "executions": [exec("e1", "running"), exec("e2", "passed")]
+        });
+        std::fs::write(runtime.join("executions.json"), executions.to_string()).unwrap();
+
+        let status = runtime_status();
+        assert_eq!(status.ready_packages, 2, "ready filter must exclude sealed");
+        assert_eq!(status.active_executions, 1, "only in-flight statuses count");
     }
 
     #[test]

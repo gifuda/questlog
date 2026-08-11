@@ -155,6 +155,55 @@ export function useRunner() {
   return { enabled, loading, error, toggle };
 }
 
+// ─── Runner runtime heartbeat ───
+
+export interface RunnerRuntimeStatus {
+  running: boolean;
+  thread_alive: boolean;
+  last_poll_at: number | null;
+  poll_count: number;
+  last_processed: number;
+  poll_interval_secs: number;
+  ready_packages: number;
+  active_executions: number;
+}
+
+/**
+ * useRunnerStatus — poll the Runner heartbeat so the UI can show whether the
+ * system is actually polling ("运转中 · Xs 前") vs switched on but not running
+ * ("未运转") vs stale ("疑似停滞"). The Runner beats its heartbeat on EVERY
+ * poll — even an empty one — so a fresh last_poll_at is proof of liveness even
+ * when there is nothing to do.
+ */
+export function useRunnerStatus() {
+  const [status, setStatus] = useState<RunnerRuntimeStatus | null>(null);
+  const [now, setNow] = useState(Date.now());
+
+  const refresh = useCallback(async () => {
+    try {
+      const data = await invoke<RunnerRuntimeStatus>("get_runner_runtime_status");
+      setStatus(data);
+    } catch {
+      setStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(() => {
+      refresh();
+      setNow(Date.now());
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [refresh]);
+
+  const lastPollSecsAgo = status?.last_poll_at
+    ? Math.max(0, Math.floor((now - status.last_poll_at * 1000) / 1000))
+    : null;
+
+  return { status, lastPollSecsAgo, refresh };
+}
+
 // ─── Per-project Runner control ───
 
 export interface ProjectRunnerStatus {

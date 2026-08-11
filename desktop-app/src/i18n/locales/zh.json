@@ -177,7 +177,14 @@
     "evidence": "证据",
     "customDecision": "输入其他处理意见",
     "submitDecision": "提交",
-    "decisionRecordedHint": "回答只记录决策，不会自动重启；请随后重试，或修订并重新封包。"
+    "decisionRecordedHint": "回答只记录决策，不会自动重启；请随后重试，或修订并重新封包。",
+    "runnerStatusRunning": "运转中 · {{secs}}s 前",
+    "runnerStatusStale": "疑似停滞 · {{secs}}s 前",
+    "runnerStatusOff": "未运转",
+    "runnerStatusHint": "Runner 心跳：每轮轮询（含空转）都会更新。绿灯=正常运转；黄灯=开关开着但很久没有成功轮询；灰灯=未运转。",
+    "runnerStatusActive": "⚡ 执行中 · {{count}} 个",
+    "runnerStatusQueued": "📥 待执行 · {{count}} 包",
+    "runnerStatusIdle": "○ 待命中 · {{secs}}s 前"
   },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",

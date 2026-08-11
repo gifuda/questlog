@@ -177,7 +177,14 @@
     "evidence": "Evidence",
     "customDecision": "Enter another decision",
     "submitDecision": "Submit",
-    "decisionRecordedHint": "An answer records the decision but does not restart work; retry explicitly, or revise and reseal."
+    "decisionRecordedHint": "An answer records the decision but does not restart work; retry explicitly, or revise and reseal.",
+    "runnerStatusRunning": "Running · {{secs}}s ago",
+    "runnerStatusStale": "Stale · {{secs}}s ago",
+    "runnerStatusOff": "Not running",
+    "runnerStatusHint": "Runner heartbeat: every poll (even idle) updates it. Green = polling; yellow = on but no successful poll recently; gray = not running.",
+    "runnerStatusActive": "⚡ Executing · {{count}}",
+    "runnerStatusQueued": "📥 Queued · {{count}} pkgs",
+    "runnerStatusIdle": "○ Idle · {{secs}}s ago"
   },
   "timeline": {
     "undoRemove": "Removed \"{{name}}\"",

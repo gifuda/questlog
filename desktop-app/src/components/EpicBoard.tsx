@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useEpics } from "../hooks/useEpics";
-import { useProjectRunner, getEpicAutoExecute, setEpicAutoExecute } from "../hooks/useExecutions";
+import { useProjectRunner, useRunnerStatus, getEpicAutoExecute, setEpicAutoExecute } from "../hooks/useExecutions";
 import { epicStatusBadge, stageOrder, stageLabel, stageIcon, statusOptions, statusRank } from "../epicConstants";
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
@@ -35,6 +35,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { t } = useTranslation();
   const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep } = useEpics(projectPath);
   const { status: projectStatus, loading: projectLoading, toggle: toggleProjectRunner } = useProjectRunner(projectPath);
+  const { status: runnerStatus, lastPollSecsAgo } = useRunnerStatus();
   const [showNewEpic, setShowNewEpic] = useState(false);
 
   // Backend already returns top-level epics newest-first; sort defensively.
@@ -71,8 +72,53 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
         </div>
       )}
 
-      {/* Runner toggle — per-project execution control */}
+      {/* Runner toggle — per-project execution control + live heartbeat */}
       <div className="px-4 py-1 border-b border-line/50 flex items-center justify-end gap-1.5">
+        {runnerStatus?.running ? (
+          runnerStatus.thread_alive && (lastPollSecsAgo ?? 999) < 30 ? (
+            runnerStatus.active_executions > 0 ? (
+              <span
+                className="flex items-center gap-1 text-[9px] font-medium text-blue-400 shrink-0"
+                title={t("execution.runnerStatusHint")}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                {t("execution.runnerStatusActive", { count: runnerStatus.active_executions })}
+              </span>
+            ) : runnerStatus.ready_packages > 0 ? (
+              <span
+                className="flex items-center gap-1 text-[9px] font-medium text-orange-400 shrink-0"
+                title={t("execution.runnerStatusHint")}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-orange-400" />
+                {t("execution.runnerStatusQueued", { count: runnerStatus.ready_packages })}
+              </span>
+            ) : (
+              <span
+                className="flex items-center gap-1 text-[9px] font-medium text-green-400 shrink-0"
+                title={t("execution.runnerStatusHint")}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                {t("execution.runnerStatusIdle", { secs: lastPollSecsAgo ?? "—" })}
+              </span>
+            )
+          ) : (
+            <span
+              className="flex items-center gap-1 text-[9px] font-medium text-yellow-400 shrink-0"
+              title={t("execution.runnerStatusHint")}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
+              {t("execution.runnerStatusStale", { secs: lastPollSecsAgo ?? "—" })}
+            </span>
+          )
+        ) : (
+          <span
+            className="flex items-center gap-1 text-[9px] font-medium text-faint shrink-0"
+            title={t("execution.runnerStatusHint")}
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-line-hover" />
+            {t("execution.runnerStatusOff")}
+          </span>
+        )}
         <button
           onClick={toggleProjectRunner}
           disabled={projectLoading}

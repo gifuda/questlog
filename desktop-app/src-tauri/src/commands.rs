@@ -1041,6 +1041,14 @@ pub fn is_runner_running() -> Result<bool, String> {
     Ok(crate::runner::is_running())
 }
 
+/// Live Runner heartbeat status: intent flag, thread liveness, last poll time,
+/// poll count, and last processed count. Lets the UI show "running & polling"
+/// vs "switched on but not running" vs "stale (no poll in a while)".
+#[tauri::command]
+pub fn get_runner_runtime_status() -> Result<crate::runner::RunnerRuntimeStatus, String> {
+    Ok(crate::runner::runtime_status())
+}
+
 /// Get the Runner status for a specific project (global + project + effective).
 #[tauri::command]
 pub fn get_runner_project_status(
