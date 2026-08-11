@@ -158,9 +158,7 @@ export function useRunner() {
 // ─── Per-project Runner control ───
 
 export interface ProjectRunnerStatus {
-  global_enabled: boolean;
   project_enabled: boolean;
-  effective: boolean;
 }
 
 /**

@@ -1166,26 +1166,32 @@ pub fn stop_runner() {
     RUNNER_RUNNING.store(false, Ordering::SeqCst);
 }
 
-/// Check if the Runner is currently enabled (will process packages).
-pub fn is_running() -> bool {
-    RUNNER_RUNNING.load(Ordering::SeqCst)
-}
-
-/// Enable or disable the Runner at runtime.
-/// Also persists the global flag to runner-config.json so it survives restarts.
-/// Returns the new state.
-pub fn set_enabled(enabled: bool) -> bool {
-    // Persist global flag
-    if let Err(e) = crate::runner_config::set_globally_enabled(enabled) {
-        log::warn!("Failed to persist runner global flag: {}", e);
-    }
-
-    if enabled {
+/// Ensure the Runner thread is running (start if not).
+/// Called when a project is enabled — no-op if already running.
+pub fn ensure_running() {
+    if !is_running() {
         start_runner_thread(RunnerConfig {
             enabled: true,
             poll_interval: Duration::from_secs(10),
             runner_id: format!("runner-{}", std::process::id()),
         });
+    } else {
+        // Already running — make sure it hasn't been stopped
+        RUNNER_RUNNING.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Check if the Runner is currently running (will process packages).
+pub fn is_running() -> bool {
+    RUNNER_RUNNING.load(Ordering::SeqCst)
+}
+
+/// Enable or disable the Runner at runtime.
+/// Kept for backward compatibility (set_runner_enabled Tauri command).
+/// Prefer per-project control via runner_config::set_project_enabled.
+pub fn set_enabled(enabled: bool) -> bool {
+    if enabled {
+        ensure_running();
     } else {
         stop_runner();
     }

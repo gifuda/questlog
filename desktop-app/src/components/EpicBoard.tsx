@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useEpics } from "../hooks/useEpics";
-import { useRunner, useProjectRunner } from "../hooks/useExecutions";
+import { useProjectRunner } from "../hooks/useExecutions";
 import { epicStatusBadge, stageOrder, stageLabel, stageIcon, statusOptions, statusRank } from "../epicConstants";
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
@@ -34,7 +34,6 @@ interface EpicBoardProps {
 export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { t } = useTranslation();
   const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep } = useEpics(projectPath);
-  const { enabled: runnerEnabled, loading: runnerLoading, error: runnerError, toggle: toggleRunner } = useRunner();
   const { status: projectStatus, loading: projectLoading, toggle: toggleProjectRunner } = useProjectRunner(projectPath);
   const [showNewEpic, setShowNewEpic] = useState(false);
 
@@ -72,42 +71,25 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
         </div>
       )}
 
-      {/* Runner toggle — global master switch + per-project switch */}
+      {/* Runner toggle — per-project execution control */}
       <div className="px-4 py-1 border-b border-line/50 flex items-center justify-end gap-1.5">
         <button
           onClick={toggleProjectRunner}
-          disabled={projectLoading || !runnerEnabled}
+          disabled={projectLoading}
           title={
-            !runnerEnabled
-              ? t("execution.projectRunnerGlobalOff")
-              : projectStatus?.effective
-                ? t("execution.projectRunnerEffective")
-                : t("execution.projectRunnerOn")
+            projectStatus?.project_enabled
+              ? t("execution.projectRunnerEffective")
+              : t("execution.projectRunnerOn")
           }
-          className={`px-2 py-0.5 rounded-full text-[9px] font-medium transition-colors shrink-0 disabled:opacity-30 ${
-            projectStatus?.effective
-              ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
-              : projectStatus?.project_enabled
-                ? "bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
-                : "bg-elevated text-faint hover:bg-line-hover"
-          }`}
-        >
-          📂 {projectStatus?.project_enabled ? t("execution.projectOn") : t("execution.projectOff")}
-        </button>
-        <button
-          onClick={toggleRunner}
-          disabled={runnerLoading}
-          title={runnerEnabled ? t("execution.runnerOn") : t("execution.runnerOff")}
           className={`px-2 py-0.5 rounded-full text-[9px] font-medium transition-colors shrink-0 disabled:opacity-40 ${
-            runnerEnabled
+            projectStatus?.project_enabled
               ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
               : "bg-elevated text-faint hover:bg-line-hover"
           }`}
         >
-          ⚙️ {runnerEnabled ? t("execution.runnerOn") : t("execution.runnerOff")}
+          📂 {projectStatus?.project_enabled ? t("execution.projectOn") : t("execution.projectOff")}
         </button>
       </div>
-      {runnerError && <div className="px-4 py-1 text-[10px] text-red-400 border-b border-line">{runnerError}</div>}
       <DecisionInbox />
 
       {/* 路线图主视图 */}

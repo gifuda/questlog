@@ -120,15 +120,27 @@ pub fn is_project_enabled(project_path: &str) -> bool {
 }
 
 /// Enable or disable a project for Runner execution.
+/// When at least one project is enabled, starts the Runner thread.
+/// When no projects are enabled, stops the Runner thread.
 pub fn set_project_enabled(project_path: &str, enabled: bool) -> Result<(), String> {
     let mut config = read_config();
     config
         .projects
         .insert(project_path.to_string(), ProjectRunnerEntry { enabled });
-    write_config(&mut config)
+    write_config(&mut config)?;
+
+    // Manage the Runner thread based on whether any project is enabled
+    let any_enabled = config.projects.values().any(|e| e.enabled);
+    if any_enabled {
+        crate::runner::ensure_running();
+    } else {
+        crate::runner::stop_runner();
+    }
+
+    Ok(())
 }
 
-/// Get the status for a project (enabled + whether global is on).
+/// Get the status for a project.
 pub fn get_project_status(project_path: &str) -> ProjectRunnerStatus {
     let config = read_config();
     let project_enabled = config
@@ -136,19 +148,12 @@ pub fn get_project_status(project_path: &str) -> ProjectRunnerStatus {
         .get(project_path)
         .map(|e| e.enabled)
         .unwrap_or(false);
-    ProjectRunnerStatus {
-        global_enabled: config.global_enabled,
-        project_enabled,
-        effective: config.global_enabled && project_enabled,
-    }
+    ProjectRunnerStatus { project_enabled }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRunnerStatus {
-    pub global_enabled: bool,
     pub project_enabled: bool,
-    /// True only if both global and project are enabled.
-    pub effective: bool,
 }
 
 // ─── Per-epic auto_execute ───
@@ -202,7 +207,6 @@ mod tests {
     fn default_config_all_off() {
         let (_dir, _guard) = setup_temp_runtime();
         let config = read_config();
-        assert!(!config.global_enabled);
         assert!(config.projects.is_empty());
     }
 
@@ -217,24 +221,17 @@ mod tests {
     }
 
     #[test]
-    fn project_status_effective() {
+    fn project_status_reflects_enable() {
         let (_dir, _guard) = setup_temp_runtime();
 
-        // Both off → not effective
+        // Default → off
         let status = get_project_status("/tmp/proj1");
-        assert!(!status.effective);
-
-        // Global on, project off → not effective
-        set_globally_enabled(true).unwrap();
-        let status = get_project_status("/tmp/proj1");
-        assert!(status.global_enabled);
         assert!(!status.project_enabled);
-        assert!(!status.effective);
 
-        // Both on → effective
+        // Enable → on
         set_project_enabled("/tmp/proj1", true).unwrap();
         let status = get_project_status("/tmp/proj1");
-        assert!(status.effective);
+        assert!(status.project_enabled);
     }
 
     #[test]
@@ -244,7 +241,7 @@ mod tests {
         std::fs::write(config_path(), "{ corrupt json").unwrap();
 
         let config = read_config();
-        assert!(!config.global_enabled); // safe default
+        assert!(config.projects.is_empty()); // safe default
     }
 
     #[test]
