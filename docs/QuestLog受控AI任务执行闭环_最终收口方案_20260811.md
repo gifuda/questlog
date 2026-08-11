@@ -12,12 +12,14 @@
 
 ### 0.1 当前代码状态与证据边界
 
-当前 HEAD 为 `be2984f`。工作区存在 19 个已修改文件和 1 个新增文件，累计约 `+1659/-232`，覆盖 TaskPackage、Runner、ZCode、Execution、DecisionRequest、AttemptBundle、React UI、i18n 和测试。这些内容均为**未提交候选改动**，不能视为已经发布、已安装 App 已加载或真实项目可安全自动执行。
+当前 HEAD 为 `e874f951`。三支柱工作已实现并提交：受信验收命令注册表扩充至 11 个命令（`docs/acceptance-commands.md`）、worktree 内 `node_modules` symlink 使验收命令在隔离 worktree 可用、MCP `verify_pickup_readiness` 就绪门禁（enqueue 返回 `runner_eligible`/`blockers`）、Runner 在应用启动且项目已启用时自动开启线程。step-0 验证期间发现的 7 个缺陷也已全部修复并提交（见 0.4，均含回归测试）。源码工作区干净，仅剩 `.questlog-output` 输出与 `node_modules` 依赖目录未跟踪（均属 Runner 基础设施，不入候选提交）。这些提交仍不能视为已经发布、已安装 App 已加载或真实项目可安全自动执行。
 
-本轮中断前取得的证据：
+step-0 验证与既有快照证据：
 
 | 证据 | 结果 | 可证明 | 不能证明 |
 |---|---|---|---|
+| step-0 验证包 `pkg_60acfb94` | outcome=`passed`；候选 commit `3840e667` | sealed→ready→Runner 领取→ZCode 隔离 worktree 施工→candidate commit→exact 验收的完整链路通过 | 真实生产闭环；C2/C6 未完成场景 |
+| `cargo:check`（候选 worktree 上执行） | exit 0 | acceptance 精确绑定候选 commit 且通过 Rust 编译检查 | 全量测试、strict Clippy 与完整 E2E |
 | MCP 全套测试与 build（较早候选快照） | 124 passed、1 skipped；TypeScript build 通过 | Node 侧既有功能及部分 TaskPackage 策略未明显回归 | 最新全部未提交改动仍全绿；真实生产闭环 |
 | MCP TaskPackage 定向测试（最新候选） | 21 passed；build 通过 | 默认执行器、manual、canonical hash、Plan Store 校验等定向逻辑可编译 | Rust/App/真实执行的组合正确性 |
 | 前端测试与 Vite build（较早候选快照） | 3 passed；build 通过 | i18n 基础完整、前端可构建 | 原生 Tauri invoke、按钮后端行为、窄窗口视觉与已安装 App |
@@ -27,7 +29,7 @@
 | 真实 ZCode exact-candidate fixture（较早候选快照） | `ready → Passed`，ZCode 0.16.1，候选 SHA 与 verifier SHA 一致，主工作区内容不变 | 正向隔离 worktree 与候选提交路径曾经跑通 | 最新全部改动仍保持通过；取消、暂停、超时和真实项目安全 |
 | `git diff --check` | 当前通过 | 当前文本 diff 无空白错误 | 功能正确、App 可发布或提交边界合理 |
 
-因此当前裁决为：**可继续作为收口候选开发快照，不可开启真实项目 Runner，不可声明闭环完成，不可据此 merge/push/deploy。**
+因此当前裁决为：**三支柱与 step-0 验证已完成；C8（文档）进行中，C2（取消/超时）与 C6（谱系 UI）仍未完成；不可开启真实项目 Runner，不可声明闭环完成，不可据此 merge/push/deploy。**
 
 ### 0.2 第一性原理：最终只保留一个机器对齐核心
 
@@ -80,7 +82,23 @@
 4. 到里程碑、方向变化、高风险边界或最终合并前再让人审核，而不是每个普通机械步骤都要求复制、轮询或手工重新封包。
 5. `manual` 始终只追踪；Codex 始终只设计和推送；生产执行始终只允许批准的 ZCode adapter。
 
-### 0.4 当前代码发现的问题与解决思路
+### 0.4 step-0 验证发现并修复的 7 个缺陷
+
+打通 `pkg_60acfb94 → 候选 3840e667 → passed` 完整链路的 step-0 验证工程中，发现并修复了以下 7 个缺陷（均已提交，除 B5 外均含回归测试）：
+
+| ID | 缺陷 | 现象与根因 | 修复（commit） |
+|---|---|---|---|
+| B1 | seal hash 竞态 | seal 先对 `plan_revision=N` 的内容计算 hash，再把 revision 提升到 N+1（revision 属于可哈希内容），导致存储的 hash 过期，Runner 领取时判 `sealed package hash mismatch` | 先算 draft hash 决定是否 bump，bump 后再对最终内容（含新 revision）计算不可变 hash（`ed0f13e`） |
+| B2 | `getPackagesForStep` 歧义 | 同一 Step 存在多个 package（旧 attempt blocked、新包已 seal）且 `plan_revision` 相同时排序不确定，可能取到终态旧包 | 可执行状态（sealed/ready）优先于终态，再按 `sealed_at` 倒序，最新 seal 胜出（`79213d6`） |
+| B3 | `node_modules` 被误判越权 | worktree 为让验收命令可用而 symlink 主仓 `node_modules`，symlink 出现在 changed paths 触发 scope violation | 将 `node_modules` 视同 `.questlog-output` 归为 Runner 基础设施，覆盖嵌套路径（`de86c93`） |
+| B4 | ZCode 自动提交后候选 commit 失败 | ZCode CLI 遵循“改后提交”约定会自行 commit；Runner 再执行 `git add + git commit` 时无未暂存改动而失败（空错误） | 检测 `HEAD != base_sha`（CLI 已提交）时改用 `git commit --amend` 附加 QuestLog trailer；正常路径不变（`d509147`） |
+| B5 | MCP 陈旧进程 | 验证期间 MCP server 进程加载的是旧构建，工具行为与最新源码不一致，验证结果不可信 | 重建并重启 MCP/App 后复验通过；教训：验证前必须核对进程与当前 HEAD 构建一致（对齐 P1-10） |
+| B6 | 中文文件名被 octal 转义 | git 默认 `core.quotePath=true`，中文文件名被八进制转义，与 UTF-8 的 `allowed_paths` 比较失败，中文文件名全部误判 scope violation | 所有读路径 git 命令加 `-c core.quotePath=false` 并补测试（`8d73931`） |
+| B7 | order-predecessor 死锁 | preflight 依赖检查要求同一 Epic 内低 order 前置步骤必须 `observed`，但自主执行步骤只能自动推进到 `coded`（candidate 已产出），`observed` 需跨会话人工确认——第 N 步永远无法运行 | 隐式 order 前置只要求 `coded`；显式 `depends_on` 仍要求 `observed`（`9072794`） |
+
+另：候选 commit 一律加 `--no-verify`（`e874f95`）——Runner 候选提交发生在隔离 worktree 且 scope 已由 `verify_changed_paths_in_scope` 校验，不应被针对人工提交的 pre-commit 守卫（对中文文件名存在已知 bug）拦截。
+
+### 0.5 当前代码发现的问题与解决思路
 
 #### P0：不解决不得进入真实项目 Runner
 
@@ -118,7 +136,7 @@
 | P1-9 | 旧 package/schema、已安装 App 与当前未提交数据结构之间没有升级/降级证据 | 增加 schema_version migration、旧状态映射、只读回滚和备份恢复测试；未知新字段旧 App 不得误执行 |
 | P1-10 | 代码、构建产物、已安装 App 和运行中进程版本尚未对齐 | 最终验收必须记录 source HEAD/candidate、bundle version、实际启动二进制 hash/version 和 Runtime schema，不以本地 build 成功替代已安装 App 证据 |
 
-### 0.5 人工介入策略：按风险设检查点，不按步骤机械打断
+### 0.6 人工介入策略：按风险设检查点，不按步骤机械打断
 
 每个 Epic 设 `approval_policy`，由人创建方案时选择：
 
@@ -138,7 +156,7 @@
 - 两种以上合理实现方向，或候选结果改变原方案发力方向；
 - merge、push、PR、发布、部署、清理证据或真实项目 canary。
 
-### 0.6 收口施工顺序
+### 0.7 收口施工顺序
 
 只按以下顺序推进，避免在错误方向上把自动化做得更快：
 
@@ -151,7 +169,7 @@
 7. **S6 全门禁**：Node、前端、Rust fmt/strict Clippy/test/build、真实 ZCode 成功/失败/取消/超时/漂移/新文件/双实例 E2E。
 8. **S7 放行**：先 fixture，再 shadow；真实项目 canary 必须单独获得用户授权，且仍禁止自动 merge/push/deploy。
 
-### 0.7 最终要求与完成定义
+### 0.8 最终要求与完成定义
 
 以下全部满足后，才允许把状态从“候选收口”改为“可进入 bounded auto”：
 
@@ -201,7 +219,21 @@
 - `shadow_ready`：真实项目只计算将领取什么，不启动 CLI；
 - `bounded_auto_ready`：仅用户明确武装的项目/Epic/预算可自动执行。
 
-当前裁决：**尚未达到 `fixture_ready` 的最终证据要求；保持 Runner OFF。**
+当前裁决：**三支柱与 step-0 验证已完成；C8（文档）进行中，C2（取消/超时）与 C6（谱系 UI）仍未完成；尚未达到 `fixture_ready` 的最终证据要求；保持 Runner OFF。**
+
+### 0.9 requirement-to-evidence：C0-C8 当前状态
+
+| 施工包 | 状态 | 证据 |
+|---|---|---|
+| C0 冻结基线和提交边界 | 已完成 | 全部改动按功能拆分提交，HEAD `e874f951`；源码工作区干净；`git diff --check` 通过 |
+| C1 固化执行器与 TaskPackage 策略 | 已完成 | 默认执行器 `zcode`；`manual` 只登记不领取；生产 Runner 对 `codex` fail-closed；acceptance registry 11 个命令（`docs/acceptance-commands.md`） |
+| C2 真实进程监督、取消和超时 | 未完成 | 进程树真实终止、pause/cancel/timeout 终态与晚到结果 CAS 尚无完整 E2E |
+| C3 精确候选 commit 验证 | 已完成 | acceptance 在候选 worktree 执行（HEAD==candidate、工作树干净前置检查）；`pkg_60acfb94` → `cargo:check` exit 0 → `3840e667` passed；`--no-verify`/`quotePath=false`/amend 修复（`e874f95`、`8d73931`、`d509147`） |
+| C4 领取前重新验证与状态契约 | 已完成 | MCP `verify_pickup_readiness` 门禁 + enqueue 返回 `runner_eligible`/`blockers`；poll_once 领取前按项目/方案开关、hash/revision 过滤 |
+| C5 DecisionRequest 接入 Runner | 已完成 | resolution 连接执行动作（`9a8053b`）；acceptance 失败 → DecisionRequest + sealed AttemptBundle E2E（`338cf06`） |
+| C6 完成 App UI 人工控制台 | 未完成 | attempt 谱系 UI（候选 diff/verifier 对比）未完成；Runner 开关与执行面板已有 |
+| C7 测试、质量和兼容性收口 | 部分（step-0 基础） | `pkg_60acfb94` outcome=passed、candidate `3840e667`、`cargo:check` exit 0；全量门槛待 C2/C6 补齐后复验 |
+| C8 文档、安装和可回滚放行 | 进行中 | 本文档（0.1-0.9 状态更新）为 C8 一部分；README/安装/迁移/feature flags/AttemptBundle 契约文档待完成 |
 
 ## 1. 收口结论
 

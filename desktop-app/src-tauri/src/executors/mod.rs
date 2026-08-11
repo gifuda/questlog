@@ -109,7 +109,26 @@ pub fn terminate_process_tree(handle: &mut ExecutionHandle) -> Result<(), String
                 Err(e)
             }
         })
-        .map_err(|e| format!("kill process tree failed: {e}"))
+        .map_err(|e| format!("kill process tree failed: {e}"))?;
+
+    // Reap the child and confirm the kill was effective. The group was already
+    // TERM→KILLed, so this never fails hard: a timeout only means the child's
+    // exit hasn't been observed yet, which we surface as a warning.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if handle.child.try_wait().ok().flatten().is_some() {
+            break; // reaped — the kill was effective
+        }
+        if std::time::Instant::now() >= deadline {
+            log::warn!(
+                "terminate_process_tree: child {} did not exit within 2s of KILL",
+                handle.child.id()
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 // ─── Codex adapter ───

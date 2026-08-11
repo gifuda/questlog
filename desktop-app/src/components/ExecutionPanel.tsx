@@ -3,7 +3,7 @@
  *
  * Shows:
  * - TaskPackage summary (objective, hash, executor)
- * - Run timeline (attempts, status, timestamps)
+ * - Run timeline (attempts, status, timestamps, retry lineage via parent_attempt_id)
  * - Git evidence (base SHA, candidate SHA, worktree, branch)
  * - DecisionRequest inbox (blocked questions needing human input)
  * - Action buttons (pause, cancel, retry)
@@ -41,23 +41,47 @@ function formatSha(sha: string | null): string {
   return sha.length > 12 ? `${sha.slice(0, 8)}…` : sha;
 }
 
-function ExecutionRow({ exec }: { exec: Execution }) {
+function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) {
   const { t } = useTranslation();
   const { cancel, retry, pause } = useExecutionActions();
   const [expanded, setExpanded] = useState(false);
 
   const statusKey = `execution.status.${exec.status}`;
+  // Retry attempts carry a parent_attempt_id pointing at the previous attempt in the chain.
+  const parentAttemptId = exec.parent_attempt_id;
+  const isRetry = Boolean(parentAttemptId);
 
   return (
-    <div className="border rounded-lg p-3 mb-2 bg-white shadow-sm">
+    <div
+      className={`border rounded-lg p-3 mb-2 bg-white shadow-sm${isRetry ? " border-l-4 border-l-accent" : ""}`}
+      style={{ marginLeft: depth > 0 ? depth * 16 : 0 }}
+    >
       <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(!expanded)}>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[exec.status]}`}>
             {t(statusKey, exec.status)}
+          </span>
+          {/* Attempt number — prominent lineage marker */}
+          <span className="text-xs font-semibold text-muted">
+            {isRetry ? (
+              <>
+                Attempt {exec.attempt_no} <span className="font-normal text-faint">(retry)</span>
+              </>
+            ) : (
+              <>Attempt {exec.attempt_no}</>
+            )}
           </span>
           <span className="text-xs text-gray-500">
             #{exec.attempts} · {formatTimestamp(exec.updated_at)}
           </span>
+          {/* Lineage badge — how this attempt links into the retry chain */}
+          {parentAttemptId ? (
+            <span className="text-[10px] text-muted" title={`parent: ${parentAttemptId}`}>
+              ↳ retry #{exec.attempt_no} from {parentAttemptId.slice(0, 8)}
+            </span>
+          ) : (
+            <span className="text-[10px] text-muted">attempt #{exec.attempt_no}</span>
+          )}
         </div>
         <span className="text-xs text-gray-400">{expanded ? "▼" : "▶"}</span>
       </div>
@@ -197,6 +221,50 @@ export default function ExecutionPanel({ stepId }: { stepId?: string }) {
     return executions.filter((e) => e.step_id === stepId);
   }, [executions, stepId]);
 
+  // Group executions into retry chains: all attempts of one package form a chain,
+  // ordered root-first by following parent_attempt_id links.
+  const chains = useMemo(() => {
+    const byPackage = new Map<string, Execution[]>();
+    for (const exec of filtered) {
+      const list = byPackage.get(exec.package_id) ?? [];
+      list.push(exec);
+      byPackage.set(exec.package_id, list);
+    }
+
+    const result: Execution[][] = [];
+    for (const execs of byPackage.values()) {
+      const byId = new Map(execs.map((e) => [e.id, e]));
+      const childrenOf = new Map<string, Execution[]>();
+      const roots: Execution[] = [];
+
+      for (const exec of execs) {
+        const parent = exec.parent_attempt_id ? byId.get(exec.parent_attempt_id) : undefined;
+        if (parent) {
+          const siblings = childrenOf.get(parent.id) ?? [];
+          siblings.push(exec);
+          childrenOf.set(parent.id, siblings);
+        } else {
+          roots.push(exec);
+        }
+      }
+
+      const byChain = (a: Execution, b: Execution) =>
+        a.attempt_no - b.attempt_no || a.created_at - b.created_at;
+      for (const siblings of childrenOf.values()) siblings.sort(byChain);
+      roots.sort(byChain);
+
+      const attempts: Execution[] = [];
+      const visit = (exec: Execution) => {
+        attempts.push(exec);
+        for (const child of childrenOf.get(exec.id) ?? []) visit(child);
+      };
+      for (const root of roots) visit(root);
+
+      result.push(attempts);
+    }
+    return result;
+  }, [filtered]);
+
   if (loading) {
     return <div className="text-xs text-gray-400 p-2">{t("execution.title")}…</div>;
   }
@@ -210,8 +278,12 @@ export default function ExecutionPanel({ stepId }: { stepId?: string }) {
       <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
         {t("execution.runs")} ({filtered.length})
       </h4>
-      {filtered.map((exec) => (
-        <ExecutionRow key={exec.id} exec={exec} />
+      {chains.map((attempts) => (
+        <div key={attempts[0].id}>
+          {attempts.map((exec, depth) => (
+            <ExecutionRow key={exec.id} exec={exec} depth={depth} />
+          ))}
+        </div>
       ))}
     </div>
   );

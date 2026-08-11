@@ -1572,4 +1572,90 @@ mod tests {
             .unwrap_or(false);
         assert!(!still_alive, "timed-out executor process must be gone");
     }
+
+    /// Find the PID of the direct child of `parent` (e.g. the `sleep` the test
+    /// shell spawns in the background). Returns None if there is none yet.
+    fn child_pid(parent: u32) -> Option<u32> {
+        let out = std::process::Command::new("pgrep")
+            .args(["-P", &parent.to_string()])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .and_then(|line| line.trim().parse().ok())
+    }
+
+    /// Whether a process with the given PID exists (kill -0).
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_terminates_process_group() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let (_dir, _guard) = setup();
+        let id =
+            execution_store::enqueue_execution("pkg-cancel", "e1", "s1", "/tmp/proj", "abc123")
+                .unwrap();
+        execution_store::acquire_lease(&id, "runner-test").unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let stdout_path = output_dir.path().join("stdout.log");
+        let stderr_path = output_dir.path().join("stderr.log");
+        let stdout = std::fs::File::create(&stdout_path).unwrap();
+        let stderr = std::fs::File::create(&stderr_path).unwrap();
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & wait"])
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+        let mut handle = ExecutionHandle {
+            child,
+            session_id: None,
+            stdout_path,
+            stderr_path,
+        };
+
+        // Wait ~500ms for the process tree to come up, then locate the
+        // grandchild `sleep` (child of the shell).
+        let sleep_pid = (0..20)
+            .find_map(|_| {
+                std::thread::sleep(Duration::from_millis(100));
+                child_pid(pid)
+            })
+            .expect("grandchild sleep process should have started");
+        assert!(
+            process_alive(sleep_pid),
+            "sleep grandchild must be alive before cancel"
+        );
+
+        // Simulate what the supervisor does on CancelRequested.
+        terminate_process_tree(&mut handle).unwrap();
+
+        // The grandchild must be gone; death/reap is async, so poll briefly.
+        let gone = (0..20).any(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            !process_alive(sleep_pid)
+        });
+        assert!(
+            gone,
+            "cancelled executor's sleep grandchild must be gone (pid {sleep_pid})"
+        );
+    }
 }

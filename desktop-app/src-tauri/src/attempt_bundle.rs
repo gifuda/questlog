@@ -1,9 +1,11 @@
 //! AttemptBundle — immutable per-execution evidence directory.
 //!
-//! Each execution creates an independent, immutable evidence directory under
-//! `<runtime>/questlog-runtime/attempts/<execution_id>/`. This is the data
-//! foundation for execution memory: every attempt from creation to outcome
-//! has its raw artifacts sealed here, queryable locally without AI summaries.
+//! This module is the data foundation for **execution memory**: each execution
+//! creates an independent, immutable evidence directory under
+//! `<runtime>/questlog-runtime/attempts/<execution_id>/`, where every artifact
+//! from creation to outcome is sealed. Raw artifacts are queryable locally
+//! without AI summaries — summaries and UI labels are always derived data,
+//! rebuildable from these raw files.
 //!
 //! Layout (§14.2 of the finalization plan):
 //! ```text
@@ -20,6 +22,60 @@
 //! ├── decisions.json              — DecisionRequest references
 //! └── outcome.json                — final conclusion
 //! ```
+//!
+//! ## AttemptManifest
+//!
+//! `manifest.json` is the index/entry point of a bundle (`AttemptManifest`).
+//! It records:
+//! - **Provenance & linkage**: `execution_id`, `attempt_no` (position in the
+//!   retry chain; 1 = first attempt), `parent_attempt_id` (links a retry back
+//!   to the prior attempt; `None` for first attempts), `epic_id` / `step_id`,
+//!   `base_sha` and `candidate_sha` (`None` until a candidate is committed).
+//! - **Package context**: `package_id`, `plan_revision`, `executor`, and the
+//!   optional `hypothesis` — the single primary fix hypothesis driving a retry
+//!   (`None` for the first attempt).
+//! - **File references**: relative filenames of every evidence artifact in the
+//!   bundle (`task_package_ref`, `environment_snapshot_ref`, `raw_trace_ref`,
+//!   and optional `stdout_ref` / `stderr_ref` / `diff_ref` / `candidate_ref` /
+//!   `verifier_ref` / `decisions_ref`). Optional refs are `None` when the
+//!   artifact was never produced.
+//! - **Lifecycle state**: `outcome` (starts as `"running"` until sealed),
+//!   `integrity_hash` (`None` until seal), `created_at` / `sealed_at` timestamps.
+//!
+//! ## Bundle lifecycle: create → write evidence → seal
+//!
+//! 1. **Create** — `create_bundle_dir(execution_id)` mkdirs the bundle dir
+//!    (idempotent) after `validate_id` rejects path traversal, absolute paths,
+//!    and shell metacharacters (F3 audit fix).
+//! 2. **Write evidence** — as the execution progresses, the Runner appends
+//!    artifacts to the dir: manifest, task-package snapshot, environment
+//!    snapshot, append-only `events.jsonl`, CLI stdout/stderr copies, diff
+//!    patch, candidate info, verifier results, decision requests. All writes
+//!    are atomic (temp-file + rename) so a partial bundle never shows a torn file.
+//! 3. **Seal** — `write_outcome_and_seal` writes `outcome.json`, updates the
+//!    manifest (outcome, candidate SHA, `sealed_at`), computes the integrity
+//!    hash over every content file, and rewrites the manifest with the final
+//!    hash. A sealed bundle is immutable: retries create a NEW attempt dir,
+//!    never overwrite the old one.
+//!
+//! ## Integrity hash
+//!
+//! `integrity_hash` is a SHA-256 over all content files in the bundle dir at
+//! seal time, with files sorted by name for deterministic ordering.
+//! `manifest.json` itself is excluded (it stores the hash — including it would
+//! be a self-reference) and so are atomic-write temp files (`<name>.tmp-<uuid>`,
+//! F1 audit fix). Its purpose is tamper evidence: `verify_integrity` recomputes
+//! the hash over the dir and reports whether the recorded hash still matches,
+//! so a sealed bundle can be trusted as the ground-truth record of an execution.
+//!
+//! ## Readers (Trace Query)
+//!
+//! The read side (`read_manifest`, `read_bundle`, `list_bundles_for_step`,
+//! `list_bundles_for_epic`) powers Trace Query: the Tauri commands
+//! `get_attempt_bundles(step_id)` and `get_attempt_detail(execution_id)`.
+//! These readers scan sealed manifests to reconstruct execution history —
+//! including retry chains via `parent_attempt_id` — without needing the AI
+//! session that produced them.
 //!
 //! Rules:
 //! - Raw files are append/seal-only; retry creates a NEW attempt dir, never overwrites.
