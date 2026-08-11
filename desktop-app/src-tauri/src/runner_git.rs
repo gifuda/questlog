@@ -340,6 +340,11 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 
 /// Create a candidate commit in the worktree with QuestLog trailers.
 /// Only commits paths that are in the allowed scope.
+///
+/// If the CLI executor already created its own commit (common with ZCode
+/// which follows "commit after change" conventions), the existing commit
+/// is amended to add QuestLog trailers. If there are uncommitted changes,
+/// they are staged and committed. If there are no changes at all, returns None.
 #[allow(clippy::too_many_arguments)]
 pub fn create_candidate_commit(
     worktree_path: &Path,
@@ -351,13 +356,18 @@ pub fn create_candidate_commit(
     allowed_patterns: &[String],
     base_sha: &str,
 ) -> Result<Option<String>, String> {
-    // Get changes relative to the base SHA
+    // Check if the CLI executor already committed (HEAD != base_sha).
+    // This happens with ZCode, which auto-commits after making changes.
+    let current_head = read_head_sha(worktree_path)?;
+    let cli_already_committed = current_head != base_sha;
+
+    // Get changes relative to the base SHA (includes committed + uncommitted)
     let changed = get_changed_paths(worktree_path, base_sha)?;
     if changed.is_empty() {
         return Ok(None); // No changes — no commit
     }
 
-    // Stage only allowed paths
+    // Stage only allowed paths (for uncommitted changes; harmless if already committed)
     let mut staged_any = false;
     for path in &changed {
         let is_allowed = !is_control_plane_path(path)
@@ -372,11 +382,7 @@ pub fn create_candidate_commit(
         }
     }
 
-    if !staged_any {
-        return Ok(None);
-    }
-
-    // Create the commit with trailers
+    // QuestLog trailer message
     let message = format!(
         "QuestLog auto-execution\n\n\
         {prefix}Epic: {epic_id}\n\
@@ -391,17 +397,36 @@ pub fn create_candidate_commit(
         execution_id = execution_id,
     );
 
-    let output = Command::new("git")
-        .args(["commit", "-m", &message])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| format!("git commit failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "git commit failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    if cli_already_committed {
+        // CLI executor already committed. Amend to add QuestLog trailers.
+        // `git commit --amend -m` replaces the message but keeps the tree.
+        // Staged changes (if any) get folded in too.
+        let output = Command::new("git")
+            .args(["commit", "--amend", "-m", &message])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| format!("git commit --amend failed: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git commit --amend failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    } else if !staged_any {
+        return Ok(None);
+    } else {
+        // Normal path: commit the staged changes with QuestLog trailers
+        let output = Command::new("git")
+            .args(["commit", "-m", &message])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| format!("git commit failed: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git commit failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
     }
 
     // Get the commit SHA
@@ -642,5 +667,67 @@ mod tests {
 
         // Cleanup
         let _ = remove_worktree(repo, &wt.path);
+    }
+
+    #[test]
+    fn candidate_commit_amends_when_cli_already_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        Command::new("git").arg("init").current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("src.rs"), "fn main() {}\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let base = read_head_sha(repo).unwrap();
+
+        // Simulate CLI executor: modify + commit on its own
+        std::fs::write(repo.join("src.rs"), "fn main() { /* docs added */ }\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "docs: add comments (ZCode auto-commit)"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        // Now create_candidate_commit should amend the existing commit
+        let result = create_candidate_commit(
+            repo,
+            "epic_test",
+            "step_test",
+            "pkg_test",
+            1,
+            "exec_test",
+            &["src.rs".to_string()],
+            &base,
+        );
+        match result {
+            Ok(Some(sha)) => {
+                // Verify the amended commit has QuestLog trailers
+                let log = Command::new("git")
+                    .args(["log", "-1", "--format=%B"])
+                    .current_dir(repo)
+                    .output()
+                    .unwrap();
+                let msg = String::from_utf8_lossy(&log.stdout);
+                assert!(msg.contains("QuestLog auto-execution"), "amended message should have QuestLog header");
+                assert!(msg.contains("QuestLog-Epic: epic_test"), "should have trailer");
+                assert!(sha != base, "candidate SHA should differ from base");
+            }
+            Ok(None) => panic!("should have produced a candidate commit"),
+            Err(e) => panic!("create_candidate_commit failed: {e}"),
+        }
     }
 }
