@@ -48,3 +48,41 @@ S1 通过。安全基线成立：**ymos 当前完全不可被 Runner 触碰**。
 - 在 ymos 注册一个只读 step：如"读取并总结 InfoFlow/ 下某个文档的结构"
 - 封包：allowed_paths 限定只读路径，executor=zcode，sandbox=read-only
 - 验证：ZCode 在 ymos worktree 中只读执行、无 diff 产生、候选 commit 不创建（NoDiff 处理）、验收通过
+
+---
+
+## 更新（2026-08-11，S1.1 后追加）
+
+### Canary 暴露的 3 个真实发现（全部已处理或已记录）
+
+**发现 1：ymos 误删除 60+ Brain/ 文件（事故，已复原）**
+- 用户确认是误删除。`git checkout -- .` 全部复原，Brain/ 目录完整还原（SOP×6、references 全量、ymos-diagnosis、复盘档案）。
+- 教训：**未经用户确认前，绝不对真实项目工作区执行恢复/清理/提交操作**。发现大量删除时要立即停下询问。
+
+**发现 2：git_clean 门禁把 untracked 判为脏（已修复）**
+- ymos 有 57 个有意保留的 untracked 工作产物（_Manager 方案、.zcode/plans）——这是活跃项目常态。
+- 修复：Node `isGitClean` + Rust `is_worktree_clean` 忽略 `??` 行，只检查 tracked 修改（commit fb45c03，封包执行，4 验收全过）。
+- ymos .gitignore 补充 QuestLog 产物（.task-packages/、.epics.json.bak*），已提交（ymos commit 1b5f687）。
+
+**发现 3：MCP epicCwd 忽略 project_dir 参数（已修复）**
+- 全部 10 个 epic 工具声明 project_dir 但路由时完全忽略，跨项目注册静默落到 cwd 项目（Canary S2 epic 被写到桌面清单贴）。
+- 修复：epicCwd 优先使用显式 project_dir（commit 3d6d028，回归测试 9/9 通过）。
+
+**发现 4（未修复，暂停点）：活跃项目工作区常态不干净，与 git_clean 硬门禁不兼容**
+- ymos 自动机持续回写 tracked 文件（writeback_review.json、s1-observation-log.jsonl），且**有意提交**（"data(自动): 自动机产出同步" 是其常规提交模式）。
+- .gitignore 无法解决已跟踪文件的持续修改；等待同步窗口不可靠。
+- 用户决策（2026-08-11）：**暂停 Canary，记录发现**。S2-S5 待收口决策后继续。
+
+### 暂停状态
+
+- S1 shadow 观察：✅ 完成（三层防护确认）
+- S1.1 git_clean 修复：✅ 完成（已合并 fb45c03）
+- S1.2 MCP project_dir 修复：✅ 完成（已合并 3d6d028）
+- S2 read-only：⏸ 暂停（ymos 工作区常态脏 vs git_clean 门禁不兼容）
+- S3/S4/S5：⏸ 待 S2 解锁
+
+### 待决策项（下次收口）
+
+1. git_clean 门禁是否改为"按 preconditions 声明检查"（不声明 git_clean 的包不检查）——让 Canary 包可跳过该前置
+2. 或为真实活跃项目提供"允许运行时回写窗口"策略
+3. 或 Canary 改用影子 clone 仓库（git clone 而非 worktree），完全避开主仓脏状态
