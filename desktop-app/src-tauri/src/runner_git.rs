@@ -204,7 +204,13 @@ pub fn is_worktree_clean(worktree_path: &Path) -> Result<bool, String> {
 /// excluded here and copied into the AttemptBundle separately.
 pub fn get_changed_paths(worktree_path: &Path, base_sha: &str) -> Result<Vec<String>, String> {
     let output = Command::new("git")
-        .args(["-c", "core.quotePath=false", "diff", "--name-only", base_sha])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-only",
+            base_sha,
+        ])
         .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git diff failed: {e}"))?;
@@ -223,7 +229,13 @@ pub fn get_changed_paths(worktree_path: &Path, base_sha: &str) -> Result<Vec<Str
         .collect();
 
     let untracked = Command::new("git")
-        .args(["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ])
         .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git ls-files failed: {e}"))?;
@@ -580,7 +592,11 @@ mod tests {
     fn changed_paths_preserve_chinese_filenames() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
-        Command::new("git").arg("init").current_dir(repo).output().unwrap();
+        Command::new("git")
+            .arg("init")
+            .current_dir(repo)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(repo)
@@ -617,13 +633,11 @@ mod tests {
         );
 
         // Scope check should match with UTF-8 pattern
-        let result = verify_changed_paths_in_scope(
-            &changed,
-            &["文档/**".to_string()],
-            &[],
-            10,
+        let result = verify_changed_paths_in_scope(&changed, &["文档/**".to_string()], &[], 10);
+        assert!(
+            result.is_ok(),
+            "Chinese path should match UTF-8 glob pattern"
         );
-        assert!(result.is_ok(), "Chinese path should match UTF-8 glob pattern");
     }
 
     #[test]
@@ -655,12 +669,8 @@ mod tests {
             "desktop-app/node_modules/.bin/tsc",
             "mcp-server/node_modules/typescript/lib",
         ] {
-            let result = verify_changed_paths_in_scope(
-                &[path.to_string()],
-                &["**".to_string()],
-                &[],
-                10,
-            );
+            let result =
+                verify_changed_paths_in_scope(&[path.to_string()], &["**".to_string()], &[], 10);
             assert!(
                 matches!(result, Err(ScopeViolation::ForbiddenPath { .. })),
                 "node_modules path '{}' should be rejected as forbidden, got {:?}",
@@ -728,7 +738,11 @@ mod tests {
     fn candidate_commit_amends_when_cli_already_committed() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
-        Command::new("git").arg("init").current_dir(repo).output().unwrap();
+        Command::new("git")
+            .arg("init")
+            .current_dir(repo)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(repo)
@@ -740,7 +754,11 @@ mod tests {
             .output()
             .unwrap();
         std::fs::write(repo.join("src.rs"), "fn main() {}\n").unwrap();
-        Command::new("git").args(["add", "."]).current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["commit", "-m", "base"])
             .current_dir(repo)
@@ -750,7 +768,11 @@ mod tests {
 
         // Simulate CLI executor: modify + commit on its own
         std::fs::write(repo.join("src.rs"), "fn main() { /* docs added */ }\n").unwrap();
-        Command::new("git").args(["add", "."]).current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["commit", "-m", "docs: add comments (ZCode auto-commit)"])
             .current_dir(repo)
@@ -777,8 +799,14 @@ mod tests {
                     .output()
                     .unwrap();
                 let msg = String::from_utf8_lossy(&log.stdout);
-                assert!(msg.contains("QuestLog auto-execution"), "amended message should have QuestLog header");
-                assert!(msg.contains("QuestLog-Epic: epic_test"), "should have trailer");
+                assert!(
+                    msg.contains("QuestLog auto-execution"),
+                    "amended message should have QuestLog header"
+                );
+                assert!(
+                    msg.contains("QuestLog-Epic: epic_test"),
+                    "should have trailer"
+                );
                 assert!(sha != base, "candidate SHA should differ from base");
             }
             Ok(None) => panic!("should have produced a candidate commit"),

@@ -172,12 +172,18 @@ fn bridge_ready_package_to_zcode_execution() {
     )
     .unwrap();
 
-    // Enable the project in runner-config so poll_once's project filter passes
+    // Enable the project in runner-config so poll_once's project filter passes.
+    // NOTE: set_project_enabled(true) ALSO starts the background Runner thread
+    // (ensure_running), which would race with the explicit poll_once() below —
+    // both threads would pick up the same ready package, creating duplicate
+    // executions. Stop the background thread immediately after enabling so the
+    // test's explicit poll_once() is the only poller.
     app_lib::runner_config::set_project_enabled(
         &repo_dir.path().to_string_lossy().to_string(),
         true,
     )
     .expect("enable project for e2e");
+    app_lib::runner::stop_runner();
 
     // Run the Runner's poll_once — this should:
     // 1. Find the ready package
@@ -199,6 +205,14 @@ fn bridge_ready_package_to_zcode_execution() {
             // Verify the execution was created
             let execs = app_lib::execution_store::list_executions().unwrap();
             assert!(!execs.is_empty(), "should have at least one execution");
+
+            // Debug: dump ALL executions (not just [0]) to diagnose flaky Running status
+            for (i, ex) in execs.iter().enumerate() {
+                eprintln!(
+                    "  [{}] {} pkg={} status={:?} err={:?}",
+                    i, ex.id, ex.package_id, ex.status, ex.last_error
+                );
+            }
 
             let exec = &execs[0];
             eprintln!("Execution status: {:?}", exec.status);

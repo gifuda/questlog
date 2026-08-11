@@ -1071,7 +1071,9 @@ impl Runner {
                     "dependency '{}' is below required stage {:?} (current: {:?})",
                     dependency_id,
                     required_stage,
-                    dep_stage.map(|s| format!("{:?}", s)).unwrap_or_else(|| "missing".to_string())
+                    dep_stage
+                        .map(|s| format!("{:?}", s))
+                        .unwrap_or_else(|| "missing".to_string())
                 ));
             }
         }
