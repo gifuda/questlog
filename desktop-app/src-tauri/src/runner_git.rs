@@ -178,6 +178,9 @@ fn provision_node_modules(repo_root: &Path, worktree_path: &Path) {
 
 /// Check whether source code is clean. QuestLog's local Plan Store files are
 /// control-plane metadata and are intentionally excluded from source Git truth.
+/// Untracked files (`??` lines) are also ignored: the worktree is created from
+/// HEAD regardless of untracked files, so they don't affect base_sha semantics
+/// — active projects routinely carry untracked work products.
 pub fn is_worktree_clean(worktree_path: &Path) -> Result<bool, String> {
     let output = Command::new("git")
         .args(["-c", "core.quotePath=false", "status", "--porcelain"])
@@ -194,6 +197,7 @@ pub fn is_worktree_clean(worktree_path: &Path) -> Result<bool, String> {
 
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
+        .filter(|line| !line.starts_with("?? "))
         .map(normalized_status_path)
         .find(|path| !is_control_plane_path(path) && !is_runner_internal_path(path))
         .is_none())
@@ -678,6 +682,68 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[test]
+    fn worktree_clean_ignores_untracked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        Command::new("git")
+            .arg("init")
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        // Untracked work products (e.g. _Manager plans) are a normal state
+        std::fs::create_dir_all(repo.join("_Manager")).unwrap();
+        std::fs::write(repo.join("_Manager/plan.md"), "# plan\n").unwrap();
+        std::fs::write(repo.join("notes.txt"), "scratch\n").unwrap();
+        assert!(
+            is_worktree_clean(repo).unwrap(),
+            "untracked files should not make the worktree dirty"
+        );
+
+        // A tracked modification still makes the tree dirty
+        std::fs::write(repo.join("tracked.txt"), "modified\n").unwrap();
+        assert!(
+            !is_worktree_clean(repo).unwrap(),
+            "tracked modification should make the worktree dirty"
+        );
+
+        // Control-plane exclusions still apply after the untracked filter
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        std::fs::write(repo.join(".epics.json"), "{}\n").unwrap();
+        Command::new("git")
+            .args(["add", ".epics.json"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join(".epics.json"), "{\"rev\": 1}\n").unwrap();
+        assert!(
+            is_worktree_clean(repo).unwrap(),
+            "tracked control-plane modifications remain excluded"
+        );
     }
 
     #[test]

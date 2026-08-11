@@ -344,7 +344,19 @@ describe("prepare → validate → seal → enqueue flow", () => {
   it("treats QuestLog metadata as control-plane state, not dirty source", async () => {
     const projectDir = path.join(dir, "test-project");
     expect(await isGitClean(projectDir)).toBe(true);
-    await fs.writeFile(path.join(projectDir, "new-source.ts"), "export const x = 1;\n");
+    await fs.writeFile(path.join(projectDir, "README.md"), "# Test v2\n");
+    expect(await isGitClean(projectDir)).toBe(false);
+  });
+
+  it("isGitClean ignores untracked files but flags tracked modifications", async () => {
+    const projectDir = path.join(dir, "test-project");
+    // Untracked work products (e.g. _Manager plans) are a normal state
+    await fs.writeFile(path.join(projectDir, "notes.md"), "work product\n");
+    await fs.mkdir(path.join(projectDir, "plans"));
+    await fs.writeFile(path.join(projectDir, "plans/plan.md"), "# plan\n");
+    expect(await isGitClean(projectDir)).toBe(true);
+    // A tracked modification still makes the tree dirty
+    await fs.writeFile(path.join(projectDir, "README.md"), "# Test modified\n");
     expect(await isGitClean(projectDir)).toBe(false);
   });
 
@@ -416,8 +428,9 @@ describe("prepare → validate → seal → enqueue flow", () => {
 
   it("rejects sealing when git working tree is dirty", async () => {
     const projectDir = path.join(dir, "test-project");
-    // Make the tree dirty
-    await fs.writeFile(path.join(projectDir, "uncommitted.txt"), "dirty");
+    // Make the tree dirty with a TRACKED modification (untracked files are
+    // a normal state and no longer count as dirty)
+    await fs.writeFile(path.join(projectDir, "README.md"), "# Test dirty\n");
 
     const prep = await prepareTaskPackage(projectDir, {
       epic_id: "e1",

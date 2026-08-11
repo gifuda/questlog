@@ -387,7 +387,12 @@ export async function readGitHeadSha(repoRoot: string): Promise<string | null> {
 }
 
 /**
- * Check if the git working tree is clean (no uncommitted changes).
+ * Check if the git working tree is clean (no uncommitted TRACKED changes).
+ *
+ * Untracked files (`??` lines) do NOT count as dirty: the worktree is created
+ * from HEAD regardless of untracked files, so they don't affect base_sha
+ * semantics. Active projects routinely carry untracked work products
+ * (e.g. _Manager plans, .zcode plans).
  */
 export async function isGitClean(repoRoot: string): Promise<boolean> {
   try {
@@ -402,6 +407,8 @@ export async function isGitClean(repoRoot: string): Promise<boolean> {
         const sourceChanges = stdout
           .split("\n")
           .filter(Boolean)
+          // Untracked files are a normal state, not dirty source
+          .filter((line) => !line.startsWith("??"))
           .map((line) => line.slice(3).replace(/^"|"$/g, ""))
           .filter((file) => !controlFiles.some((name) =>
             file === name || file.endsWith(`/${name}`) || file === `${name}.lock` || file.endsWith(`/${name}.lock`)
