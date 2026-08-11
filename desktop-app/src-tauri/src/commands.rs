@@ -483,6 +483,7 @@ pub fn add_epic(
         blocks: vec![],
         links: Default::default(),
         max_active: None,
+        auto_execute: None,
         acceptance: acceptance.unwrap_or_default(),
         close_reason: String::new(),
         created_at: now.clone(),
@@ -1038,6 +1039,63 @@ pub fn set_runner_enabled(enabled: bool) -> Result<bool, String> {
 #[tauri::command]
 pub fn is_runner_running() -> Result<bool, String> {
     Ok(crate::runner::is_running())
+}
+
+/// Get the Runner status for a specific project (global + project + effective).
+#[tauri::command]
+pub fn get_runner_project_status(
+    project_path: String,
+) -> Result<crate::runner_config::ProjectRunnerStatus, String> {
+    Ok(crate::runner_config::get_project_status(&project_path))
+}
+
+/// Enable or disable Runner execution for a specific project.
+#[tauri::command]
+pub fn set_runner_project_enabled(
+    project_path: String,
+    enabled: bool,
+) -> Result<crate::runner_config::ProjectRunnerStatus, String> {
+    crate::runner_config::set_project_enabled(&project_path, enabled)?;
+    Ok(crate::runner_config::get_project_status(&project_path))
+}
+
+/// Get the auto_execute setting for a specific epic.
+#[tauri::command]
+pub fn get_epic_auto_execute(
+    epic_id: String,
+    project_path: String,
+) -> Result<Option<bool>, String> {
+    let dir = std::path::PathBuf::from(&project_path);
+    let data = crate::epic_store::read_epics(&dir)?;
+    let epic = data
+        .epics
+        .iter()
+        .find(|e| e.id == epic_id)
+        .ok_or_else(|| format!("epic '{}' not found", epic_id))?;
+    Ok(epic.auto_execute)
+}
+
+/// Set the auto_execute setting for a specific epic.
+/// None = inherit project setting, Some(true/false) = explicit override.
+#[tauri::command]
+pub fn set_epic_auto_execute(
+    epic_id: String,
+    project_path: String,
+    auto_execute: Option<bool>,
+) -> Result<(), String> {
+    let dir = std::path::PathBuf::from(&project_path);
+    crate::epic_store::mutate_epics(&dir, |data| {
+        let epic = data
+            .epics
+            .iter_mut()
+            .find(|e| e.id == epic_id)
+            .ok_or_else(|| format!("epic '{}' not found", epic_id))?;
+        epic.auto_execute = auto_execute;
+        let now = chrono::Utc::now().to_rfc3339();
+        epic.updated_at = now;
+        Ok(())
+    })?;
+    Ok(())
 }
 
 #[tauri::command]

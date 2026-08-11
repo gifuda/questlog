@@ -8,6 +8,7 @@ pub mod executors;
 pub mod file_lock;
 mod models;
 pub mod runner;
+pub mod runner_config;
 pub mod runner_git;
 mod store;
 mod tray;
@@ -58,6 +59,10 @@ pub fn run() {
             commands::cleanup_stale_executions,
             commands::set_runner_enabled,
             commands::is_runner_running,
+            commands::get_runner_project_status,
+            commands::set_runner_project_enabled,
+            commands::get_epic_auto_execute,
+            commands::set_epic_auto_execute,
             commands::get_decision_requests,
             commands::resolve_decision_request,
             // 执行记忆 (AttemptBundle Trace Query)

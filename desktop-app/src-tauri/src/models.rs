@@ -276,6 +276,12 @@ pub struct Epic {
     pub links: EpicLinks,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_active: Option<u32>,
+    /// Runner 自动执行控制。
+    /// None → 继承项目级开关
+    /// Some(true) → 项目开启时自动执行
+    /// Some(false) → 永远不自动执行
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_execute: Option<bool>,
     /// 验收条件（自由文本，由创建方案的对话显式填写）。人类可读，代码不解析。
     #[serde(default)]
     pub acceptance: String,
@@ -486,6 +492,7 @@ mod tests {
             blocks: vec![],
             links: EpicLinks::default(),
             max_active: None,
+            auto_execute: None,
             acceptance: "".into(),
             close_reason: "".into(),
             created_at: "2026".into(),

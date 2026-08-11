@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useEpics } from "../hooks/useEpics";
-import { useRunner } from "../hooks/useExecutions";
+import { useRunner, useProjectRunner } from "../hooks/useExecutions";
 import { epicStatusBadge, stageOrder, stageLabel, stageIcon, statusOptions, statusRank } from "../epicConstants";
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
@@ -35,6 +35,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { t } = useTranslation();
   const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep } = useEpics(projectPath);
   const { enabled: runnerEnabled, loading: runnerLoading, error: runnerError, toggle: toggleRunner } = useRunner();
+  const { status: projectStatus, loading: projectLoading, toggle: toggleProjectRunner } = useProjectRunner(projectPath);
   const [showNewEpic, setShowNewEpic] = useState(false);
 
   // Backend already returns top-level epics newest-first; sort defensively.
@@ -71,8 +72,28 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
         </div>
       )}
 
-      {/* Runner toggle — always visible, independent of summary */}
-      <div className="px-4 py-1 border-b border-line/50 flex items-center justify-end">
+      {/* Runner toggle — global master switch + per-project switch */}
+      <div className="px-4 py-1 border-b border-line/50 flex items-center justify-end gap-1.5">
+        <button
+          onClick={toggleProjectRunner}
+          disabled={projectLoading || !runnerEnabled}
+          title={
+            !runnerEnabled
+              ? t("execution.projectRunnerGlobalOff")
+              : projectStatus?.effective
+                ? t("execution.projectRunnerEffective")
+                : t("execution.projectRunnerOn")
+          }
+          className={`px-2 py-0.5 rounded-full text-[9px] font-medium transition-colors shrink-0 disabled:opacity-30 ${
+            projectStatus?.effective
+              ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+              : projectStatus?.project_enabled
+                ? "bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
+                : "bg-elevated text-faint hover:bg-line-hover"
+          }`}
+        >
+          📂 {projectStatus?.project_enabled ? t("execution.projectOn") : t("execution.projectOff")}
+        </button>
         <button
           onClick={toggleRunner}
           disabled={runnerLoading}

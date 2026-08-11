@@ -155,6 +155,84 @@ export function useRunner() {
   return { enabled, loading, error, toggle };
 }
 
+// ─── Per-project Runner control ───
+
+export interface ProjectRunnerStatus {
+  global_enabled: boolean;
+  project_enabled: boolean;
+  effective: boolean;
+}
+
+/**
+ * useProjectRunner — manage Runner execution for a specific project.
+ * The global toggle must also be ON for execution to happen.
+ */
+export function useProjectRunner(projectPath: string | null) {
+  const [status, setStatus] = useState<ProjectRunnerStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!projectPath) return;
+    try {
+      const data = await invoke<ProjectRunnerStatus>("get_runner_project_status", {
+        projectPath,
+      });
+      setStatus(data);
+    } catch {
+      setStatus(null);
+    }
+  }, [projectPath]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const toggle = useCallback(async () => {
+    if (!projectPath || !status) return;
+    try {
+      setLoading(true);
+      const next = !status.project_enabled;
+      const result = await invoke<ProjectRunnerStatus>("set_runner_project_enabled", {
+        projectPath,
+        enabled: next,
+      });
+      setStatus(result);
+    } catch (err) {
+      console.warn("Failed to toggle project runner:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [projectPath, status]);
+
+  return { status, loading, toggle, refresh };
+}
+
+/**
+ * Get the auto_execute setting for a specific epic.
+ * Returns null = inherit project, true/false = explicit override.
+ */
+export async function getEpicAutoExecute(
+  epicId: string,
+  projectPath: string
+): Promise<boolean | null> {
+  try {
+    return await invoke<boolean | null>("get_epic_auto_execute", { epicId, projectPath });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Set the auto_execute setting for a specific epic.
+ */
+export async function setEpicAutoExecute(
+  epicId: string,
+  projectPath: string,
+  autoExecute: boolean | null
+): Promise<void> {
+  await invoke("set_epic_auto_execute", { epicId, projectPath, autoExecute });
+}
+
 export interface DecisionRequest {
   request_id: string;
   epic_id: string;

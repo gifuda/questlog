@@ -122,7 +122,28 @@ impl Runner {
         let packages = execution_store::read_ready_packages()?;
         let mut processed = 0;
 
+        // Per-project / per-epic filtering: only pick up packages from
+        // projects the user has explicitly enabled, and epics that allow
+        // auto-execution.
         for pkg in packages {
+            // Filter: project must be enabled in runner-config.json
+            if !crate::runner_config::is_project_enabled(&pkg.project_path) {
+                continue;
+            }
+            // Filter: epic auto_execute must allow it
+            match crate::runner_config::is_epic_auto_execute(&pkg.project_path, &pkg.epic_id) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    log::warn!(
+                        "Runner: skipping epic check error for {}: {}",
+                        pkg.epic_id,
+                        e
+                    );
+                    continue;
+                }
+            }
+
             let executions = execution_store::list_executions()?;
             if executions.iter().any(|execution| {
                 execution.package_id == pkg.package_id
@@ -1151,8 +1172,14 @@ pub fn is_running() -> bool {
 }
 
 /// Enable or disable the Runner at runtime.
+/// Also persists the global flag to runner-config.json so it survives restarts.
 /// Returns the new state.
 pub fn set_enabled(enabled: bool) -> bool {
+    // Persist global flag
+    if let Err(e) = crate::runner_config::set_globally_enabled(enabled) {
+        log::warn!("Failed to persist runner global flag: {}", e);
+    }
+
     if enabled {
         start_runner_thread(RunnerConfig {
             enabled: true,
@@ -1365,6 +1392,8 @@ mod tests {
         let (_dir, _guard) = setup();
         let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
         std::fs::create_dir_all(&runtime).unwrap();
+        // Enable the project in runner-config so poll_once picks it up
+        crate::runner_config::set_project_enabled("/nonexistent", true).unwrap();
         // Write a fake packages.json with one ready package (nested format matching Node)
         let packages = serde_json::json!({
             "version": 1,

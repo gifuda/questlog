@@ -336,6 +336,7 @@ mod tests {
             blocks: vec![],
             links: EpicLinks::default(),
             max_active: None,
+            auto_execute: None,
             acceptance: "".into(),
             close_reason: "".into(),
             created_at: BASE_TS.into(),
