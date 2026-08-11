@@ -183,6 +183,19 @@ impl Runner {
             // Process the execution
             let result = self.process_execution(&exec_id, &pkg);
 
+            // Clean up the execution worktree regardless of outcome — every
+            // result leaves a full checkout in the temp dir plus a git
+            // worktree registration. Remove both so repeated executions don't
+            // accumulate disk usage or stale registrations.
+            if let Ok(final_exec) = execution_store::get_execution(&exec_id) {
+                if let Some(worktree_path) = &final_exec.worktree_path {
+                    let _ = runner_git::remove_worktree(
+                        &PathBuf::from(&pkg.repo_root),
+                        Path::new(worktree_path),
+                    );
+                }
+            }
+
             // Update statuses based on result
             match &result {
                 Ok(RunResult::Passed {
@@ -219,12 +232,40 @@ impl Runner {
                     }
                 }
                 Ok(RunResult::NoDiff { execution_id }) => {
-                    execution_store::finish_execution(
-                        execution_id,
-                        ExecutionStatus::Blocked,
-                        Some("CLI produced no diff"),
-                    )?;
-                    execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                    if pkg.sandbox == "read-only" {
+                        // A read-only task legitimately produces no diff: its
+                        // output IS the stdout report (no candidate commit is
+                        // expected). Treat as success so read-only analysis
+                        // chains can complete.
+                        let final_status = execution_store::finish_execution(
+                            execution_id,
+                            ExecutionStatus::Passed,
+                            None,
+                        )?;
+                        match final_status {
+                            ExecutionStatus::Passed => {
+                                execution_store::mark_package_status(&pkg.package_id, "passed")?;
+                                Self::advance_step_stage(
+                                    &pkg.project_path,
+                                    &pkg.step_id,
+                                    StepStage::Verified,
+                                );
+                            }
+                            ExecutionStatus::Cancelled => {
+                                execution_store::mark_package_status(&pkg.package_id, "cancelled")?;
+                            }
+                            _ => {
+                                execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                            }
+                        }
+                    } else {
+                        execution_store::finish_execution(
+                            execution_id,
+                            ExecutionStatus::Blocked,
+                            Some("CLI produced no diff"),
+                        )?;
+                        execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                    }
                 }
                 Ok(RunResult::AcceptanceFailed {
                     execution_id,
@@ -830,7 +871,33 @@ impl Runner {
                 "The exact candidate failed acceptance. Inspect evidence and choose retry, revise, or cancel.",
                 vec!["retry".to_string(), "revise_package".to_string(), "cancel".to_string()],
             )),
-            RunResult::NoDiff { .. } | RunResult::CliFailed { .. } | RunResult::Timeout { .. } => {
+            RunResult::NoDiff { .. } => {
+                if pkg.sandbox == "read-only" {
+                    // read-only NoDiff is a legitimate success (report = output,
+                    // no candidate expected) — no human decision needed.
+                    None
+                } else {
+                    let exhausted = manifest.attempt_no >= pkg.max_attempts.max(1);
+                    Some((
+                        if exhausted { "retry_exhausted" } else { "blocked" },
+                        if exhausted {
+                            "The attempt budget is exhausted. Inspect evidence, revise the package, or cancel."
+                        } else {
+                            "The attempt did not produce a verified candidate. Inspect evidence and choose retry, revise, or cancel."
+                        },
+                        if exhausted {
+                            vec!["revise_package".to_string(), "cancel".to_string()]
+                        } else {
+                            vec![
+                                "retry".to_string(),
+                                "revise_package".to_string(),
+                                "cancel".to_string(),
+                            ]
+                        },
+                    ))
+                }
+            }
+            RunResult::CliFailed { .. } | RunResult::Timeout { .. } => {
                 let exhausted = manifest.attempt_no >= pkg.max_attempts.max(1);
                 Some((
                     if exhausted { "retry_exhausted" } else { "blocked" },
@@ -979,12 +1046,13 @@ impl Runner {
                 pkg.base_sha, current_sha
             ));
         }
-        if pkg.preconditions.iter().any(|precondition| {
-            precondition.kind == "git_clean" && precondition.value == Some(true)
-        }) && !runner_git::is_worktree_clean(&repo)?
-        {
-            return Err("git_clean precondition is no longer satisfied".to_string());
-        }
+
+        // Note: no git_clean check on the MAIN workspace. The standard package
+        // is an independent carrier; execution happens in a worktree created
+        // fresh from base_sha below, which is clean by construction. A dirty
+        // main workspace (e.g. an actively-written project) must not block
+        // claim. git_clean as a declared precondition is enforced by the
+        // candidate-commit stage on the worktree itself if ever needed.
 
         let epics = crate::epic_store::read_epics(&project)?;
         let epic = epics

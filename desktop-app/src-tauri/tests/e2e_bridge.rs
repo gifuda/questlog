@@ -14,6 +14,20 @@
 
 use std::process::Command;
 
+/// Both e2e tests mutate the process-global QUESTLOG_RUNTIME env var, so they
+/// must not run in parallel within this test binary (cargo runs tests in one
+/// process by default). Serialize them with a file-scope mutex.
+static RUNTIME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git command failed");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 fn zcode_available() -> bool {
     let path = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
     std::path::Path::new(path).exists()
@@ -58,6 +72,8 @@ fn init_git_repo(dir: &std::path::Path) -> String {
 
 #[test]
 fn bridge_ready_package_to_zcode_execution() {
+    let _runtime_guard = RUNTIME_LOCK.lock().unwrap();
+
     if !zcode_available() {
         eprintln!("Skipping e2e bridge test — ZCode CLI not available");
         return;
@@ -173,17 +189,25 @@ fn bridge_ready_package_to_zcode_execution() {
     .unwrap();
 
     // Enable the project in runner-config so poll_once's project filter passes.
-    // NOTE: set_project_enabled(true) ALSO starts the background Runner thread
-    // (ensure_running), which would race with the explicit poll_once() below —
-    // both threads would pick up the same ready package, creating duplicate
-    // executions. Stop the background thread immediately after enabling so the
-    // test's explicit poll_once() is the only poller.
-    app_lib::runner_config::set_project_enabled(
-        &repo_dir.path().to_string_lossy().to_string(),
-        true,
+    // Write the config file directly: set_project_enabled(true) would call
+    // ensure_running() and start the background Runner thread, which races
+    // with the explicit poll_once() below (both would pick up the same ready
+    // package → duplicate executions). File-based enable keeps the test's
+    // explicit poll_once() the only poller.
+    let runtime_path = runtime_dir.path().join("runtime");
+    std::fs::write(
+        runtime_path.join("runner-config.json"),
+        serde_json::json!({
+            "version": 1,
+            "global_enabled": false,
+            "projects": {
+                repo_dir.path().to_string_lossy().to_string(): { "enabled": true }
+            },
+            "revision": 1
+        })
+        .to_string(),
     )
-    .expect("enable project for e2e");
-    app_lib::runner::stop_runner();
+    .unwrap();
 
     // Run the Runner's poll_once — this should:
     // 1. Find the ready package
@@ -312,7 +336,220 @@ fn bridge_ready_package_to_zcode_execution() {
         "package should have been consumed by the runner"
     );
 
-    // Clean up worktrees
+    // Execution worktree must be cleaned up (removed + registration pruned)
+    let wt_list = git(repo_dir.path(), &["worktree", "list"]);
+    assert!(
+        !wt_list.contains("questlog-worktrees"),
+        "execution worktree should be cleaned up:\n{wt_list}"
+    );
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_dir.path())
+        .output();
+}
+
+/// Read-only NoDiff e2e: a read-only package legitimately produces no diff.
+/// The Runner must treat NoDiff for `read-only` sandbox as SUCCESS (package
+/// passed, step Verified) — not as a failed attempt (blocked + decision).
+#[test]
+fn bridge_readonly_package_no_diff_counts_as_passed() {
+    let _runtime_guard = RUNTIME_LOCK.lock().unwrap();
+
+    if !zcode_available() {
+        eprintln!("Skipping e2e bridge test — ZCode CLI not available");
+        return;
+    }
+
+    let runtime_dir = tempfile::tempdir().unwrap();
+    std::env::set_var("QUESTLOG_RUNTIME", runtime_dir.path().join("runtime"));
+    std::fs::create_dir_all(runtime_dir.path().join("runtime")).unwrap();
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    let base_sha = init_git_repo(repo_dir.path());
+
+    let mut package = serde_json::json!({
+            "schema_version": 1,
+            "package_id": "pkg_e2e_readonly",
+            "epic_id": "epic_readonly",
+            "step_id": "step_readonly_test",
+            "plan_revision": 1,
+            "project_path": repo_dir.path().to_string_lossy(),
+            "repo_root": repo_dir.path().to_string_lossy(),
+            "base_sha": base_sha,
+            "objective": "Read src.ts and print its content to stdout. Do NOT create, modify, or delete any files.",
+            "context_refs": [],
+            "scope": {
+                "allowed_paths": ["src.ts"],
+                "forbidden_paths": [],
+                "max_changed_files": 5
+            },
+            "preconditions": [],
+            "executor": {
+                "preferred": "zcode",
+                "fallbacks": [],
+                "sandbox": "read-only",
+                "timeout_seconds": 3600,
+                "max_attempts": 2
+            },
+            "acceptance": [{"type": "command", "command_id": "verify:candidate"}],
+            "authority": {
+                "auto_edit_worktree": true,
+                "auto_commit_candidate": true,
+                "auto_merge": false,
+                "auto_push": false,
+                "auto_deploy": false
+            },
+            "stop_conditions": ["scope_expanded"],
+            "rollback": {"strategy": "preserve_worktree_and_stop"},
+            "status": "ready",
+            "sealed_at": "2026-08-11T00:00:00Z",
+            "package_hash": ""
+    });
+    let package_hash = app_lib::execution_store::compute_package_hash(&package).unwrap();
+    package["package_hash"] = serde_json::Value::String(package_hash.clone());
+
+    let epics = serde_json::json!({
+        "version": 1,
+        "project": "e2e",
+        "revision": 1,
+        "epics": [{
+            "id": "epic_readonly",
+            "title": "Read-only",
+            "description": "",
+            "status": "active",
+            "priority": "P1",
+            "depends_on": [],
+            "blocks": [],
+            "links": {},
+            "created_at": "2026-08-11T00:00:00Z",
+            "updated_at": "2026-08-11T00:00:00Z"
+        }],
+        "steps": [{
+            "id": "step_readonly_test",
+            "epic_id": "epic_readonly",
+            "title": "Read only",
+            "description": "",
+            "order": 1,
+            "depends_on": [],
+            "stage": "designed",
+            "links": {},
+            "package": {
+                "package_id": "pkg_e2e_readonly",
+                "plan_revision": 1,
+                "package_hash": package_hash,
+                "objective": "Read src.ts and print its content to stdout.",
+                "executor": "zcode",
+                "status": "sealed"
+            },
+            "created_at": "2026-08-11T00:00:00Z",
+            "updated_at": "2026-08-11T00:00:00Z"
+        }]
+    });
+    std::fs::write(
+        repo_dir.path().join(".epics.json"),
+        serde_json::to_string_pretty(&epics).unwrap(),
+    )
+    .unwrap();
+
+    let packages = serde_json::json!({
+        "version": 1,
+        "packages": [package]
+    });
+    std::fs::write(
+        runtime_dir.path().join("runtime").join("packages.json"),
+        serde_json::to_string_pretty(&packages).unwrap(),
+    )
+    .unwrap();
+
+    // Enable via config file directly (see first test: set_project_enabled
+    // would start a racing background Runner thread).
+    let runtime_path = runtime_dir.path().join("runtime");
+    std::fs::write(
+        runtime_path.join("runner-config.json"),
+        serde_json::json!({
+            "version": 1,
+            "global_enabled": false,
+            "projects": {
+                repo_dir.path().to_string_lossy().to_string(): { "enabled": true }
+            },
+            "revision": 1
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut runner = app_lib::runner::Runner::new(app_lib::runner::RunnerConfig {
+        enabled: true,
+        poll_interval: std::time::Duration::from_secs(1),
+        runner_id: "e2e-readonly-test".to_string(),
+    });
+
+    let result = runner.poll_once();
+
+    match &result {
+        Ok(count) => {
+            eprintln!("Runner processed {} package(s)", count);
+
+            let execs = app_lib::execution_store::list_executions().unwrap();
+            assert!(!execs.is_empty(), "should have at least one execution");
+            let exec = &execs[0];
+            eprintln!("Execution status: {:?}", exec.status);
+            assert_eq!(
+                exec.status,
+                app_lib::execution_store::ExecutionStatus::Passed,
+                "read-only NoDiff must count as Passed, not blocked: {:?}",
+                exec.last_error
+            );
+            assert!(
+                exec.candidate_sha.is_none(),
+                "read-only task must NOT create a candidate commit"
+            );
+
+            // Bundle outcome must be no_diff (not passed — no candidate exists)
+            let (_, bundle_path) = app_lib::attempt_bundle::read_bundle(&exec.id).unwrap();
+            let outcome_str = std::fs::read_to_string(bundle_path.join("outcome.json")).unwrap();
+            let outcome: serde_json::Value = serde_json::from_str(&outcome_str).unwrap();
+            assert_eq!(outcome["outcome"].as_str(), Some("no_diff"));
+
+            // Package must be marked passed
+            let pkg_json =
+                std::fs::read_to_string(runtime_dir.path().join("runtime").join("packages.json"))
+                    .unwrap();
+            let pkgs: serde_json::Value = serde_json::from_str(&pkg_json).unwrap();
+            let status = pkgs["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["package_id"] == "pkg_e2e_readonly")
+                .unwrap()["status"]
+                .as_str()
+                .unwrap();
+            assert_eq!(status, "passed", "read-only package must be passed");
+
+            // Step must be advanced to Verified in .epics.json
+            let epics_json = std::fs::read_to_string(repo_dir.path().join(".epics.json")).unwrap();
+            let epics_data: serde_json::Value = serde_json::from_str(&epics_json).unwrap();
+            let stage = epics_data["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == "step_readonly_test")
+                .unwrap()["stage"]
+                .as_str()
+                .unwrap();
+            assert_eq!(stage, "verified", "step must advance to Verified");
+        }
+        Err(e) => {
+            panic!("Runner crashed: {}", e);
+        }
+    }
+
+    // Execution worktree must be cleaned up (removed + registration pruned)
+    let wt_list = git(repo_dir.path(), &["worktree", "list"]);
+    assert!(
+        !wt_list.contains("questlog-worktrees"),
+        "execution worktree should be cleaned up:\n{wt_list}"
+    );
     let _ = Command::new("git")
         .args(["worktree", "prune"])
         .current_dir(repo_dir.path())
