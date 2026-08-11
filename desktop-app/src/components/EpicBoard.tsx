@@ -5,7 +5,7 @@ import { useRunner } from "../hooks/useExecutions";
 import { epicStatusBadge, stageOrder, stageLabel, stageIcon, statusOptions, statusRank } from "../epicConstants";
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
-import ExecutionPanel from "./ExecutionPanel";
+import ExecutionPanel, { DecisionInbox } from "./ExecutionPanel";
 
 /** i18n keys for epic status labels (statuses stay lowercase in data). */
 const epicStatusKey: Record<EpicStatus, string> = {
@@ -34,7 +34,7 @@ interface EpicBoardProps {
 export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { t } = useTranslation();
   const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep } = useEpics(projectPath);
-  const { enabled: runnerEnabled, toggle: toggleRunner } = useRunner();
+  const { enabled: runnerEnabled, loading: runnerLoading, error: runnerError, toggle: toggleRunner } = useRunner();
   const [showNewEpic, setShowNewEpic] = useState(false);
 
   // Backend already returns top-level epics newest-first; sort defensively.
@@ -75,8 +75,9 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
       <div className="px-4 py-1 border-b border-line/50 flex items-center justify-end">
         <button
           onClick={toggleRunner}
+          disabled={runnerLoading}
           title={runnerEnabled ? t("execution.runnerOn") : t("execution.runnerOff")}
-          className={`px-2 py-0.5 rounded-full text-[9px] font-medium transition-colors shrink-0 ${
+          className={`px-2 py-0.5 rounded-full text-[9px] font-medium transition-colors shrink-0 disabled:opacity-40 ${
             runnerEnabled
               ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
               : "bg-elevated text-faint hover:bg-line-hover"
@@ -85,6 +86,8 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
           ⚙️ {runnerEnabled ? t("execution.runnerOn") : t("execution.runnerOff")}
         </button>
       </div>
+      {runnerError && <div className="px-4 py-1 text-[10px] text-red-400 border-b border-line">{runnerError}</div>}
+      <DecisionInbox />
 
       {/* 路线图主视图 */}
       <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2.5">

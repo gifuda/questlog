@@ -611,7 +611,7 @@ server.tool(
     allowed_paths: z.array(z.string()).describe("Glob patterns for paths the executor MAY modify"),
     forbidden_paths: z.array(z.string()).optional().describe("Glob patterns for paths the executor MUST NOT touch"),
     max_changed_files: z.number().optional().describe("Maximum files the executor may change (default 10)"),
-    executor_preferred: z.enum(["codex", "zcode", "manual"]).optional(),
+    executor_preferred: z.enum(["zcode", "manual"]).optional().describe("zcode executes automatically; manual is tracking-only. Codex may push packages but is never a Runner executor."),
     executor_timeout_seconds: z.number().optional(),
     executor_max_attempts: z.number().optional(),
     acceptance_command_ids: z.array(z.string()).optional().describe("Trusted command IDs from the acceptance registry (e.g. test:mcp, build:mcp)"),
@@ -774,8 +774,8 @@ server.tool(
 server.tool(
   "resolve_decision",
   [
-    "Resolve a DecisionRequest — record the human's answer and unblock the step.",
-    "The resolution is stored with the responder's identity and timestamp. After resolving, the Runner can proceed with the step.",
+    "Resolve a DecisionRequest by recording the human's answer.",
+    "This does not restart an execution or mutate the sealed package. Retry explicitly, or revise and reseal the package, after recording the decision.",
   ].join("\n"),
   {
     request_id: z.string().describe("The decision request ID from list_decision_requests"),
@@ -789,7 +789,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `✅ Decision ${input.request_id} resolved.\nThe Runner will proceed with: "${input.resolution}"`,
+        text: `✅ Decision ${input.request_id} recorded: "${input.resolution}"\nNo execution was started. Retry explicitly, or revise and reseal the package if the decision changes scope, authority, base SHA, or direction.`,
       }],
     };
   }

@@ -18,6 +18,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const QUESTLOG_TRAILER_PREFIX: &str = "QuestLog-";
+const CONTROL_PLANE_FILES: &[&str] = &[".todos.json", ".epics.json", ".todo-board.json"];
+
+fn normalized_status_path(line: &str) -> &str {
+    line.get(3..).unwrap_or(line).trim_matches('"')
+}
+
+fn is_control_plane_path(path: &str) -> bool {
+    CONTROL_PLANE_FILES.iter().any(|name| {
+        path == *name
+            || path.ends_with(&format!("/{name}"))
+            || path == format!("{name}.lock")
+            || path.ends_with(&format!("/{name}.lock"))
+    })
+}
+
+fn is_runner_internal_path(path: &str) -> bool {
+    path == ".questlog-output" || path.starts_with(".questlog-output/")
+}
 
 /// Result of creating a worktree.
 pub struct WorktreeInfo {
@@ -78,7 +96,8 @@ pub fn create_worktree(
     })
 }
 
-/// Check if a worktree's working directory is clean (no uncommitted changes).
+/// Check whether source code is clean. QuestLog's local Plan Store files are
+/// control-plane metadata and are intentionally excluded from source Git truth.
 pub fn is_worktree_clean(worktree_path: &Path) -> Result<bool, String> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -93,10 +112,16 @@ pub fn is_worktree_clean(worktree_path: &Path) -> Result<bool, String> {
         ));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(normalized_status_path)
+        .find(|path| !is_control_plane_path(path) && !is_runner_internal_path(path))
+        .is_none())
 }
 
-/// Get the list of changed paths in the worktree (relative to base).
+/// Get all changed paths relative to base, including untracked files. Runner
+/// output files are evidence plumbing, not candidate source, so they are
+/// excluded here and copied into the AttemptBundle separately.
 pub fn get_changed_paths(worktree_path: &Path, base_sha: &str) -> Result<Vec<String>, String> {
     let output = Command::new("git")
         .args(["diff", "--name-only", base_sha])
@@ -111,11 +136,32 @@ pub fn get_changed_paths(worktree_path: &Path, base_sha: &str) -> Result<Vec<Str
         ));
     }
 
-    let paths = String::from_utf8_lossy(&output.stdout)
+    let mut paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect();
+
+    let untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|e| format!("git ls-files failed: {e}"))?;
+    if !untracked.status.success() {
+        return Err(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&untracked.stderr)
+        ));
+    }
+    paths.extend(
+        String::from_utf8_lossy(&untracked.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(String::from),
+    );
+    paths.retain(|path| !is_runner_internal_path(path));
+    paths.sort();
+    paths.dedup();
 
     Ok(paths)
 }
@@ -136,6 +182,12 @@ pub fn verify_changed_paths_in_scope(
     }
 
     for path in changed {
+        if is_control_plane_path(path) || is_runner_internal_path(path) {
+            return Err(ScopeViolation::ForbiddenPath {
+                path: path.clone(),
+                pattern: "QuestLog control-plane/runtime files".to_string(),
+            });
+        }
         // Check forbidden first
         for pattern in forbidden_patterns {
             if glob_match(pattern, path) {
@@ -228,7 +280,9 @@ pub fn create_candidate_commit(
     // Stage only allowed paths
     let mut staged_any = false;
     for path in &changed {
-        let is_allowed = allowed_patterns.iter().any(|p| glob_match(p, path));
+        let is_allowed = !is_control_plane_path(path)
+            && !is_runner_internal_path(path)
+            && allowed_patterns.iter().any(|p| glob_match(p, path));
         if is_allowed {
             let _ = Command::new("git")
                 .args(["add", path])
@@ -361,6 +415,55 @@ mod tests {
             10,
         );
         assert!(matches!(result, Err(ScopeViolation::ForbiddenPath { .. })));
+    }
+
+    #[test]
+    fn scope_always_rejects_control_plane_files() {
+        let changed = vec!["nested/.epics.json".to_string()];
+        let result = verify_changed_paths_in_scope(&changed, &["**".to_string()], &[], 10);
+        assert!(matches!(result, Err(ScopeViolation::ForbiddenPath { .. })));
+    }
+
+    #[test]
+    fn changed_paths_include_untracked_source_but_exclude_runner_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        Command::new("git")
+            .arg("init")
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let base = read_head_sha(repo).unwrap();
+
+        std::fs::write(repo.join("new-source.rs"), "fn main() {}\n").unwrap();
+        std::fs::create_dir_all(repo.join(".questlog-output")).unwrap();
+        std::fs::write(repo.join(".questlog-output/stdout.log"), "evidence").unwrap();
+
+        assert_eq!(
+            get_changed_paths(repo, &base).unwrap(),
+            vec!["new-source.rs"]
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ fn init_git_repo(dir: &std::path::Path) -> String {
         .output()
         .unwrap();
     std::fs::write(dir.join("src.ts"), "export const value = 1;\n").unwrap();
+    std::fs::write(dir.join(".gitignore"), ".epics.json\n.questlog-output/\n").unwrap();
     Command::new("git")
         .args(["add", "."])
         .current_dir(dir)
@@ -71,13 +72,9 @@ fn bridge_ready_package_to_zcode_execution() {
     let repo_dir = tempfile::tempdir().unwrap();
     let base_sha = init_git_repo(repo_dir.path());
 
-    // Write packages.json (simulating what Node MCP enqueue_step produces)
-    // Use the **nested** TaskPackage shape that Node's savePackage actually writes.
-    // Use an empty acceptance list — the test verifies the Runner correctly
-    // REJECTS packages without acceptance commands (anti-fake-green gate).
-    let packages = serde_json::json!({
-        "version": 1,
-        "packages": [{
+    // Build the exact nested TaskPackage shape written by Node MCP, then hash
+    // the sealed content with the same canonical algorithm used by the Runner.
+    let mut package = serde_json::json!({
             "schema_version": 1,
             "package_id": "pkg_e2e_test",
             "epic_id": "epic_test",
@@ -93,7 +90,7 @@ fn bridge_ready_package_to_zcode_execution() {
                 "forbidden_paths": [],
                 "max_changed_files": 5
             },
-            "preconditions": [],
+            "preconditions": [{"type": "git_clean", "value": true}],
             "executor": {
                 "preferred": "zcode",
                 "fallbacks": [],
@@ -101,7 +98,7 @@ fn bridge_ready_package_to_zcode_execution() {
                 "timeout_seconds": 3600,
                 "max_attempts": 2
             },
-            "acceptance": [],
+            "acceptance": [{"type": "command", "command_id": "verify:candidate"}],
             "authority": {
                 "auto_edit_worktree": true,
                 "auto_commit_candidate": true,
@@ -113,8 +110,61 @@ fn bridge_ready_package_to_zcode_execution() {
             "rollback": {"strategy": "preserve_worktree_and_stop"},
             "status": "ready",
             "sealed_at": "2026-08-11T00:00:00Z",
-            "package_hash": "e2e_fake_hash"
+            "package_hash": ""
+    });
+    let package_hash = app_lib::execution_store::compute_package_hash(&package).unwrap();
+    package["package_hash"] = serde_json::Value::String(package_hash.clone());
+
+    // The portable summary is local plan state and is ignored by Git in this
+    // fixture, matching QuestLog's local-first project data model.
+    let epics = serde_json::json!({
+        "version": 1,
+        "project": "e2e",
+        "revision": 1,
+        "epics": [{
+            "id": "epic_test",
+            "title": "E2E",
+            "description": "",
+            "status": "active",
+            "priority": "P0",
+            "depends_on": [],
+            "blocks": [],
+            "links": {},
+            "acceptance": "candidate verified",
+            "close_reason": "",
+            "created_at": "2026-08-11T00:00:00Z",
+            "updated_at": "2026-08-11T00:00:00Z"
+        }],
+        "steps": [{
+            "id": "step_test",
+            "epic_id": "epic_test",
+            "title": "Change value",
+            "description": "",
+            "order": 1,
+            "depends_on": [],
+            "stage": "designed",
+            "links": {},
+            "package": {
+                "package_id": "pkg_e2e_test",
+                "plan_revision": 1,
+                "package_hash": package_hash,
+                "objective": "Change the value in src.ts from 1 to 42. Only modify src.ts.",
+                "executor": "zcode",
+                "status": "sealed"
+            },
+            "created_at": "2026-08-11T00:00:00Z",
+            "updated_at": "2026-08-11T00:00:00Z"
         }]
+    });
+    std::fs::write(
+        repo_dir.path().join(".epics.json"),
+        serde_json::to_string_pretty(&epics).unwrap(),
+    )
+    .unwrap();
+
+    let packages = serde_json::json!({
+        "version": 1,
+        "packages": [package]
     });
     std::fs::write(
         runtime_dir.path().join("runtime").join("packages.json"),
@@ -146,23 +196,23 @@ fn bridge_ready_package_to_zcode_execution() {
             let exec = &execs[0];
             eprintln!("Execution status: {:?}", exec.status);
 
-            // Anti-fake-green: no acceptance commands → must NOT be Passed
-            assert_ne!(
+            assert_eq!(
                 exec.status,
                 app_lib::execution_store::ExecutionStatus::Passed,
-                "execution without acceptance commands must NOT pass"
+                "real ZCode candidate should pass exact-candidate verification: {:?}",
+                exec.last_error
             );
-
-            if let Some(ref err) = exec.last_error {
-                eprintln!("  Error: {}", err);
-                // Verify it's the acceptance gate that caught it
-                assert!(
-                    err.contains("no acceptance commands"),
-                    "should fail on acceptance gate, got: {}",
-                    err
-                );
-                eprintln!("✅ Anti-fake-green gate works: candidate commit rejected without acceptance commands");
-            }
+            let candidate_sha = exec.candidate_sha.as_ref().expect("candidate SHA");
+            let detail = app_lib::attempt_bundle::read_bundle(&exec.id).unwrap();
+            let verifier_path = detail.1.join("verifier-results.json");
+            let verifier: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(verifier_path).unwrap()).unwrap();
+            assert_eq!(
+                verifier[0]["candidate_sha"].as_str(),
+                Some(candidate_sha.as_str()),
+                "verifier must bind to the exact candidate SHA"
+            );
+            assert!(verifier[0]["passed"].as_bool().unwrap_or(false));
 
             // Main repo working tree must be untouched regardless
             let main_content = std::fs::read_to_string(repo_dir.path().join("src.ts")).unwrap();

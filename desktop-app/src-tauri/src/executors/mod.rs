@@ -22,6 +22,8 @@ pub mod zcode;
 pub use zcode::ZCodeExecutor;
 
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -74,6 +76,40 @@ pub trait Executor {
 
     /// Cancel a running execution.
     fn cancel(&mut self, handle: &mut ExecutionHandle) -> Result<(), String>;
+}
+
+/// Terminate the whole executor process group so child tool processes do not
+/// survive a pause, cancellation, or timeout. Falls back to killing the direct
+/// child when process-group signalling is unavailable.
+pub fn terminate_process_tree(handle: &mut ExecutionHandle) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", handle.child.id());
+        let _ = Command::new("kill")
+            .args(["-TERM", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        std::thread::sleep(Duration::from_millis(150));
+        if handle.child.try_wait().ok().flatten().is_none() {
+            let _ = Command::new("kill")
+                .args(["-KILL", &group])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    handle
+        .child
+        .kill()
+        .or_else(|e| {
+            if handle.child.try_wait().ok().flatten().is_some() {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .map_err(|e| format!("kill process tree failed: {e}"))
 }
 
 // ─── Codex adapter ───
@@ -193,7 +229,8 @@ impl Executor for CodexExecutor {
         let stderr_file =
             std::fs::File::create(&stderr_path).map_err(|e| format!("create stderr: {e}"))?;
 
-        let child = Command::new(&self.binary)
+        let mut command = Command::new(&self.binary);
+        command
             .args(["exec", "--json"])
             .arg("-C")
             .arg(worktree_path)
@@ -201,7 +238,10 @@ impl Executor for CodexExecutor {
             .arg(sandbox)
             .arg(task)
             .stdout(Stdio::from(stdout_file))
-            .stderr(Stdio::from(stderr_file))
+            .stderr(Stdio::from(stderr_file));
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command
             .spawn()
             .map_err(|e| format!("failed to start codex: {e}"))?;
 

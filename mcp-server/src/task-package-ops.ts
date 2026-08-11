@@ -131,7 +131,7 @@ export async function prepareTaskPackage(
       { type: "git_clean", value: true },
     ],
     executor: {
-      preferred: (input.executor_preferred as TaskPackage["executor"]["preferred"]) ?? "codex",
+      preferred: (input.executor_preferred as TaskPackage["executor"]["preferred"]) ?? "zcode",
       fallbacks: [],
       sandbox: "workspace-write",
       timeout_seconds: input.executor_timeout_seconds ?? 3600,
@@ -219,6 +219,33 @@ export async function validateTaskPackage(
   let dependenciesMet = true;
   if ("ok" in epicsResult) {
     const data = epicsResult.data;
+    const epic = data.epics.find((candidate) => candidate.id === pkg.epic_id);
+    const step = data.steps.find(
+      (candidate) => candidate.id === pkg.step_id && candidate.epic_id === pkg.epic_id,
+    );
+    if (!epic) {
+      issues.push({
+        field: "epic_id",
+        message: `epic '${pkg.epic_id}' not found in the Plan Store`,
+        severity: "error",
+      });
+      dependenciesMet = false;
+    } else if (pkg.executor.preferred === "zcode" && epic.status !== "active") {
+      issues.push({
+        field: "epic_id",
+        message: `automatic execution requires epic '${pkg.epic_id}' to be active`,
+        severity: "error",
+      });
+      dependenciesMet = false;
+    }
+    if (!step) {
+      issues.push({
+        field: "step_id",
+        message: `step '${pkg.step_id}' not found in epic '${pkg.epic_id}'`,
+        severity: "error",
+      });
+      dependenciesMet = false;
+    }
     for (const pre of pkg.preconditions) {
       if (pre.type === "step_stage" && pre.step_id && pre.at_least) {
         const depStep = data.steps.find((s) => s.id === pre.step_id);
@@ -242,6 +269,13 @@ export async function validateTaskPackage(
         }
       }
     }
+  } else if ("notFound" in epicsResult) {
+    issues.push({
+      field: "project_path",
+      message: "Plan Store .epics.json is missing; create the Epic and Step before sealing",
+      severity: "error",
+    });
+    dependenciesMet = false;
   } else if ("error" in epicsResult) {
     issues.push({
       field: "project_path",
@@ -334,6 +368,9 @@ export async function sealTaskPackage(
   if ("error" in pkgResult) return { error: pkgResult.error };
   const pkg = pkgResult.pkg;
 
+  // sealed_at is part of the immutable content, so set it before hashing.
+  pkg.sealed_at = new Date().toISOString();
+
   // Recompute hash on final content
   const { status: _s, package_hash: _h, ...hashable } = pkg;
   const finalHash = computePackageHash(hashable as Omit<TaskPackage, "package_hash" | "status">);
@@ -344,7 +381,6 @@ export async function sealTaskPackage(
   }
   pkg.package_hash = finalHash;
   pkg.status = "sealed";
-  pkg.sealed_at = new Date().toISOString();
 
   const saveResult = await savePackage(pkg);
   if ("error" in saveResult) return { error: saveResult.error };
@@ -352,7 +388,7 @@ export async function sealTaskPackage(
   // Write package summary back to .epics.json on the step
   const summary = packageSummary(pkg);
   const { updateStep } = await import("./epic-store.js");
-  await updateStep(cwd, pkg.step_id, {
+  const summaryResult = await updateStep(cwd, pkg.step_id, {
     package: {
       package_id: summary.package_id,
       plan_revision: summary.plan_revision,
@@ -362,6 +398,10 @@ export async function sealTaskPackage(
       status: summary.status,
     },
   });
+  if ("error" in summaryResult) {
+    await updatePackageStatus(pkg.package_id, "cancelled");
+    return { error: `package summary writeback failed; package was cancelled: ${summaryResult.error}` };
+  }
 
   return {
     package_id: pkg.package_id,
@@ -407,6 +447,17 @@ export async function enqueueStep(
   if (pkg.status !== "sealed") {
     return {
       error: `package ${pkg.package_id} is '${pkg.status}', not 'sealed'. Seal it first.`,
+    };
+  }
+
+  if (pkg.executor.preferred === "manual") {
+    return {
+      error: `package ${pkg.package_id} uses the manual policy. It remains sealed for tracking and is never placed on the automatic Runner queue.`,
+    };
+  }
+  if (pkg.executor.preferred !== "zcode") {
+    return {
+      error: `executor '${pkg.executor.preferred}' is forbidden by the production Runner policy; use zcode or manual`,
     };
   }
 

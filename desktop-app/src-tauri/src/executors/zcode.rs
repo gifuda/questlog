@@ -15,6 +15,8 @@
 //! with apiKey (the adapter does NOT fake availability if config is missing).
 
 use super::{ExecutionHandle, Executor, ExecutorEvent, ExecutorProbe};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -142,8 +144,7 @@ impl Executor for ZCodeExecutor {
     ) -> Result<ExecutionHandle, String> {
         // Reject dangerous parameters (defense in depth)
         if task.contains("--danger") || task.contains("--skip") || task.contains("--yolo") {
-            // Note: --yolo is a valid ZCode mode flag, but the task text shouldn't contain it
-            // --mode yolo is set explicitly by the executor, not by the task
+            return Err("task contains forbidden executor parameters".to_string());
         }
 
         let output_dir = worktree_path.join(".questlog-output");
@@ -168,8 +169,8 @@ impl Executor for ZCodeExecutor {
             "yolo"
         };
 
-        let child = self
-            .build_command()
+        let mut command = self.build_command();
+        command
             .arg("--prompt")
             .arg(task)
             .arg("--cwd")
@@ -177,7 +178,10 @@ impl Executor for ZCodeExecutor {
             .arg("--mode")
             .arg(mode)
             .stdout(Stdio::from(stdout_file))
-            .stderr(Stdio::from(stderr_file))
+            .stderr(Stdio::from(stderr_file));
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command
             .spawn()
             .map_err(|e| format!("failed to start zcode: {e}"))?;
 
@@ -284,5 +288,17 @@ mod tests {
             // ZCode CLI supports --resume <sessionId>
             assert!(probe.supports_resume);
         }
+    }
+
+    #[test]
+    fn start_rejects_dangerous_task_text() {
+        let mut exec = ZCodeExecutor::new();
+        let result = exec.start(
+            "run this with --yolo",
+            Path::new("/tmp"),
+            "workspace-write",
+            Duration::from_secs(60),
+        );
+        assert!(result.is_err());
     }
 }

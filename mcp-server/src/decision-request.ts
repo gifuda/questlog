@@ -169,7 +169,11 @@ export async function listDecisionRequests(options?: {
 }
 
 /**
- * Resolve a DecisionRequest — record the human's answer and unblock the step.
+ * Resolve a DecisionRequest by recording the human's answer.
+ *
+ * Resolution is deliberately non-executing: it never mutates an old attempt,
+ * releases a package, or starts the Runner. The user must explicitly retry or
+ * revise/reseal the package after the decision has been recorded.
  */
 export async function resolveDecision(
   requestId: string,

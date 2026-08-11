@@ -137,9 +137,13 @@
       "queued": "排队中",
       "running": "运行中",
       "candidate": "待验证",
+      "verifying": "验证中",
       "passed": "通过",
       "failed": "失败",
       "cancelled": "已取消",
+      "cancel_requested": "取消中",
+      "pause_requested": "暂停中",
+      "timed_out": "已超时",
       "blocked": "已阻塞",
       "stale": "已过期"
     },
@@ -159,7 +163,12 @@
     "retry": "重试",
     "cannotBypassServer": "UI 不能绕过服务端验证",
     "runnerOn": "自动执行 开",
-    "runnerOff": "自动执行 关"
+    "runnerOff": "自动执行 关",
+    "attention": "需要关注（{{count}}）",
+    "evidence": "证据",
+    "customDecision": "输入其他处理意见",
+    "submitDecision": "提交",
+    "decisionRecordedHint": "回答只记录决策，不会自动重启；请随后重试，或修订并重新封包。"
   },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",

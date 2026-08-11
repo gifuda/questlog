@@ -921,11 +921,7 @@ pub fn get_execution(id: String) -> Result<crate::execution_store::Execution, St
 
 #[tauri::command]
 pub fn cancel_execution(id: String) -> Result<(), String> {
-    crate::execution_store::release_lease(
-        &id,
-        crate::execution_store::ExecutionStatus::Cancelled,
-        Some("cancelled by user"),
-    )
+    crate::execution_store::request_control(&id, false).map(|_| ())
 }
 
 #[tauri::command]
@@ -944,23 +940,58 @@ pub fn get_attempt_bundles(
     crate::attempt_bundle::list_bundles_for_step(&step_id)
 }
 
-/// Get a single attempt bundle's full manifest + file reference paths.
-/// The frontend reads raw files on-demand from the returned bundle dir.
+/// Get a single attempt bundle's full manifest + available file names.
+/// F8 audit fix: does NOT expose absolute bundle_dir to the frontend.
+/// The frontend uses get_attempt_file(execution_id, filename) to read content.
 #[tauri::command]
 pub fn get_attempt_detail(execution_id: String) -> Result<AttemptDetail, String> {
     let (manifest, dir) = crate::attempt_bundle::read_bundle(&execution_id)?;
     Ok(AttemptDetail {
         manifest,
-        bundle_dir: dir.to_string_lossy().to_string(),
+        execution_id: execution_id.clone(),
         files: list_bundle_files(&dir),
     })
 }
 
+/// Read a specific file from an attempt bundle by relative filename.
+/// Validates the filename to prevent path traversal within the bundle.
+#[tauri::command]
+pub fn get_attempt_file(execution_id: String, filename: String) -> Result<String, String> {
+    // Validate filename — only allow known bundle filenames, no path components
+    const ALLOWED_FILES: &[&str] = &[
+        "manifest.json",
+        "task-package.json",
+        "environment-snapshot.json",
+        "events.jsonl",
+        "stdout.log",
+        "stderr.log",
+        "diff.patch",
+        "candidate.json",
+        "verifier-results.json",
+        "decisions.json",
+        "outcome.json",
+    ];
+    if !ALLOWED_FILES.contains(&filename.as_str()) {
+        return Err(format!(
+            "filename '{}' is not a valid bundle file",
+            filename
+        ));
+    }
+
+    let dir = crate::attempt_bundle::bundle_dir(&execution_id)?;
+    let path = dir.join(&filename);
+    if !path.exists() {
+        return Err(format!("file '{}' not found in bundle", filename));
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("read file: {e}"))
+}
+
 /// Response type for get_attempt_detail.
+/// F8 audit fix: bundle_dir is NOT exposed — only execution_id + file names.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AttemptDetail {
     pub manifest: crate::attempt_bundle::AttemptManifest,
-    pub bundle_dir: String,
+    pub execution_id: String,
     pub files: Vec<BundleFile>,
 }
 
@@ -991,12 +1022,7 @@ fn list_bundle_files(dir: &std::path::Path) -> Vec<BundleFile> {
 
 #[tauri::command]
 pub fn pause_execution(id: String) -> Result<(), String> {
-    // Release the lease and mark as blocked (paused by user)
-    crate::execution_store::release_lease(
-        &id,
-        crate::execution_store::ExecutionStatus::Blocked,
-        Some("paused by user"),
-    )
+    crate::execution_store::request_control(&id, true).map(|_| ())
 }
 
 #[tauri::command]
@@ -1012,6 +1038,21 @@ pub fn set_runner_enabled(enabled: bool) -> Result<bool, String> {
 #[tauri::command]
 pub fn is_runner_running() -> Result<bool, String> {
     Ok(crate::runner::is_running())
+}
+
+#[tauri::command]
+pub fn get_decision_requests(
+    include_resolved: Option<bool>,
+) -> Result<Vec<crate::decision_store::DecisionRequest>, String> {
+    crate::decision_store::list_requests(include_resolved.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn resolve_decision_request(
+    request_id: String,
+    resolution: String,
+) -> Result<crate::decision_store::DecisionRequest, String> {
+    crate::decision_store::resolve_request(&request_id, &resolution, "ui-user")
 }
 
 #[cfg(test)]

@@ -14,15 +14,19 @@
 
 import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { useExecutions, useExecutionActions, type Execution, type ExecutionStatus } from "../hooks/useExecutions";
+import { useExecutions, useExecutionActions, useDecisionRequests, type Execution, type ExecutionStatus } from "../hooks/useExecutions";
 
 const STATUS_COLORS: Record<ExecutionStatus, string> = {
   queued: "bg-gray-100 text-gray-700",
   running: "bg-blue-100 text-blue-700 animate-pulse",
   candidate: "bg-yellow-100 text-yellow-700",
+  verifying: "bg-purple-100 text-purple-700 animate-pulse",
   passed: "bg-green-100 text-green-700",
   failed: "bg-red-100 text-red-700",
   cancelled: "bg-gray-100 text-gray-500",
+  cancel_requested: "bg-orange-100 text-orange-700 animate-pulse",
+  pause_requested: "bg-orange-100 text-orange-700 animate-pulse",
+  timed_out: "bg-red-100 text-red-700",
   blocked: "bg-orange-100 text-orange-700",
   stale: "bg-gray-200 text-gray-500",
 };
@@ -89,7 +93,7 @@ function ExecutionRow({ exec }: { exec: Execution }) {
                 {t("execution.pause")}
               </button>
             )}
-            {(exec.status === "failed" || exec.status === "cancelled" || exec.status === "stale") && (
+            {(exec.status === "failed" || exec.status === "cancelled" || exec.status === "stale" || exec.status === "blocked" || exec.status === "timed_out") && (
               <button
                 onClick={() => retry(exec.id)}
                 className="px-2 py-1 text-xs rounded bg-blue-100 text-blue-700 hover:bg-blue-200"
@@ -97,7 +101,7 @@ function ExecutionRow({ exec }: { exec: Execution }) {
                 {t("execution.retry")}
               </button>
             )}
-            {exec.status !== "cancelled" && exec.status !== "passed" && (
+            {!(["cancelled", "passed", "blocked", "failed", "timed_out", "cancel_requested", "pause_requested"] as ExecutionStatus[]).includes(exec.status) && (
               <button
                 onClick={() => cancel(exec.id)}
                 className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-600 hover:bg-gray-200"
@@ -109,6 +113,78 @@ function ExecutionRow({ exec }: { exec: Execution }) {
         </div>
       )}
     </div>
+  );
+}
+
+export function DecisionInbox() {
+  const { t } = useTranslation();
+  const { requests, loading, error, resolve } = useDecisionRequests();
+  const [custom, setCustom] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState<string | null>(null);
+
+  if (loading) return null;
+  if (error) {
+    return <div className="px-4 py-2 text-[10px] text-red-400 border-b border-line">{error}</div>;
+  }
+  if (requests.length === 0) return null;
+
+  const answer = async (requestId: string, resolution: string) => {
+    if (!resolution.trim()) return;
+    setSubmitting(requestId);
+    try {
+      await resolve(requestId, resolution.trim());
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  return (
+    <section className="px-4 py-2 border-b border-orange-500/30 bg-orange-500/5">
+      <div className="text-[11px] font-semibold text-orange-300 mb-1">
+        🔔 {t("execution.attention", { count: requests.length })}
+      </div>
+      <div className="space-y-2">
+        {requests.map((request) => (
+          <div key={request.request_id} className="rounded border border-orange-500/20 p-2 text-[10px]">
+            <div className="text-body font-medium">{request.question}</div>
+            <div className="text-faint mt-0.5">
+              {request.kind} · rev {request.package_revision} · {request.execution_id.slice(0, 12)}
+            </div>
+            {request.evidence_refs.length > 0 && (
+              <div className="text-faint truncate mt-0.5" title={request.evidence_refs.join("\n")}>
+                {t("execution.evidence")}: {request.evidence_refs[0]}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              {request.options.map((option) => (
+                <button
+                  key={option}
+                  disabled={submitting === request.request_id}
+                  onClick={() => answer(request.request_id, option)}
+                  className="px-2 py-0.5 rounded bg-orange-500/15 text-orange-300 hover:bg-orange-500/25 disabled:opacity-40"
+                >
+                  {option}
+                </button>
+              ))}
+              <input
+                value={custom[request.request_id] ?? ""}
+                onChange={(event) => setCustom((current) => ({ ...current, [request.request_id]: event.target.value }))}
+                placeholder={t("execution.customDecision")}
+                className="min-w-36 flex-1 bg-elevated rounded px-1.5 py-0.5 text-body outline-none"
+              />
+              <button
+                disabled={submitting === request.request_id || !(custom[request.request_id] ?? "").trim()}
+                onClick={() => answer(request.request_id, custom[request.request_id] ?? "")}
+                className="px-2 py-0.5 rounded bg-accent text-white disabled:opacity-40"
+              >
+                {t("execution.submitDecision")}
+              </button>
+            </div>
+            <div className="text-faint mt-1">{t("execution.decisionRecordedHint")}</div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

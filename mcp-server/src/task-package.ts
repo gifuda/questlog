@@ -11,8 +11,9 @@
  * - A sealed package is immutable; any field change creates a new revision
  *   and new hash, superseding the old package.
  * - The full package (with absolute paths, CLI sessions) is stored only in
- *   the local Runtime Store — never in .epics.json (which is committed to Git).
- *   .epics.json stores only the portable package ID, revision, hash, and summary.
+ *   the local Runtime Store — never in .epics.json. The local Plan Store keeps
+ *   only the portable package ID, revision, hash, and summary; it is not part
+ *   of the candidate source commit truth.
  */
 
 import crypto from "node:crypto";
@@ -82,7 +83,10 @@ export type PackageStatus =
   | "sealed" // all validation passed, hash computed
   | "ready" // enqueued, waiting for Runner
   | "superseded" // a newer revision exists
-  | "cancelled";
+  | "cancelled"
+  | "passed" // Runner produced and verified an exact candidate commit
+  | "failed" // unexpected Runner failure; evidence is preserved
+  | "blocked"; // human decision or package revision is required
 
 export type StepStage = "pending" | "designed" | "coded" | "verified" | "observed";
 export type ExecutorKind = "codex" | "zcode" | "manual";
@@ -137,11 +141,19 @@ export interface PackageSummary {
  * a different hash, and therefore a different revision.
  */
 export function computePackageHash(pkg: Omit<TaskPackage, "package_hash" | "status">): string {
-  // Sort keys for determinism. JSON.stringify with a replacer that sorts keys.
-  const canonical = JSON.stringify(pkg, (key, value) => {
-    if (key === "status" || key === "package_hash") return undefined;
+  const canonicalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (value && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+        if (key === "status" || key === "package_hash") continue;
+        out[key] = canonicalize((value as Record<string, unknown>)[key]);
+      }
+      return out;
+    }
     return value;
-  }, 0);
+  };
+  const canonical = JSON.stringify(canonicalize(pkg));
   return crypto.createHash("sha256").update(canonical).digest("hex");
 }
 
@@ -198,6 +210,20 @@ export function validatePackageContent(pkg: Partial<TaskPackage>): ValidationIss
     if (pkg.executor.max_attempts < 1) {
       issues.push({ field: "executor.max_attempts", message: "must be ≥ 1", severity: "error" });
     }
+    if (pkg.executor.preferred === "codex") {
+      issues.push({
+        field: "executor.preferred",
+        message: "codex is design/push-only and is forbidden as a production Runner executor",
+        severity: "error",
+      });
+    }
+    if (pkg.executor.fallbacks.length > 0) {
+      issues.push({
+        field: "executor.fallbacks",
+        message: "automatic executor fallback is disabled; use a DecisionRequest instead",
+        severity: "error",
+      });
+    }
   } else {
     issues.push({ field: "executor", message: "executor config is required", severity: "error" });
   }
@@ -253,6 +279,12 @@ export interface TrustedCommand {
 }
 
 const ACCEPTANCE_REGISTRY: Record<string, TrustedCommand> = {
+  "verify:candidate": {
+    id: "verify:candidate",
+    command: "git diff --check HEAD^ HEAD",
+    cwd: ".",
+    description: "Verify the exact candidate commit has a clean patch",
+  },
   "test:mcp": {
     id: "test:mcp",
     command: "npm test",
@@ -333,7 +365,15 @@ export async function isGitClean(repoRoot: string): Promise<boolean> {
           resolve(false);
           return;
         }
-        resolve(stdout.trim().length === 0);
+        const controlFiles = [".todos.json", ".epics.json", ".todo-board.json"];
+        const sourceChanges = stdout
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => line.slice(3).replace(/^"|"$/g, ""))
+          .filter((file) => !controlFiles.some((name) =>
+            file === name || file.endsWith(`/${name}`) || file === `${name}.lock` || file.endsWith(`/${name}.lock`)
+          ));
+        resolve(sourceChanges.length === 0);
       });
     });
   } catch {
@@ -378,7 +418,7 @@ export function defaultAuthority(): Authority {
 
 export function defaultExecutor(): ExecutorConfig {
   return {
-    preferred: "codex",
+    preferred: "zcode",
     fallbacks: [],
     sandbox: "workspace-write",
     timeout_seconds: 3600,

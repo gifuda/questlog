@@ -19,6 +19,8 @@ import {
   isTrustedCommand,
   listAcceptanceCommands,
   defaultAuthority,
+  defaultExecutor,
+  isGitClean,
   TaskPackage,
 } from "../src/task-package.js";
 import {
@@ -49,6 +51,36 @@ beforeEach(async () => {
   await fs.writeFile(path.join(projectDir, "README.md"), "# Test\n");
   execFileSync("git", ["add", "."], { cwd: projectDir, stdio: "pipe" });
   execFileSync("git", ["commit", "-m", "initial"], { cwd: projectDir, stdio: "pipe" });
+  const now = new Date().toISOString();
+  await fs.writeFile(path.join(projectDir, ".epics.json"), JSON.stringify({
+    version: 1,
+    project: "test-project",
+    revision: 0,
+    epics: [{
+      id: "e1",
+      title: "Test epic",
+      description: "",
+      status: "active",
+      priority: "p1",
+      depends_on: [],
+      blocks: [],
+      links: {},
+      created_at: now,
+      updated_at: now,
+    }],
+    steps: [{
+      id: "s1",
+      epic_id: "e1",
+      title: "Test step",
+      description: "",
+      order: 1,
+      depends_on: [],
+      stage: "designed",
+      links: {},
+      created_at: now,
+      updated_at: now,
+    }],
+  }, null, 2));
 });
 
 afterEach(async () => {
@@ -116,6 +148,29 @@ describe("validatePackageContent", () => {
       acceptance: [{ type: "command" }], // missing command_id
     });
     expect(issues.some((i) => i.field === "acceptance.command_id")).toBe(true);
+  });
+
+  it("defaults production execution to zcode and rejects codex or fallbacks", () => {
+    expect(defaultExecutor().preferred).toBe("zcode");
+    const base: Partial<TaskPackage> = {
+      objective: "do X",
+      epic_id: "e1",
+      step_id: "s1",
+      scope: { allowed_paths: ["src/**"], forbidden_paths: [], max_changed_files: 5 },
+      acceptance: [{ type: "command", command_id: "verify:candidate" }],
+      authority: defaultAuthority(),
+    };
+    const codexIssues = validatePackageContent({
+      ...base,
+      executor: { ...defaultExecutor(), preferred: "codex" },
+    });
+    expect(codexIssues.some((issue) => issue.field === "executor.preferred" && issue.severity === "error")).toBe(true);
+
+    const fallbackIssues = validatePackageContent({
+      ...base,
+      executor: { ...defaultExecutor(), fallbacks: ["manual"] },
+    });
+    expect(fallbackIssues.some((issue) => issue.field === "executor.fallbacks" && issue.severity === "error")).toBe(true);
   });
 });
 
@@ -202,6 +257,27 @@ describe("computePackageHash", () => {
     const hash2 = computePackageHash({ ...pkg, status: "sealed", package_hash: "yyy" });
     expect(hash1).toBe(hash2);
   });
+
+  it("canonicalizes nested object keys and matches the Rust vector", () => {
+    const first = {
+      z: 1,
+      a: { y: 2, x: [{ b: 2, a: 1 }] },
+      status: "ready",
+      package_hash: "ignored",
+    };
+    const reordered = {
+      package_hash: "different",
+      status: "blocked",
+      a: { x: [{ a: 1, b: 2 }], y: 2 },
+      z: 1,
+    };
+    // Deliberately use a narrow runtime fixture instead of pretending this is
+    // a complete TaskPackage; the canonicalizer accepts arbitrary JSON data.
+    const hash1 = computePackageHash(first as unknown as Omit<TaskPackage, "package_hash" | "status">);
+    const hash2 = computePackageHash(reordered as unknown as Omit<TaskPackage, "package_hash" | "status">);
+    expect(hash1).toBe(hash2);
+    expect(hash1).toBe("5a0838288edf4a4f2df2106be08daed20d6b4e86ff9e17b00eee9df629cf22c9");
+  });
 });
 
 // ─── Trusted acceptance registry ───
@@ -229,6 +305,13 @@ describe("acceptance registry", () => {
 // ─── prepare / validate / seal / enqueue integration ───
 
 describe("prepare → validate → seal → enqueue flow", () => {
+  it("treats QuestLog metadata as control-plane state, not dirty source", async () => {
+    const projectDir = path.join(dir, "test-project");
+    expect(await isGitClean(projectDir)).toBe(true);
+    await fs.writeFile(path.join(projectDir, "new-source.ts"), "export const x = 1;\n");
+    expect(await isGitClean(projectDir)).toBe(false);
+  });
+
   it("prepares a draft package with server-resolved base SHA", async () => {
     const projectDir = path.join(dir, "test-project");
     const result = await prepareTaskPackage(projectDir, {
@@ -336,5 +419,27 @@ describe("prepare → validate → seal → enqueue flow", () => {
     } finally {
       await fs.rm(nonGit, { recursive: true, force: true });
     }
+  });
+
+  it("keeps manual packages sealed and out of the automatic queue", async () => {
+    const projectDir = path.join(dir, "test-project");
+    const prep = await prepareTaskPackage(projectDir, {
+      epic_id: "e1",
+      step_id: "s1",
+      objective: "track this task without automatic execution",
+      allowed_paths: ["README.md"],
+      executor_preferred: "manual",
+      acceptance_command_ids: ["verify:candidate"],
+    });
+    if ("error" in prep) throw new Error(prep.error);
+    const sealed = await sealTaskPackage(projectDir, prep.package_id);
+    if ("error" in sealed) throw new Error(sealed.error);
+
+    const enqueue = await enqueueStep(projectDir, "s1");
+    expect("error" in enqueue).toBe(true);
+    if ("error" in enqueue) expect(enqueue.error).toContain("manual policy");
+    const stored = await getPackage(prep.package_id);
+    if ("error" in stored) throw new Error(stored.error);
+    expect(stored.pkg.status).toBe("sealed");
   });
 });

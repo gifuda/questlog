@@ -137,9 +137,13 @@
       "queued": "Queued",
       "running": "Running",
       "candidate": "Candidate",
+      "verifying": "Verifying",
       "passed": "Passed",
       "failed": "Failed",
       "cancelled": "Cancelled",
+      "cancel_requested": "Cancelling",
+      "pause_requested": "Pausing",
+      "timed_out": "Timed out",
       "blocked": "Blocked",
       "stale": "Stale"
     },
@@ -159,7 +163,12 @@
     "retry": "Retry",
     "cannotBypassServer": "UI cannot bypass server-side validation",
     "runnerOn": "Auto ON",
-    "runnerOff": "Auto OFF"
+    "runnerOff": "Auto OFF",
+    "attention": "Needs attention ({{count}})",
+    "evidence": "Evidence",
+    "customDecision": "Enter another decision",
+    "submitDecision": "Submit",
+    "decisionRecordedHint": "An answer records the decision but does not restart work; retry explicitly, or revise and reseal."
   },
   "timeline": {
     "undoRemove": "Removed \"{{name}}\"",

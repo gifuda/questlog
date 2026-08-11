@@ -137,6 +137,6 @@ export interface BundleFile {
 /** Full detail for a single attempt bundle. */
 export interface AttemptDetail {
   manifest: AttemptManifest;
-  bundle_dir: string;
+  execution_id: string;
   files: BundleFile[];
 }

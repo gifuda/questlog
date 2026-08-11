@@ -1,11 +1,207 @@
 # QuestLog 受控 AI 任务执行闭环：最终收口方案
 
 > 日期：2026-08-11  
-> 状态：现行施工与验收基线  
+> 状态：当前代码审计后的优化收口基线；尚未放行  
 > 适用分支：`feat/g0-storage-safety-taskpackage` 当前工作区  
 > 前序文档：`QuestLog受控AI任务执行闭环方案_20260810.md`、`QuestLog受控AI任务执行闭环_Goal执行包_20260810.md`  
-> 外部参考：[Meta-Harness 腾讯云技术解读](https://cloud.tencent.com/developer/article/2680464)、[官方项目](https://yoonholee.com/meta-harness/)、[论文](https://arxiv.org/pdf/2603.28052)  
-> 本文边界：定义剩余收口施工、测试、放行和回滚；不代表当前版本已经通过最终验收
+> 本文边界：定义剩余收口施工、测试、放行和回滚；不代表当前版本已经通过最终验收。Meta-Harness 可继续用于执行记忆、外部验证和受控重试收口；LID Harness 单独暂缓，不属于本轮施工或完成条件  
+
+## 0. 当前代码审计后的权威收口裁决
+
+> 本节基于 2026-08-11 当前分支、当前未提交工作区和已运行证据形成，优先级高于本文后续早期差距描述。后续章节保留为施工细节参考；若状态判断冲突，以本节为准。
+
+### 0.1 当前代码状态与证据边界
+
+当前 HEAD 为 `be2984f`。工作区存在 19 个已修改文件和 1 个新增文件，累计约 `+1659/-232`，覆盖 TaskPackage、Runner、ZCode、Execution、DecisionRequest、AttemptBundle、React UI、i18n 和测试。这些内容均为**未提交候选改动**，不能视为已经发布、已安装 App 已加载或真实项目可安全自动执行。
+
+本轮中断前取得的证据：
+
+| 证据 | 结果 | 可证明 | 不能证明 |
+|---|---|---|---|
+| MCP 全套测试与 build（较早候选快照） | 124 passed、1 skipped；TypeScript build 通过 | Node 侧既有功能及部分 TaskPackage 策略未明显回归 | 最新全部未提交改动仍全绿；真实生产闭环 |
+| MCP TaskPackage 定向测试（最新候选） | 21 passed；build 通过 | 默认执行器、manual、canonical hash、Plan Store 校验等定向逻辑可编译 | Rust/App/真实执行的组合正确性 |
+| 前端测试与 Vite build（较早候选快照） | 3 passed；build 通过 | i18n 基础完整、前端可构建 | 原生 Tauri invoke、按钮后端行为、窄窗口视觉与已安装 App |
+| Rust lib 测试（较早候选快照） | 109 passed | Execution/Decision/Runner 的若干单元行为 | 最新 runner_git 改动后的全套回归 |
+| Rust runner_git 定向测试（最新候选） | 9 passed | 未跟踪源码发现、控制面文件保护等候选逻辑 | 全量 Clippy、完整 E2E 和生产兼容性 |
+| strict Clippy | 最新一次在 `filter().next()` 处失败；随后仅做了一行候选修订，未重跑 | 暴露了候选仍未完成最终质量门禁 | 不能声称严格 Clippy 已通过 |
+| 真实 ZCode exact-candidate fixture（较早候选快照） | `ready → Passed`，ZCode 0.16.1，候选 SHA 与 verifier SHA 一致，主工作区内容不变 | 正向隔离 worktree 与候选提交路径曾经跑通 | 最新全部改动仍保持通过；取消、暂停、超时和真实项目安全 |
+| `git diff --check` | 当前通过 | 当前文本 diff 无空白错误 | 功能正确、App 可发布或提交边界合理 |
+
+因此当前裁决为：**可继续作为收口候选开发快照，不可开启真实项目 Runner，不可声明闭环完成，不可据此 merge/push/deploy。**
+
+### 0.2 第一性原理：最终只保留一个机器对齐核心
+
+系统不需要在 MCP、控制台、CLI、对话和 Git 之间反复同步“完成文案”。机器完成真相只保留一条：
+
+```text
+目标 Step
+→ 服务端封装的 TaskPackage
+→ 明确 base commit
+→ ZCode 隔离执行
+→ candidate commit
+→ verifier 精确绑定 candidate SHA
+→ passed / blocked
+```
+
+四类数据各司其职：
+
+| 数据 | 用途 | 是否完成真相 |
+|---|---|---|
+| `.epics.json` Plan Store | 给人看目标、步骤、依赖、验收和当前阶段 | 否；只表达意图与计划状态 |
+| TaskPackage | 给机器执行的不可变契约：目标、路径、权限、预算、验收、base | 否；只证明“允许这样执行” |
+| Execution / DecisionRequest / AttemptBundle | 调度、人工介入和审计证据 | 否；只证明发生了什么、为何停下 |
+| Git candidate commit + exact verifier | 精确代码结果和验收对象 | **是；唯一机器完成对齐码** |
+
+`.todos.json/.epics.json` 是 QuestLog 控制面元数据，不应混入候选源码提交，也不能因为自身回写让 `git_clean` 永久失败；执行器无论 scope 是否写成 `**`，都不得修改或提交这些控制面文件。代码新增、修改、删除和重命名则必须全部进入 changed-path 检查，尤其不能遗漏 untracked 新文件。
+
+### 0.3 优化后的最小闭环
+
+不新增独立“任务控制台真相源”。现有方案追踪页面承载 Runner 开关、执行状态和待决收件箱；调度逻辑作为 Runner 内部能力存在。
+
+```text
+任一对话端（Codex / Claude Code / ZCode）
+  → MCP 写 Epic / Step / TaskPackage 草案
+  → QuestLog 依据依赖与授权判断 dispatchable
+  → 就绪时服务端绑定当前 Git base 并 seal
+  → 已武装范围内由 Runner 自动领取
+  → ZCode 在隔离 worktree 施工
+  → 生成 candidate commit + exact verifier
+  ├─ 低风险且仍在既定方向：自动释放下一机械 Step
+  └─ 方向、权限、外部影响或证据不确定：DecisionRequest 回到人
+       → 人只回答最小决策
+       → 明确 retry，或生成新 revision 后再执行
+```
+
+这里的关键优化不是增加节点，而是把当前“提前 seal 固定 base”的流程改为**就绪时封包**：
+
+1. 对话阶段生成完整 Step 与 TaskPackage 草案，允许一次性拆完方案，但不提前冻结未来步骤的 base SHA。
+2. 依赖满足时，QuestLog 在服务端读取权威 predecessor candidate 或当前 HEAD，生成该次执行的最终 sealed package。
+3. 不自动 merge 的前提下，依赖步骤可基于已通过且已授权的 predecessor candidate 形成候选 commit 链；Git commit graph 成为路径依赖的机器事实。
+4. 到里程碑、方向变化、高风险边界或最终合并前再让人审核，而不是每个普通机械步骤都要求复制、轮询或手工重新封包。
+5. `manual` 始终只追踪；Codex 始终只设计和推送；生产执行始终只允许批准的 ZCode adapter。
+
+### 0.4 当前代码发现的问题与解决思路
+
+#### P0：不解决不得进入真实项目 Runner
+
+| ID | 当前问题 | 影响 | 收口思路 |
+|---|---|---|---|
+| P0-1 | 当前全局 Runner ON 会消费 Runtime Store 中所有 ready package，缺少项目/Epic 级武装范围 | 一次开关可能放大到非预期项目 | 增加 `armed_scope`：project + epic + revision + 到期时间 + 最大任务/时长/成本；默认空，App 重启清空 |
+| P0-2 | ZCode `workspace-write` 实际映射为 `--mode yolo`，scope 检查主要发生在执行后；没有真正的网络、凭证和外部副作用隔离 | 即使最终 diff 合规，执行期间仍可能访问网络、秘密或外部系统 | R1 仅 fixture；真实项目前必须采用 OS/容器级 sandbox，或明确禁网、最小环境变量、凭证剥离和外部命令 allowlist；post-check 不能替代执行前隔离 |
+| P0-3 | 当前 TaskPackage 把 base SHA 在 prepare/seal 阶段冻结；同时禁止自动 merge，依赖步骤无法自然串行继承前一候选 | 方案“自动按序执行”在有代码路径依赖时会不断 base drift、要求人重新封包 | 将未来步骤保留为草案；dispatch 时绑定 predecessor candidate/HEAD 并 seal；形成可审计候选 commit chain，最终仍由人决定 merge |
+| P0-4 | Runner 对所有低 order/depends_on 步骤硬要求 `observed`，而 passed 只推进到 `verified` | 每个步骤都需要人手工 observed，无法显著降低盯任务成本 | 依赖门槛写入 Step/TaskPackage：纯机械链默认 `verified` 即可释放，涉及运行观察/外部效果才要求 `observed`；风险策略决定人工检查点 |
+| P0-5 | 已提交基线的 changed-path 只看 `git diff`，会漏掉 untracked 新文件；当前工作区有候选修订但尚未完成全门禁 | 新建越权文件可能不被 scope/commit 证据捕获 | changed set 必须合并 tracked diff、untracked、rename/delete；硬排除 Runner 自身输出，硬禁止 `.todos/.epics/.todo-board` 控制面文件；补新增、删除、重命名和 symlink E2E |
+| P0-6 | `.epics.json` 回写与 `git_clean` 的语义存在冲突；旧文档又同时把它描述为可提交计划事实 | seal 后自身元数据可能让 enqueue 永久判 dirty，机器真相混乱 | 明确 Plan Store 是本地控制面而非候选源码真相；源码洁净检查只排除固定 QuestLog 元数据，其他 untracked 仍阻断；执行器永远不能修改控制面文件 |
+| P0-7 | pause/cancel/timeout、进程组 kill 和晚到结果 CAS 在工作区已有候选实现，但没有最新全量真实 E2E | UI 可能显示已停，CLI/子进程仍继续或晚到 passed 覆盖取消 | 用可控 fake child 验证 TERM→KILL→wait、孙进程消失、candidate 不再产生；再做真实 ZCode cancel/pause/timeout fixture；终态只能 CAS 前进 |
+| P0-8 | exact candidate 正向 E2E 曾通过，但默认 `verify:candidate` 仅是 `git diff --check` | SHA 绑定正确不等于业务正确，仍可能形成“精确地验证了一个错误候选” | exact SHA 绑定作为底座；每个可执行 package 至少声明一个项目相关 trusted verifier，按 lint/type/targeted test/full test 分层；无业务验收不能 passed |
+| P0-9 | acceptance registry 在 Node 与 Rust 双份维护；Rust只消费 command 类型，其他 acceptance 类型可能被静默丢弃 | 两端漂移或 package 看似有验收但 Runner 实际无可执行验收 | registry 改为单一共享声明或构建期生成；未知 acceptance/precondition 必须 fail-closed；增加跨语言契约测试 |
+| P0-10 | DecisionRequest 回答当前只记录文本，不会自动产生新 attempt/revision；旧工具文案曾声称 Runner 会继续 | 人以为已放行，实际任务仍停；或未来错误实现直接复活旧 attempt | 保持“回答不直接执行”的安全语义；回答后只允许显式 `retry_same_revision` 或 `revise_and_reseal`；scope/authority/base/direction变化必须新 revision |
+| P0-11 | 未解决 DecisionRequest 没有形成 Step 级互斥；回答也未校验仍对应当前 package revision | 同一步可能通过另一 ready package 绕过人工闸，旧回答可能错误影响新方案 | dispatch 前检查同 Step 的 unresolved blocking request；resolution 绑定 package id+revision+candidate；旧 revision 只能归档，不能释放新 revision |
+| P0-12 | Package/Execution 状态、`.epics` 摘要状态和 Node/Rust枚举尚未形成一份权威契约 | UI 可显示 sealed，而 Runtime 已 blocked/passed；跨语言写入未知状态 | 区分 immutable package lifecycle 与 execution runtime status；`.epics` 只存封包摘要，实时执行状态只读 Runtime Store；共享 schema + migration + unknown-state fail-closed |
+| P0-13 | canonical hash 两端实现策略存在潜在差异：Node递归删除所有名为 status/package_hash 的键，Rust只删除顶层 | 特定嵌套字段可产生跨语言 hash 不一致 | 明确定义 canonical JSON：仅排除顶层 runtime 字段、递归排序 object key、数组保序、UTF-8/数字格式固定；使用同一固定向量和跨语言 round-trip 测试 |
+| P0-14 | seal 与 `.epics` package summary 是跨两个文件存储，不能原子提交；历史实现还可能忽略 step 不存在或回写失败 | Runtime 有 sealed package，但方案页无对应 Step/summary，形成孤儿执行契约 | seal 前验证 Epic/Step/项目一致；使用 prepare-record + CAS finalize，任一侧失败将 package 标记 cancelled/invalid；Runner领取时再比对 id/revision/hash |
+| P0-15 | Runtime/Decision 列表在损坏文件语义上不完全一致，Node 某些 list 路径会把错误折叠为空列表 | 待决事项可能被静默隐藏，人工闸失效 | 只有 ENOENT 返回空；权限、IO、JSON 损坏一律错误可见并保留备份，UI/对话不得显示“无待决” |
+| P0-16 | 当前机器观察到两个已安装版 App 主进程；尚未证明单实例或跨实例 Runner 安全 | 两个 UI/Runner 可能同时开启、重复领取或产生状态竞争 | 加单实例守卫；继续保留文件锁、lease token、execution revision；双进程 E2E 证明最多一个领取，第二实例只读或聚焦已有窗口 |
+
+#### P1：进入 shadow/bounded auto 前完成
+
+| ID | 当前问题 | 收口思路 |
+|---|---|---|
+| P1-1 | Runner 传给 ZCode 的主要是 objective，标准包中的 scope、禁止事项、验收、停止条件和依赖没有完整编译进执行指令 | 由服务端生成不可注入的 executor brief，包含目标、允许/禁止路径、验收 ID、禁止 merge/push/deploy、停止条件和证据输出要求；后端门禁仍是权威 |
+| P1-2 | retry 虽已出现 parent attempt/max_attempts 候选逻辑，但尚未证明解决方案与 DecisionRequest、父证据一致 | retry 永远创建新 attempt；同 revision 仅允许非方向性失败重试；达到预算或根因不一致时必须 revise/人工决策 |
+| P1-3 | Worktree/branch 创建中的部分 Git 错误被忽略，旧目录直接删除可能留下 Git worktree registry 或同名 branch | 所有 Git 子命令检查 exit/status；使用 `git worktree remove/prune`；失败 worktree默认保留并可从 UI 人工清理 |
+| P1-4 | Runner OFF 只停止新轮询，不代表当前任务已停止，UI语义不够明确 | UI区分“停止领取”和“停止全部”；后者逐个写 cancel_requested 并监督退出；默认 OFF 仍保持重启不恢复 |
+| P1-5 | 执行按钮缺少统一 pending/error/确认反馈；Decision回答后收件箱消失，用户可能不知下一步 | 所有 action 显示后端真实状态和错误；启用 Runner/取消执行需确认；回答后显示“已记录，未启动”，提供明确 retry/revise 入口 |
+| P1-6 | 原生 App UI 尚未在隔离 Runtime 下完成实机验收；浏览器 Vite 页面不能替代 Tauri invoke | 使用临时 fixture Runtime 启动 Tauri，核验默认 OFF、toggle、inbox、pause/cancel/retry、candidate/verifier/attempt 展示、窄窗口和中英文；不得触碰真实项目数据 |
+| P1-7 | AttemptBundle 保存 stdout、prompt、绝对路径和环境信息，尚无完整脱敏、权限和保留期证据 | 默认最小采集；secret/环境变量/个人路径脱敏；目录权限仅当前用户；manifest与SHA长期保留，大日志按策略清理并留审计 |
+| P1-8 | README 中英文仍主要描述传统清单/Epic，未说明 Codex只推送、ZCode执行及安全边界 | 回补受控执行入口、manual语义、Runner默认OFF、DecisionRequest、候选commit、故障处理和“永不自动merge/push/deploy” |
+| P1-9 | 旧 package/schema、已安装 App 与当前未提交数据结构之间没有升级/降级证据 | 增加 schema_version migration、旧状态映射、只读回滚和备份恢复测试；未知新字段旧 App 不得误执行 |
+| P1-10 | 代码、构建产物、已安装 App 和运行中进程版本尚未对齐 | 最终验收必须记录 source HEAD/candidate、bundle version、实际启动二进制 hash/version 和 Runtime schema，不以本地 build 成功替代已安装 App 证据 |
+
+### 0.5 人工介入策略：按风险设检查点，不按步骤机械打断
+
+每个 Epic 设 `approval_policy`，由人创建方案时选择：
+
+| 策略 | 自动范围 | 人何时介入 |
+|---|---|---|
+| `manual` | 不自动执行 | 每步由人处理 |
+| `after_each` | 一次只执行一个 Step | 每个 candidate passed 后 |
+| `milestone` | 同一候选链内自动执行低风险机械 Step | 到指定里程碑、链长或预算上限 |
+| `risk_triggered` | 在已武装 scope/budget 内持续执行 | 仅方向变化、权限扩大、外部副作用、漂移、失败、歧义或最终 merge 前 |
+
+无论策略如何，以下情况强制 DecisionRequest，不能自动重试或继续：
+
+- objective、scope、authority、acceptance 或依赖语义变化；
+- 需要网络、凭证、外部系统、部署、数据迁移或真实服务操作；
+- base 不是声明的 predecessor candidate/HEAD，或 revision/hash 不一致；
+- scope violation、verifier failed、取消/超时、同根因重复失败、达到预算；
+- 两种以上合理实现方向，或候选结果改变原方案发力方向；
+- merge、push、PR、发布、部署、清理证据或真实项目 canary。
+
+### 0.6 收口施工顺序
+
+只按以下顺序推进，避免在错误方向上把自动化做得更快：
+
+1. **S0 冻结候选**：审计当前 20 个未提交路径，按功能拆分候选 commit；不混入真实 `.todos/.epics` 数据。
+2. **S1 统一契约**：Package/Execution/Decision schema、canonical hash、acceptance registry、未知类型 fail-closed。
+3. **S2 固化 Git 真相**：完整 changed set、控制面硬保护、candidate chain、exact SHA verifier、Git 命令错误处理。
+4. **S3 固化执行隔离**：ZCode-only、OS sandbox/禁网/凭证剥离、进程树监督、timeout/cancel/pause、单实例和 lease CAS。
+5. **S4 完成人工闸**：armed scope、approval policy、Decision revision gate、显式 retry/revise、全局停止语义。
+6. **S5 App UI**：默认 OFF、真实状态、错误/确认、DecisionInbox、证据查询、原生隔离 Runtime 验收。
+7. **S6 全门禁**：Node、前端、Rust fmt/strict Clippy/test/build、真实 ZCode 成功/失败/取消/超时/漂移/新文件/双实例 E2E。
+8. **S7 放行**：先 fixture，再 shadow；真实项目 canary 必须单独获得用户授权，且仍禁止自动 merge/push/deploy。
+
+### 0.7 最终要求与完成定义
+
+以下全部满足后，才允许把状态从“候选收口”改为“可进入 bounded auto”：
+
+#### 产品目标
+
+- [ ] Codex/Claude Code 可以在对话中一次性推送 Epic、Step 和完整任务草案，无需人工复制到新对话。
+- [ ] 生产 Runner 只调用批准的 ZCode；Codex 不承担机械执行成本；manual 永不入自动队列。
+- [ ] 有路径依赖的步骤以 predecessor candidate commit 为机器对齐码，可在不自动 merge 的情况下形成候选链。
+- [ ] 人工触点从“盯每一步”收敛为授权、方向、风险、异常和最终合并决策。
+
+#### 安全与权限
+
+- [ ] Runner 每次启动均默认 OFF；没有 armed project/Epic 时即使全局 ON 也不领取。
+- [ ] 自动权限上限仅为隔离 worktree 写入、受信验证和 candidate commit；merge/push/deploy/外部副作用恒为 0。
+- [ ] ZCode 运行前具备真实隔离；凭证、网络和外部命令不靠 prompt 自律。
+- [ ] pause/cancel/timeout 真实终止整个进程树并 wait；晚到结果无法覆盖终态。
+- [ ] 两个 App/Runner 进程并发时，同一 Execution 最多一个获得有效 lease。
+
+#### Git 与验收
+
+- [ ] 修改、新增、删除、重命名和 symlink 路径全部进入 scope 检查；控制面和 Runner 输出永不进入候选 commit。
+- [ ] candidate SHA、worktree HEAD、verifier target 三者精确一致；主工作区源码不被 Runner 修改。
+- [ ] 每个 passed 至少有一个项目相关 trusted verifier；模型自述、CLI exit 0、commit存在或 `git diff --check` 单独均不算完成。
+- [ ] candidate chain 的父 SHA、package revision/hash 和 predecessor execution 可追溯。
+
+#### 状态、决策与证据
+
+- [ ] Node/Rust/UI 共用可迁移 schema；未知状态、命令、precondition、acceptance 一律 fail-closed。
+- [ ] unresolved blocking DecisionRequest 阻止同 Step 后续领取；resolution只对绑定 revision/candidate 有效。
+- [ ] retry 新建 attempt，不覆盖父证据；方向或权限变化必须新 package revision。
+- [ ] 每次 attempt 的 package、环境、原始事件、stdout/stderr、diff、candidate、verifier、decision 和 outcome 可查且完整性可验证。
+- [ ] Runtime/Decision 数据损坏不被折叠为空；有备份、错误可见和恢复路径。
+
+#### App 与发布证据
+
+- [ ] Runner 开关、armed scope、当前执行器、预算、运行状态和待决问题在方案追踪顶部可见。
+- [ ] UI action 有 loading/error/确认和真实后端状态；App 重启后不自动恢复执行权限。
+- [ ] 原生 Tauri App 在临时 Runtime 上完成中英文、窄窗口和全按钮 E2E；不以浏览器 mock 代替。
+- [ ] 最新工作区全量测试、build、fmt、strict Clippy 全绿；真实 ZCode exact-candidate、取消、超时、漂移、untracked、双实例场景均有证据。
+- [ ] source candidate、最终 commit、构建产物和实际运行 App 版本一致。
+- [ ] README、安装、迁移、故障处理、熔断和回滚与代码一致。
+- [ ] 未经用户新授权，不运行真实项目 canary，不 merge、push、发布或部署。
+
+最终放行裁决只能是以下三种之一：
+
+- `fixture_ready`：仅临时仓库可自动执行；
+- `shadow_ready`：真实项目只计算将领取什么，不启动 CLI；
+- `bounded_auto_ready`：仅用户明确武装的项目/Epic/预算可自动执行。
+
+当前裁决：**尚未达到 `fixture_ready` 的最终证据要求；保持 Runner OFF。**
 
 ## 1. 收口结论
 
@@ -566,7 +762,9 @@ C0 基线冻结
 - 熔断、回滚和人工接管手册；
 - 最终“可投入 bounded auto / 继续 shadow / 回滚”的明确裁决。
 
-## 14. Meta-Harness 可借鉴逻辑与启用边界
+## 14. Meta-Harness 可继续借鉴的逻辑与启用边界
+
+> 用户已明确 Meta-Harness 可以继续。其与当前收口直接相关的部分——AttemptBundle、EnvironmentSnapshot、原始执行轨迹、外部 verifier 和受 max_attempts/DecisionRequest 约束的 Evidence-aware Retry——纳入收口设计与证据要求。自动策略搜索、无上限候选生成和真实项目自主试验仍受 R1-R4 放行阶段约束，不得绕过 Runner OFF、armed scope、人工授权或 Git exact-candidate 门禁。
 
 ### 14.1 借鉴结论
 
@@ -707,3 +905,15 @@ R4 bounded auto：用户批准后，才允许在已批准范围内自动选择�
 ```
 
 Meta-Harness 能力是 QuestLog 的“执行记忆与学习层”，从属于方案追踪和 Runner，不新增一级产品真相源，也不得绕过本方案的安全收口顺序。
+
+## 15. 已暂缓：LID Harness
+
+LID Harness 当前只保留为未来研究方向，不进入本轮 Goal、S0-S7 施工、0.7 完成定义、Schema、Runner 状态机、TaskPackage 或 App UI。
+
+在用户重新明确授权前：
+
+- 不把 LID Harness 与 Meta-Harness、AttemptBundle 或 Evidence-aware Retry 混为同一能力；
+- 不因 LID Harness 增加新的一级模块、真相源、任务节点或自动调度层；
+- 不以 LID Harness 为由扩大 ZCode 权限、重试次数、上下文读取范围或真实项目试验范围；
+- 不要求当前代码、测试、文档或发布门禁为其预留未经验证的接口；
+- 后续若恢复，必须先单独说明目标、输入输出、与现有 Git/TaskPackage/DecisionRequest 的边界，以及是否会增加人工或自动执行风险，再另立施工与验收方案。

@@ -21,9 +21,13 @@ export type ExecutionStatus =
   | "queued"
   | "running"
   | "candidate"
+  | "verifying"
   | "passed"
   | "failed"
   | "cancelled"
+  | "cancel_requested"
+  | "pause_requested"
+  | "timed_out"
   | "blocked"
   | "stale";
 
@@ -96,8 +100,14 @@ export function useExecutionActions() {
     await invoke("cancel_execution", { id });
   }, []);
 
-  const retry = useCallback(async (id: string) => {
-    await invoke("retry_execution", { id });
+  // Returns the new child execution_id (Evidence-aware Retry).
+  const retry = useCallback(async (id: string): Promise<string | null> => {
+    try {
+      return await invoke<string>("retry_execution", { id });
+    } catch (err) {
+      console.warn("Failed to retry execution:", err);
+      return null;
+    }
   }, []);
 
   const pause = useCallback(async (id: string) => {
@@ -118,26 +128,80 @@ export function useExecutionActions() {
 export function useRunner() {
   const [enabled, setEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // On mount, check the backend's current Runner state
   useEffect(() => {
     invoke<boolean>("is_runner_running")
       .then(setEnabled)
-      .catch(() => {})
+      .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, []);
 
   const toggle = useCallback(async () => {
     const next = !enabled;
     try {
+      setLoading(true);
+      setError(null);
       const result = await invoke<boolean>("set_runner_enabled", { enabled: next });
       setEnabled(result);
     } catch (err) {
-      console.warn("Failed to toggle runner:", err);
+      setError(String(err));
+    } finally {
+      setLoading(false);
     }
   }, [enabled]);
 
-  return { enabled, loading, toggle };
+  return { enabled, loading, error, toggle };
+}
+
+export interface DecisionRequest {
+  request_id: string;
+  epic_id: string;
+  step_id: string;
+  execution_id: string;
+  kind: string;
+  question: string;
+  options: string[];
+  evidence_refs: string[];
+  blocking: boolean;
+  package_revision: number;
+  resolved: boolean;
+  resolution?: string;
+  created_at: string;
+}
+
+export function useDecisionRequests() {
+  const [requests, setRequests] = useState<DecisionRequest[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const data = await invoke<DecisionRequest[]>("get_decision_requests", {
+        includeResolved: false,
+      });
+      setRequests(data);
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 5000);
+    return () => clearInterval(interval);
+  }, [refresh]);
+
+  const resolve = useCallback(async (requestId: string, resolution: string) => {
+    await invoke("resolve_decision_request", { requestId, resolution });
+    await refresh();
+  }, [refresh]);
+
+  return { requests, loading, error, refresh, resolve };
 }
 
 // ─── AttemptBundle Trace Query hooks ───
@@ -176,7 +240,7 @@ export interface BundleFile {
 
 export interface AttemptDetail {
   manifest: AttemptManifest;
-  bundle_dir: string;
+  execution_id: string;
   files: BundleFile[];
 }
 

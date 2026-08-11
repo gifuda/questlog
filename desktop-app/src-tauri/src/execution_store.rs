@@ -25,7 +25,7 @@ const LEASE_TIMEOUT_SECS: u64 = 300; // 5 minutes — lease expires if no heartb
 // ─── Types ───
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ExecutionStatus {
     /// Package is ready, waiting for Runner to pick up.
     Queued,
@@ -33,12 +33,20 @@ pub enum ExecutionStatus {
     Running,
     /// CLI produced a candidate commit; awaiting acceptance verification.
     Candidate,
+    /// External verifier is running against the exact candidate commit.
+    Verifying,
     /// Acceptance passed; step advanced to verified.
     Passed,
     /// Acceptance failed; worktree preserved for inspection.
     Failed,
     /// Cancelled by user or system.
     Cancelled,
+    /// User requested cancellation; the Runner must stop the process tree.
+    CancelRequested,
+    /// User requested pause; the Runner stops and creates a DecisionRequest.
+    PauseRequested,
+    /// Deadline elapsed and the process tree was terminated.
+    TimedOut,
     /// Blocked — needs human decision (DecisionRequest).
     Blocked,
     /// Lease expired without completion.
@@ -444,6 +452,121 @@ pub fn release_lease(
     Ok(())
 }
 
+/// Record a user control request without pretending the process has already
+/// stopped. Queued work can be cancelled immediately; running work is moved to
+/// a request state that the supervising Runner observes and acts upon.
+pub fn request_control(execution_id: &str, pause: bool) -> Result<ExecutionStatus, String> {
+    let now = now_ts();
+    let data = mutate_executions(|data| {
+        let exec = data
+            .executions
+            .iter_mut()
+            .find(|e| e.id == execution_id)
+            .ok_or_else(|| format!("execution '{}' not found", execution_id))?;
+        exec.status = match exec.status {
+            ExecutionStatus::Queued | ExecutionStatus::Stale if !pause => {
+                exec.lease = None;
+                ExecutionStatus::Cancelled
+            }
+            ExecutionStatus::Queued | ExecutionStatus::Stale => ExecutionStatus::Blocked,
+            ExecutionStatus::Running | ExecutionStatus::Candidate | ExecutionStatus::Verifying => {
+                if pause {
+                    ExecutionStatus::PauseRequested
+                } else {
+                    ExecutionStatus::CancelRequested
+                }
+            }
+            ExecutionStatus::CancelRequested
+            | ExecutionStatus::PauseRequested
+            | ExecutionStatus::Passed
+            | ExecutionStatus::Failed
+            | ExecutionStatus::Cancelled
+            | ExecutionStatus::Blocked
+            | ExecutionStatus::TimedOut => {
+                return Err(format!(
+                    "execution '{}' cannot be controlled from terminal/requested state {:?}",
+                    execution_id, exec.status
+                ));
+            }
+        };
+        exec.last_error = Some(if pause {
+            "pause requested by user".to_string()
+        } else {
+            "cancel requested by user".to_string()
+        });
+        exec.updated_at = now;
+        Ok(())
+    })?;
+    let status = data
+        .executions
+        .iter()
+        .find(|e| e.id == execution_id)
+        .map(|e| e.status.clone())
+        .ok_or_else(|| format!("execution '{}' not found", execution_id))?;
+    log_event(&ExecutionEvent {
+        execution_id: execution_id.to_string(),
+        timestamp: now,
+        event_type: if pause {
+            "pause_requested".to_string()
+        } else {
+            "cancel_requested".to_string()
+        },
+        message: if pause {
+            "Pause requested by user".to_string()
+        } else {
+            "Cancellation requested by user".to_string()
+        },
+        data: None,
+    })?;
+    Ok(status)
+}
+
+/// Finalize with terminal CAS semantics. A late success can never overwrite a
+/// cancellation or pause request. Returns the authoritative terminal status.
+pub fn finish_execution(
+    execution_id: &str,
+    desired: ExecutionStatus,
+    error: Option<&str>,
+) -> Result<ExecutionStatus, String> {
+    let now = now_ts();
+    let data = mutate_executions(|data| {
+        let exec = data
+            .executions
+            .iter_mut()
+            .find(|e| e.id == execution_id)
+            .ok_or_else(|| format!("execution '{}' not found", execution_id))?;
+        let final_status = match exec.status {
+            ExecutionStatus::CancelRequested => ExecutionStatus::Cancelled,
+            ExecutionStatus::PauseRequested => ExecutionStatus::Blocked,
+            ExecutionStatus::Passed
+            | ExecutionStatus::Failed
+            | ExecutionStatus::Cancelled
+            | ExecutionStatus::Blocked
+            | ExecutionStatus::TimedOut => exec.status.clone(),
+            _ => desired.clone(),
+        };
+        exec.status = final_status;
+        exec.lease = None;
+        exec.last_error = error.map(str::to_string);
+        exec.updated_at = now;
+        Ok(())
+    })?;
+    let final_status = data
+        .executions
+        .iter()
+        .find(|e| e.id == execution_id)
+        .map(|e| e.status.clone())
+        .ok_or_else(|| format!("execution '{}' not found", execution_id))?;
+    log_event(&ExecutionEvent {
+        execution_id: execution_id.to_string(),
+        timestamp: now,
+        event_type: format!("finished:{:?}", final_status).to_lowercase(),
+        message: format!("Execution finalized as {:?}", final_status),
+        data: None,
+    })?;
+    Ok(final_status)
+}
+
 /// Update execution fields (worktree, branch, candidate SHA, etc.).
 pub fn update_execution(execution_id: &str, updates: ExecutionUpdates) -> Result<(), String> {
     let now = now_ts();
@@ -466,6 +589,18 @@ pub fn update_execution(execution_id: &str, updates: ExecutionUpdates) -> Result
             exec.candidate_sha = Some(sha);
         }
         if let Some(status) = updates.status {
+            if matches!(
+                exec.status,
+                ExecutionStatus::CancelRequested | ExecutionStatus::PauseRequested
+            ) && !matches!(
+                status,
+                ExecutionStatus::Cancelled | ExecutionStatus::Blocked
+            ) {
+                return Err(format!(
+                    "terminal control request prevents transition to {:?}",
+                    status
+                ));
+            }
             exec.status = status;
         }
         if let Some(bundle) = updates.bundle_path {
@@ -569,6 +704,26 @@ pub fn get_execution(id: &str) -> Result<Execution, String> {
 /// The parent is NOT changed — its evidence stays sealed.
 pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
     let parent = get_execution(parent_exec_id)?;
+    if !matches!(
+        parent.status,
+        ExecutionStatus::Failed
+            | ExecutionStatus::Blocked
+            | ExecutionStatus::TimedOut
+            | ExecutionStatus::Cancelled
+            | ExecutionStatus::Stale
+    ) {
+        return Err(format!(
+            "execution '{}' is not in a retryable terminal state",
+            parent_exec_id
+        ));
+    }
+    let package = read_package(&parent.package_id)?;
+    if parent.attempt_no >= package.max_attempts.max(1) {
+        return Err(format!(
+            "maximum attempts reached ({}) — revise the package before retrying",
+            package.max_attempts.max(1)
+        ));
+    }
 
     let new_id = enqueue_execution_with_parent(
         &parent.package_id,
@@ -594,6 +749,8 @@ pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
             "attempt_no": parent.attempt_no + 1,
         })),
     })?;
+
+    mark_package_status(&parent.package_id, "ready")?;
 
     Ok(new_id)
 }
@@ -625,6 +782,7 @@ pub struct TaskPackageSummary {
     pub forbidden_paths: Vec<String>,
     pub max_changed_files: u32,
     pub executor_preferred: String,
+    pub executor_fallbacks: Vec<String>,
     /// Executor policy fields consumed by the Runner (F7 complete).
     #[serde(default)]
     pub sandbox: String,
@@ -633,8 +791,26 @@ pub struct TaskPackageSummary {
     #[serde(default)]
     pub max_attempts: u32,
     pub acceptance_command_ids: Vec<String>,
+    pub preconditions: Vec<PackagePrecondition>,
+    pub auto_edit_worktree: bool,
+    pub auto_commit_candidate: bool,
+    pub auto_merge: bool,
+    pub auto_push: bool,
+    pub auto_deploy: bool,
+    pub sealed_at: String,
     pub status: String,
     pub package_hash: String,
+    /// Recomputed from all sealed content except status/package_hash.
+    #[serde(default)]
+    pub computed_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackagePrecondition {
+    pub kind: String,
+    pub step_id: Option<String>,
+    pub at_least: Option<String>,
+    pub value: Option<bool>,
 }
 
 /// The nested shape that Node's `savePackage` actually writes to packages.json.
@@ -656,8 +832,14 @@ pub struct RawTaskPackage {
     pub executor: RawExecutor,
     pub acceptance: Vec<RawAcceptance>,
     #[serde(default)]
+    pub preconditions: Vec<RawPrecondition>,
+    #[serde(default)]
+    pub authority: RawAuthority,
+    #[serde(default)]
     pub status: String,
     pub package_hash: String,
+    #[serde(default)]
+    pub sealed_at: String,
     // Fields we don't yet consume but must tolerate during deserialization:
     // schema_version, source_session, context_refs, preconditions, authority,
     // stop_conditions, rollback, sealed_at — all #[serde(default)] or skipped.
@@ -678,12 +860,37 @@ pub struct RawExecutor {
     #[serde(default = "default_executor")]
     pub preferred: String,
     #[serde(default)]
+    pub fallbacks: Vec<String>,
+    #[serde(default)]
     pub sandbox: String,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
     // fallbacks ignored by Runner (no auto-fallback in production)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawPrecondition {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub step_id: Option<String>,
+    pub at_least: Option<String>,
+    pub value: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RawAuthority {
+    #[serde(default)]
+    pub auto_edit_worktree: bool,
+    #[serde(default)]
+    pub auto_commit_candidate: bool,
+    #[serde(default)]
+    pub auto_merge: bool,
+    #[serde(default)]
+    pub auto_push: bool,
+    #[serde(default)]
+    pub auto_deploy: bool,
 }
 
 fn default_executor() -> String {
@@ -719,6 +926,7 @@ impl From<RawTaskPackage> for TaskPackageSummary {
             forbidden_paths: raw.scope.forbidden_paths,
             max_changed_files: raw.scope.max_changed_files,
             executor_preferred: raw.executor.preferred,
+            executor_fallbacks: raw.executor.fallbacks,
             sandbox: raw.executor.sandbox,
             timeout_seconds: raw.executor.timeout_seconds,
             max_attempts: raw.executor.max_attempts,
@@ -728,8 +936,25 @@ impl From<RawTaskPackage> for TaskPackageSummary {
                 .filter(|a| a.kind == "command")
                 .filter_map(|a| a.command_id)
                 .collect(),
+            preconditions: raw
+                .preconditions
+                .into_iter()
+                .map(|precondition| PackagePrecondition {
+                    kind: precondition.kind,
+                    step_id: precondition.step_id,
+                    at_least: precondition.at_least,
+                    value: precondition.value,
+                })
+                .collect(),
+            auto_edit_worktree: raw.authority.auto_edit_worktree,
+            auto_commit_candidate: raw.authority.auto_commit_candidate,
+            auto_merge: raw.authority.auto_merge,
+            auto_push: raw.authority.auto_push,
+            auto_deploy: raw.authority.auto_deploy,
+            sealed_at: raw.sealed_at,
             status: raw.status,
             package_hash: raw.package_hash,
+            computed_hash: String::new(),
         }
     }
 }
@@ -737,6 +962,19 @@ impl From<RawTaskPackage> for TaskPackageSummary {
 #[derive(Debug, Deserialize)]
 struct PackagesFile {
     packages: Vec<RawTaskPackage>,
+}
+
+pub fn read_package(package_id: &str) -> Result<TaskPackageSummary, String> {
+    let path = packages_path();
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read packages.json: {e}"))?;
+    let file: PackagesFile =
+        serde_json::from_str(&raw).map_err(|e| format!("parse packages.json: {e}"))?;
+    file.packages
+        .into_iter()
+        .filter(|package| package.package_id == package_id)
+        .max_by_key(|package| package.plan_revision)
+        .map(TaskPackageSummary::from)
+        .ok_or_else(|| format!("package '{}' not found", package_id))
 }
 
 fn packages_path() -> PathBuf {
@@ -754,14 +992,40 @@ pub fn read_ready_packages() -> Result<Vec<TaskPackageSummary>, String> {
         return Ok(vec![]);
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("read packages.json: {e}"))?;
-    let file: PackagesFile =
+    let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| format!("parse packages.json: {e}"))?;
-    Ok(file
-        .packages
-        .into_iter()
-        .filter(|p| p.status == "ready")
-        .map(TaskPackageSummary::from)
-        .collect())
+    let packages = value
+        .get("packages")
+        .and_then(|packages| packages.as_array())
+        .ok_or_else(|| "packages.json missing packages array".to_string())?;
+    let mut ready = Vec::new();
+    for package_value in packages {
+        if package_value
+            .get("status")
+            .and_then(|status| status.as_str())
+            != Some("ready")
+        {
+            continue;
+        }
+        let raw_package: RawTaskPackage = serde_json::from_value(package_value.clone())
+            .map_err(|e| format!("parse TaskPackage: {e}"))?;
+        let mut summary = TaskPackageSummary::from(raw_package);
+        summary.computed_hash = compute_package_hash(package_value)?;
+        ready.push(summary);
+    }
+    Ok(ready)
+}
+
+pub fn compute_package_hash(package: &serde_json::Value) -> Result<String, String> {
+    let mut hashable = package.clone();
+    let object = hashable
+        .as_object_mut()
+        .ok_or_else(|| "TaskPackage must be an object".to_string())?;
+    object.remove("status");
+    object.remove("package_hash");
+    let canonical =
+        serde_json::to_string(&hashable).map_err(|e| format!("canonicalize TaskPackage: {e}"))?;
+    Ok(crate::attempt_bundle::sha256_hex(canonical.as_bytes()))
 }
 
 /// Mark a package as consumed (status → "passed" or "failed") in packages.json.
@@ -800,7 +1064,11 @@ mod tests {
     use super::*;
 
     fn setup_temp_runtime() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
-        let guard = TEST_LOCK.lock().unwrap();
+        // A failed assertion must not cascade into unrelated tests by poisoning
+        // the process-global environment guard.
+        let guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("QUESTLOG_RUNTIME", dir.path());
         ensure_runtime_dir().unwrap();
@@ -1008,6 +1276,40 @@ mod tests {
     #[test]
     fn create_retry_preserves_parent() {
         let (_dir, _guard) = setup_temp_runtime();
+        let package = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "package_id": "pkg1",
+                "epic_id": "e1",
+                "step_id": "s1",
+                "plan_revision": 1,
+                "project_path": "/tmp/proj",
+                "repo_root": "/tmp/proj",
+                "base_sha": "abc123",
+                "objective": "test retry",
+                "scope": {
+                    "allowed_paths": ["**"],
+                    "forbidden_paths": [],
+                    "max_changed_files": 10
+                },
+                "executor": {
+                    "preferred": "zcode",
+                    "fallbacks": [],
+                    "sandbox": "workspace-write",
+                    "timeout_seconds": 3600,
+                    "max_attempts": 2
+                },
+                "acceptance": [],
+                "status": "blocked",
+                "sealed_at": "2026-08-11T00:00:00Z",
+                "package_hash": "fixture"
+            }]
+        });
+        std::fs::write(
+            packages_path(),
+            serde_json::to_string_pretty(&package).unwrap(),
+        )
+        .unwrap();
         let parent_id = enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc123").unwrap();
         // Simulate the parent having been processed (running + attempt 1)
         let _exec = acquire_lease(&parent_id, "runner-1").unwrap();
@@ -1031,5 +1333,41 @@ mod tests {
         assert_eq!(child.parent_attempt_id, Some(parent_id.clone()));
         assert_eq!(child.status, ExecutionStatus::Queued);
         assert_eq!(child.package_id, "pkg1");
+
+        let package_after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(packages_path()).unwrap()).unwrap();
+        assert_eq!(package_after["packages"][0]["status"], "ready");
+    }
+
+    #[test]
+    fn late_success_cannot_override_cancel_request() {
+        let (_dir, _guard) = setup_temp_runtime();
+        let id = enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc123").unwrap();
+        acquire_lease(&id, "runner-1").unwrap();
+        assert_eq!(
+            request_control(&id, false).unwrap(),
+            ExecutionStatus::CancelRequested
+        );
+
+        let final_status = finish_execution(&id, ExecutionStatus::Passed, None).unwrap();
+        assert_eq!(final_status, ExecutionStatus::Cancelled);
+        assert_eq!(
+            get_execution(&id).unwrap().status,
+            ExecutionStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn package_hash_matches_node_canonical_vector() {
+        let value = serde_json::json!({
+            "z": 1,
+            "a": {"y": 2, "x": [{"b": 2, "a": 1}]},
+            "status": "ready",
+            "package_hash": "ignored"
+        });
+        assert_eq!(
+            compute_package_hash(&value).unwrap(),
+            "5a0838288edf4a4f2df2106be08daed20d6b4e86ff9e17b00eee9df629cf22c9"
+        );
     }
 }
