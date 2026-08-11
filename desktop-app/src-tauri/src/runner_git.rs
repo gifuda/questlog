@@ -89,11 +89,85 @@ pub fn create_worktree(
         .current_dir(&worktree_path)
         .output();
 
+    // Provision node_modules symlinks from the main checkout so that
+    // acceptance commands like `npm run build` / `npx tsc` work in the
+    // worktree. node_modules is gitignored, so a fresh worktree has none.
+    // Failures are non-fatal: the acceptance command will report exit 127
+    // with a clear stderr, which is captured in the AttemptBundle.
+    provision_node_modules(repo_root, &worktree_path);
+
     Ok(WorktreeInfo {
         path: worktree_path,
         branch: branch_name.to_string(),
         base_sha: base_sha.to_string(),
     })
+}
+
+/// Symlink node_modules directories from the main checkout into the worktree.
+///
+/// Scans the repo root and one level deep for `node_modules` directories
+/// (covers `mcp-server/node_modules`, `desktop-app/node_modules`). For each
+/// found, creates a symlink at the corresponding worktree path. Existing
+/// entries are left untouched. All errors are logged at warn level and do
+/// not propagate — a missing symlink surfaces as an exit-127 verifier result.
+fn provision_node_modules(repo_root: &Path, worktree_path: &Path) {
+    // Candidate locations: <root>/node_modules and <root>/<sub>/node_modules
+    let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let root_nm = repo_root.join("node_modules");
+    if root_nm.is_dir() {
+        candidates.push((root_nm.clone(), worktree_path.join("node_modules")));
+    }
+    if let Ok(entries) = std::fs::read_dir(repo_root) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let sub_name = entry.file_name();
+            let sub_name = match sub_name.to_str() {
+                Some(s) => s,
+                None => continue,
+            };
+            // Skip obvious non-project dirs
+            if sub_name.starts_with('.') || sub_name == "node_modules" {
+                continue;
+            }
+            let sub_nm = entry.path().join("node_modules");
+            if sub_nm.is_dir() {
+                let target = worktree_path.join(sub_name).join("node_modules");
+                candidates.push((sub_nm, target));
+            }
+        }
+    }
+
+    for (src, dst) in candidates {
+        if dst.exists() || dst.is_symlink() {
+            continue; // Already provisioned
+        }
+        // Ensure parent dir exists (worktree may not have the subdir if it was
+        // added after base_sha)
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            if let Err(e) = symlink(&src, &dst) {
+                log::warn!(
+                    "provision_node_modules: symlink {} -> {} failed: {}",
+                    src.display(),
+                    dst.display(),
+                    e
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            log::warn!(
+                "provision_node_modules: symlink not supported on this platform, skipping {}",
+                dst.display()
+            );
+        }
+    }
 }
 
 /// Check whether source code is clean. QuestLog's local Plan Store files are
@@ -482,5 +556,59 @@ mod tests {
             10,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn worktree_provisions_node_modules_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        // git init + base commit
+        Command::new("git")
+            .arg("init")
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        // Create a subdir with node_modules in the main checkout
+        std::fs::create_dir_all(repo.join("mcp-server")).unwrap();
+        std::fs::create_dir_all(repo.join("mcp-server/node_modules")).unwrap();
+        std::fs::write(repo.join("mcp-server/node_modules/marker.txt"), "present").unwrap();
+        // mcp-server/package.json must be committed so the worktree has the subdir
+        std::fs::write(repo.join("mcp-server/package.json"), "{}\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let base = read_head_sha(repo).unwrap();
+
+        let wt = create_worktree(repo, &base, "test-provision-nm").unwrap();
+        let wt_nm = wt.path.join("mcp-server/node_modules");
+        assert!(
+            wt_nm.is_symlink() || wt_nm.exists(),
+            "worktree node_modules should be provisioned"
+        );
+        assert!(
+            wt_nm.join("marker.txt").exists(),
+            "symlinked node_modules content should be readable"
+        );
+
+        // Cleanup
+        let _ = remove_worktree(repo, &wt.path);
     }
 }

@@ -115,6 +115,12 @@ fn acceptance_failure_creates_decision_request() {
     .unwrap();
 
     eprintln!("Running Runner poll_once with bad acceptance...");
+    // Enable the project in runner-config so poll_once's project filter passes
+    app_lib::runner_config::set_project_enabled(
+        &repo_dir.path().to_string_lossy().to_string(),
+        true,
+    )
+    .expect("enable project for e2e");
     let mut runner = app_lib::runner::Runner::new(app_lib::runner::RunnerConfig {
         enabled: true,
         poll_interval: std::time::Duration::from_secs(1),

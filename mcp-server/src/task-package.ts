@@ -285,6 +285,7 @@ const ACCEPTANCE_REGISTRY: Record<string, TrustedCommand> = {
     cwd: ".",
     description: "Verify the exact candidate commit has a clean patch",
   },
+  // ── TypeScript (MCP server) ──
   "test:mcp": {
     id: "test:mcp",
     command: "npm test",
@@ -297,23 +298,55 @@ const ACCEPTANCE_REGISTRY: Record<string, TrustedCommand> = {
     cwd: "mcp-server",
     description: "Build MCP server TypeScript",
   },
+  "lint:mcp": {
+    id: "lint:mcp",
+    command: "npx tsc --noEmit",
+    cwd: "mcp-server",
+    description: "Type-check MCP server",
+  },
+  // ── Rust (desktop backend) — cargo:* run from src-tauri ──
+  "cargo:check": {
+    id: "cargo:check",
+    command: "cargo check",
+    cwd: "desktop-app/src-tauri",
+    description: "Fast type/compile check (default first choice for Rust tasks)",
+  },
+  "cargo:clippy": {
+    id: "cargo:clippy",
+    command: "cargo clippy -- -D warnings",
+    cwd: "desktop-app/src-tauri",
+    description: "Strict lint on desktop app Rust",
+  },
+  "cargo:build": {
+    id: "cargo:build",
+    command: "cargo build",
+    cwd: "desktop-app/src-tauri",
+    description: "Compile desktop app Rust (no tests)",
+  },
   "test:desktop": {
     id: "test:desktop",
     command: "cargo test",
     cwd: "desktop-app/src-tauri",
     description: "Run desktop app Rust tests",
   },
+  // ── Frontend (desktop web) ──
   "build:web": {
     id: "build:web",
     command: "npm run build",
     cwd: "desktop-app",
     description: "Build desktop app frontend",
   },
-  "lint:mcp": {
-    id: "lint:mcp",
+  "test:web": {
+    id: "test:web",
+    command: "npm test",
+    cwd: "desktop-app",
+    description: "Run desktop app frontend vitest",
+  },
+  "lint:web": {
+    id: "lint:web",
     command: "npx tsc --noEmit",
-    cwd: "mcp-server",
-    description: "Type-check MCP server",
+    cwd: "desktop-app",
+    description: "Type-check desktop app frontend",
   },
 };
 

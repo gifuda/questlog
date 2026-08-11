@@ -300,6 +300,42 @@ describe("acceptance registry", () => {
     expect(cmds.length).toBeGreaterThanOrEqual(4);
     expect(cmds.some((c) => c.id === "test:mcp")).toBe(true);
   });
+
+  it("registers cargo:check, cargo:clippy, cargo:build for Rust tasks", () => {
+    for (const id of ["cargo:check", "cargo:clippy", "cargo:build"]) {
+      const cmd = resolveAcceptanceCommand(id);
+      expect(cmd, `${id} should be registered`).not.toBeNull();
+      expect(cmd!.cwd).toBe("desktop-app/src-tauri");
+    }
+  });
+
+  it("registers test:web and lint:web for frontend tasks", () => {
+    for (const id of ["test:web", "lint:web"]) {
+      const cmd = resolveAcceptanceCommand(id);
+      expect(cmd, `${id} should be registered`).not.toBeNull();
+      expect(cmd!.cwd).toBe("desktop-app");
+    }
+  });
+
+  // Registry consistency: the Node-side and Rust-side registries must have
+  // exactly the same set of command IDs. If they drift, MCP will accept a
+  // command_id that Runner rejects (or vice versa). This test parses the Rust
+  // source to extract IDs — a brittle but effective guard.
+  it("Node registry matches Rust registry (same command ID set)", async () => {
+    const rustPath = path.resolve(__dirname, "../../desktop-app/src-tauri/src/runner.rs");
+    const rustSource = await fs.readFile(rustPath, "utf-8");
+    // Extract the ACCEPTANCE_REGISTRY block
+    const match = rustSource.match(/ACCEPTANCE_REGISTRY[^=]*=\s*&\[(.*?)\];/s);
+    expect(match, "Rust ACCEPTANCE_REGISTRY not found").not.toBeNull();
+    const rustIds = new Set<string>();
+    for (const line of match![1].split("\n")) {
+      const idMatch = line.match(/"([a-z]+:[a-z]+)"/);
+      if (idMatch) rustIds.add(idMatch[1]);
+    }
+    const nodeIds = new Set(listAcceptanceCommands().map((c) => c.id));
+    expect(rustIds.size).toBeGreaterThan(0);
+    expect(nodeIds).toEqual(rustIds);
+  });
 });
 
 // ─── prepare / validate / seal / enqueue integration ───

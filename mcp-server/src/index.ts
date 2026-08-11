@@ -6,6 +6,7 @@ import { pushTodo, addAndSave, listTodos, updateAndSave, resolveProjectDir, find
 import { pushEpic, updateEpic, pushStep, updateStep, listEpics, epicProgress, actionableSteps } from "./epic-store.js";
 import {
   prepareTaskPackage, validateTaskPackage, sealTaskPackage, enqueueStep,
+  verifyPickupReadiness,
 } from "./task-package-ops.js";
 import {
   listDecisionRequests, resolveDecision,
@@ -721,7 +722,57 @@ server.tool(
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const result = await enqueueStep(resolved.cwd, input.step_id);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
-    return { content: [{ type: "text", text: `📋 ${result.message}` }] };
+    const tag = result.runner_eligible ? "✅" : "⚠️";
+    const lines = [`${tag} ${result.message}`];
+    if (!result.runner_eligible && result.blockers.length > 0) {
+      lines.push("", "Blockers:");
+      for (const b of result.blockers) {
+        lines.push(`  • [${b.check}] ${b.reason}`);
+      }
+      lines.push("", "Fix the blockers above, then re-check with verify_pickup_readiness.");
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// ─── verify_pickup_readiness ───
+server.tool(
+  "verify_pickup_readiness",
+  [
+    "Verify whether a sealed/ready TaskPackage will actually be picked up by the Runner's next poll.",
+    "Mirrors the filters in poll_once: project enabled, epic auto_execute allows, not already in-flight, acceptance commands registered.",
+    "Callable before or after enqueue_step. Does NOT mutate any state.",
+    "Use this when a package is enqueued but not getting picked up, or to pre-check before enqueueing.",
+  ].join("\n"),
+  {
+    package_id: z.string().describe("The package ID to check"),
+  },
+  async (input) => {
+    const result = await verifyPickupReadiness(input.package_id);
+    if ("error" in result) {
+      return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+    }
+    const lines = [
+      `🔍 Readiness check for package ${result.package_id}`,
+      `  Status: ${result.status}`,
+      `  Will be picked up: ${result.will_be_picked_up ? "✅ YES" : "❌ NO"}`,
+      "",
+      "Runner-side checks:",
+      `  • project_enabled:          ${result.runner_side_checks.project_enabled}`,
+      `  • epic_auto_execute_allows: ${result.runner_side_checks.epic_auto_execute_allows}`,
+      `  • runner_thread_alive:      ${result.runner_side_checks.runner_thread_alive}`,
+      `  • already_in_flight:        ${result.runner_side_checks.already_in_flight}`,
+      `  • acceptance_commands_ok:   ${result.acceptance_commands_available}`,
+    ];
+    if (result.blockers.length > 0) {
+      lines.push("", "Blockers:");
+      for (const b of result.blockers) {
+        lines.push(`  • [${b.check}] ${b.reason}`);
+      }
+    } else if (result.will_be_picked_up) {
+      lines.push("", "No blockers — this package will be picked up on the next Runner poll.");
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
 

@@ -47,6 +47,13 @@ export interface Epic {
   max_active?: number;
   /** 验收条件（自由文本，由创建方案的对话显式填写）。人类可读，代码不解析。 */
   acceptance?: string;
+  /**
+   * Runner 按方案粒度的自动执行开关（镜像 Rust 端 Epic.auto_execute）。
+   * - undefined/缺失 → 继承项目级开关
+   * - true → 项目开关开启时自动执行
+   * - false → 永不自动执行（即使项目开关开了）
+   */
+  auto_execute?: boolean;
   /** 收尾原因。progress<100% 提前标 done 时强制必填。 */
   close_reason?: string;
   created_at: string;

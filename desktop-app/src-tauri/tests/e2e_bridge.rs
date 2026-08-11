@@ -172,6 +172,13 @@ fn bridge_ready_package_to_zcode_execution() {
     )
     .unwrap();
 
+    // Enable the project in runner-config so poll_once's project filter passes
+    app_lib::runner_config::set_project_enabled(
+        &repo_dir.path().to_string_lossy().to_string(),
+        true,
+    )
+    .expect("enable project for e2e");
+
     // Run the Runner's poll_once — this should:
     // 1. Find the ready package
     // 2. Create execution + worktree

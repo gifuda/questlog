@@ -1203,11 +1203,23 @@ pub fn set_enabled(enabled: bool) -> bool {
 /// The Runner resolves command_ids here — it never accepts raw shell strings.
 const ACCEPTANCE_REGISTRY: &[(&str, &str, &str)] = &[
     ("verify:candidate", "git diff --check HEAD^ HEAD", "."),
+    // TypeScript (MCP server)
     ("test:mcp", "npm test", "mcp-server"),
     ("build:mcp", "npm run build", "mcp-server"),
-    ("test:desktop", "cargo test", "desktop-app/src-tauri"),
-    ("build:web", "npm run build", "desktop-app"),
     ("lint:mcp", "npx tsc --noEmit", "mcp-server"),
+    // Rust (desktop backend) — cargo:* run from src-tauri
+    ("cargo:check", "cargo check", "desktop-app/src-tauri"),
+    (
+        "cargo:clippy",
+        "cargo clippy -- -D warnings",
+        "desktop-app/src-tauri",
+    ),
+    ("cargo:build", "cargo build", "desktop-app/src-tauri"),
+    ("test:desktop", "cargo test", "desktop-app/src-tauri"),
+    // Frontend (desktop web)
+    ("build:web", "npm run build", "desktop-app"),
+    ("test:web", "npm test", "desktop-app"),
+    ("lint:web", "npx tsc --noEmit", "desktop-app"),
 ];
 
 /// Resolve and run an acceptance command, returning a full VerifierResult

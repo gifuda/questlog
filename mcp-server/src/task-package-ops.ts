@@ -18,6 +18,7 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import crypto from "node:crypto";
 import {
   TaskPackage,
@@ -420,6 +421,10 @@ export interface EnqueueResult {
   package_id: string;
   status: "ready";
   message: string;
+  /** Whether the Runner will actually pick up this package on its next poll. */
+  runner_eligible: boolean;
+  /** Blocking reasons if runner_eligible is false (empty if true). */
+  blockers: ReadinessBlocker[];
 }
 
 /**
@@ -476,10 +481,218 @@ export async function enqueueStep(
   const statusResult = await updatePackageStatus(pkg.package_id, "ready");
   if ("error" in statusResult) return { error: statusResult.error };
 
+  // Readiness gate: check Runner-side filters so the caller knows whether
+  // the package will actually be picked up (project enabled, epic auto_execute,
+  // not already in-flight, acceptance commands registered). Non-blocking —
+  // we already flipped status to ready; this just reports eligibility.
+  const readiness = await verifyPickupReadiness(pkg.package_id);
+  if ("error" in readiness) {
+    // Readiness check failed (e.g. package suddenly gone) — package is enqueued
+    // but we can't verify eligibility. Report as not eligible with the error.
+    return {
+      step_id: stepId,
+      package_id: pkg.package_id,
+      status: "ready" as const,
+      runner_eligible: false,
+      blockers: [{ check: "readiness_check", reason: readiness.error }],
+      message: `Step '${stepId}' enqueued but readiness check failed — ${readiness.error}`,
+    };
+  }
+
   return {
     step_id: stepId,
     package_id: pkg.package_id,
     status: "ready",
-    message: `Step '${stepId}' enqueued. Package ${pkg.package_id} (rev ${pkg.plan_revision}) is ready for Runner execution.`,
+    runner_eligible: readiness.will_be_picked_up,
+    blockers: readiness.blockers,
+    message: readiness.will_be_picked_up
+      ? `Step '${stepId}' enqueued. Package ${pkg.package_id} (rev ${pkg.plan_revision}) is ready for Runner execution.`
+      : `Step '${stepId}' enqueued but BLOCKED — ${readiness.blockers.map((b) => b.reason).join("; ")}`,
+  };
+}
+
+// ─── readiness gate ───
+
+export interface ReadinessBlocker {
+  check: string;
+  reason: string;
+}
+
+export interface ReadinessResult {
+  package_id: string;
+  status: string;
+  will_be_picked_up: boolean;
+  blockers: ReadinessBlocker[];
+  runner_side_checks: {
+    project_enabled: boolean;
+    epic_auto_execute_allows: boolean;
+    runner_thread_alive: boolean;
+    already_in_flight: boolean;
+  };
+  acceptance_commands_available: boolean;
+}
+
+/** Runtime config shape written by Rust runner_config.rs. */
+interface RunnerConfigFile {
+  version: number;
+  global_enabled?: boolean;
+  projects: Record<string, { enabled: boolean }>;
+  revision?: number;
+}
+
+/** Execution status values considered "in-flight" by the Runner. */
+const IN_FLIGHT_STATUSES = new Set([
+  "Queued",
+  "Running",
+  "Candidate",
+  "Verifying",
+  "PauseRequested",
+]);
+
+/** Execution record shape (subset of Rust Execution struct). */
+interface ExecutionRecord {
+  id: string;
+  package_id: string;
+  status: string;
+}
+
+interface ExecutionsFile {
+  version: number;
+  executions: ExecutionRecord[];
+  revision?: number;
+}
+
+/**
+ * Resolve the runtime data directory (mirrors runtime-store.ts runtimeDir).
+ */
+function resolveRuntimeDir(): string {
+  if (process.env.QUESTLOG_RUNTIME) return process.env.QUESTLOG_RUNTIME;
+  return path.join(os.homedir(), "questlog-runtime");
+}
+
+/**
+ * Read runner-config.json. Returns null if missing/corrupt (fail-safe:
+ * treat as "nothing enabled" — matches Rust's fail-closed semantics).
+ */
+async function readRunnerConfig(): Promise<RunnerConfigFile | null> {
+  const filePath = path.join(resolveRuntimeDir(), "runner-config.json");
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    return JSON.parse(raw) as RunnerConfigFile;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    // Corrupt — fail-closed (Rust backs up + returns default all-off)
+    return null;
+  }
+}
+
+/**
+ * Read executions.json. Returns [] if missing/corrupt.
+ */
+async function readExecutions(): Promise<ExecutionRecord[]> {
+  const filePath = path.join(resolveRuntimeDir(), "executions.json");
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    const data = JSON.parse(raw) as ExecutionsFile;
+    return data.executions ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Verify whether a sealed/ready package will actually be picked up by the
+ * Runner's next poll. Mirrors the filters in runner.rs::poll_once:
+ *   1. Project must be enabled in runner-config.json
+ *   2. Epic auto_execute must not be false
+ *   3. No other execution for this package is already in-flight
+ * Plus checks acceptance commands are registered (would fail at verify time).
+ *
+ * Does NOT mutate any state. Callable before or after enqueue_step.
+ */
+export async function verifyPickupReadiness(
+  packageId: string,
+): Promise<ReadinessResult | { error: string }> {
+  const pkgResult = await getPackage(packageId);
+  if ("error" in pkgResult) return { error: pkgResult.error };
+  const pkg = pkgResult.pkg;
+
+  const blockers: ReadinessBlocker[] = [];
+
+  // Check 1: project enabled
+  const config = await readRunnerConfig();
+  const projectEnabled = config?.projects?.[pkg.project_path]?.enabled === true;
+  if (!projectEnabled) {
+    blockers.push({
+      check: "project_enabled",
+      reason: `project '${pkg.project_path}' is not enabled in runner-config.json (or file missing/corrupt)`,
+    });
+  }
+
+  // Check 2: epic auto_execute (read .epics.json)
+  let epicAutoExecuteAllows = true;
+  const epicsResult = await readEpicsSafe(pkg.project_path);
+  if ("ok" in epicsResult) {
+    const epic = epicsResult.data.epics.find((e) => e.id === pkg.epic_id);
+    if (epic && epic.auto_execute === false) {
+      epicAutoExecuteAllows = false;
+      blockers.push({
+        check: "epic_auto_execute_allows",
+        reason: `epic '${pkg.epic_id}' has auto_execute=false (never auto-execute)`,
+      });
+    }
+  }
+  // If epic file missing/epic not found → permissive (matches Rust is_epic_auto_execute)
+
+  // Check 3: already in-flight
+  const executions = await readExecutions();
+  const alreadyInFlight = executions.some(
+    (e) =>
+      e.package_id === pkg.package_id && IN_FLIGHT_STATUSES.has(e.status),
+  );
+  if (alreadyInFlight) {
+    blockers.push({
+      check: "already_in_flight",
+      reason: `an execution for package ${pkg.package_id} is already in-flight (Queued/Running/Candidate/Verifying)`,
+    });
+  }
+
+  // Check 4: acceptance commands all registered
+  let commandsAvailable = true;
+  for (const check of pkg.acceptance) {
+    if (check.type === "command" && check.command_id) {
+      if (!resolveAcceptanceCommand(check.command_id)) {
+        commandsAvailable = false;
+        blockers.push({
+          check: "acceptance_commands_available",
+          reason: `acceptance command_id '${check.command_id}' is not in the trusted registry`,
+        });
+      }
+    }
+  }
+
+  // Runner thread is alive iff at least one project is enabled (the Rust
+  // Runner auto-starts on first enable, auto-stops when none enabled).
+  const anyProjectEnabled = config
+    ? Object.values(config.projects).some((p) => p.enabled)
+    : false;
+
+  const willBePickedUp =
+    blockers.length === 0 &&
+    (pkg.status === "ready" || pkg.status === "sealed");
+
+  return {
+    package_id: pkg.package_id,
+    status: pkg.status,
+    will_be_picked_up: willBePickedUp,
+    blockers,
+    runner_side_checks: {
+      project_enabled: projectEnabled,
+      epic_auto_execute_allows: epicAutoExecuteAllows,
+      runner_thread_alive: anyProjectEnabled,
+      already_in_flight: alreadyInFlight,
+    },
+    acceptance_commands_available: commandsAvailable,
   };
 }
