@@ -386,6 +386,34 @@ describe("prepare → validate → seal → enqueue flow", () => {
     expect(stored.pkg.status).toBe("sealed");
   });
 
+  // Regression: seal used to compute the hash, then bump plan_revision (which
+  // is part of the hashable content), leaving a stale stored hash. Runner's
+  // hash check would then reject the package. This test ensures the stored
+  // hash matches a fresh recompute over the stored content.
+  it("stored hash matches a fresh recompute after seal (revision-bump race)", async () => {
+    const projectDir = path.join(dir, "test-project");
+    const prep = await prepareTaskPackage(projectDir, {
+      epic_id: "e1",
+      step_id: "s1",
+      objective: "add a test file",
+      allowed_paths: ["test/**"],
+      acceptance_command_ids: ["test:mcp"],
+    });
+    if ("error" in prep) throw new Error(prep.error);
+
+    const sealed = await sealTaskPackage(projectDir, prep.package_id);
+    if ("error" in sealed) throw new Error(sealed.error);
+
+    // Read the stored package and recompute hash from scratch
+    const stored = await getPackage(sealed.package_id);
+    if ("error" in stored) throw new Error(stored.error);
+    const { status: _s, package_hash: _h, ...hashable } = stored.pkg;
+    const freshHash = computePackageHash(
+      hashable as Omit<TaskPackage, "package_hash" | "status">,
+    );
+    expect(stored.pkg.package_hash).toBe(freshHash);
+  });
+
   it("rejects sealing when git working tree is dirty", async () => {
     const projectDir = path.join(dir, "test-project");
     // Make the tree dirty

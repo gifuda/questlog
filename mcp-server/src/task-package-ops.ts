@@ -372,14 +372,23 @@ export async function sealTaskPackage(
   // sealed_at is part of the immutable content, so set it before hashing.
   pkg.sealed_at = new Date().toISOString();
 
-  // Recompute hash on final content
+  // If content changed since draft, bump revision BEFORE hashing so the
+  // hash reflects the final revision number (plan_revision is part of the
+  // hashable content). Computing the hash first, then bumping revision,
+  // would freeze a stale hash that doesn't match the stored revision.
+  const { status: _s0, package_hash: draftHash, ...hashableDraft } = pkg;
+  const draftContentHash = computePackageHash(
+    hashableDraft as Omit<TaskPackage, "package_hash" | "status">,
+  );
+  if (pkg.package_hash && pkg.package_hash !== draftContentHash) {
+    pkg.plan_revision += 1;
+  }
+
+  // Now compute the final hash over the fully-finalized content (including
+  // any revision bump). This is the immutable hash that Runner will verify.
   const { status: _s, package_hash: _h, ...hashable } = pkg;
   const finalHash = computePackageHash(hashable as Omit<TaskPackage, "package_hash" | "status">);
 
-  // If hash changed since draft, bump revision
-  if (pkg.package_hash && pkg.package_hash !== finalHash) {
-    pkg.plan_revision += 1;
-  }
   pkg.package_hash = finalHash;
   pkg.status = "sealed";
 
