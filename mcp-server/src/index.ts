@@ -40,13 +40,27 @@ async function resolveCwd(
 
 /**
  * Fallback for epic-registration tools: route to the registered project that
- * shares the cwd's git repository (checkout/worktree of a registered project),
- * so registration lands in the .epics.json the desktop board reads. Falls back
- * to the tool's original default when there is no registered match.
+ * matches the current working directory, so registration lands in the
+ * .epics.json the desktop board reads. Falls back to the tool's original
+ * default when there is no registered match.
+ *
+ * If the tool call passes an explicit `project_dir`, it takes priority
+ * (validated against the allowed set) — without this, cross-project
+ * registration silently lands in the wrong project's .epics.json.
  */
-async function epicCwd(
-  fallback: () => Promise<string> | string
+export async function epicCwd(
+  fallback: () => Promise<string> | string,
+  input?: { project_dir?: string } | Record<string, unknown>,
 ): Promise<{ cwd: string } | { error: string }> {
+  const projectDir =
+    input && typeof input === "object" && "project_dir" in input
+      ? (input as { project_dir?: string }).project_dir
+      : undefined;
+  if (projectDir) {
+    const resolved = await resolveCwd({ project_dir: projectDir }, () => process.cwd());
+    if ("error" in resolved) return resolved;
+    return { cwd: resolved.cwd };
+  }
   const routed = await resolveRegisteredProject(process.cwd());
   const cwd = routed ?? (await fallback());
   return { cwd };
@@ -320,7 +334,7 @@ server.tool(
     project_dir: z.string().optional().describe("Override auto-detection: absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => resolveProjectDir(process.cwd(), input.title, []));
+    const resolved = await epicCwd(() => resolveProjectDir(process.cwd(), input.title, []), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const result = await pushEpic(cwd, input);
@@ -379,7 +393,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd());
+    const resolved = await epicCwd(() => process.cwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const { id, ...patch } = input;
@@ -411,7 +425,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd());
+    const resolved = await epicCwd(() => process.cwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const result = await pushStep(cwd, input);
@@ -466,7 +480,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd());
+    const resolved = await epicCwd(() => process.cwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const { id, ...patch } = input;
@@ -518,7 +532,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd());
+    const resolved = await epicCwd(() => process.cwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const data = await listEpics(cwd);
@@ -620,7 +634,7 @@ server.tool(
     project_dir: z.string().optional().describe("Override project directory (server validates)"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd());
+    const resolved = await epicCwd(() => process.cwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const result = await prepareTaskPackage(resolved.cwd, input);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
@@ -653,7 +667,7 @@ server.tool(
     package_id: z.string().describe("The package ID from prepare_task_package"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd());
+    const resolved = await epicCwd(() => process.cwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const result = await validateTaskPackage(resolved.cwd, input.package_id);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
@@ -690,7 +704,7 @@ server.tool(
     package_id: z.string().describe("The package ID to seal"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd());
+    const resolved = await epicCwd(() => process.cwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const result = await sealTaskPackage(resolved.cwd, input.package_id);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
@@ -718,7 +732,7 @@ server.tool(
     step_id: z.string().describe("The step whose sealed package should be enqueued"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd());
+    const resolved = await epicCwd(() => process.cwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const result = await enqueueStep(resolved.cwd, input.step_id);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };

@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveRegisteredProject, resolveGitCommonDir } from "../src/store.js";
+import { epicCwd } from "../src/index.js";
 
 /**
  * Registered-project routing tests (P0 "write-point unification"):
@@ -109,5 +110,29 @@ describe("resolveRegisteredProject", () => {
     await seedRegistry([{ name: "other", path: await makeWorktree("other-main", other) }]);
     const checkout = await makeLinkedWorktree("checkout-other", repo);
     expect(await resolveRegisteredProject(checkout)).toBeNull();
+  });
+});
+
+describe("epicCwd", () => {
+  it("honors an explicit project_dir (regression: was ignored, landing in cwd project)", async () => {
+    const target = await makeWorktree("ymos-target", await makeRepo("ymos-repo"));
+    const elsewhere = await makeWorktree("elsewhere", await makeRepo("other-repo"));
+    await seedRegistry([{ name: "ymos", path: target }]);
+
+    // Even when cwd is NOT inside the target project, explicit project_dir
+    // must route there (canonicalizeProjectDir accepts registered projects).
+    const resolved = await epicCwd(() => elsewhere, { project_dir: target });
+    expect("error" in resolved).toBe(false);
+    if ("error" in resolved) return;
+    // canonicalizeProjectDir may resolve symlinks (/var → /private/var on macOS)
+    expect(await fs.realpath(resolved.cwd)).toBe(await fs.realpath(target));
+  });
+
+  it("falls back to cwd default when no project_dir given", async () => {
+    const fallback = await makeWorktree("fb", await makeRepo("fb-repo"));
+    const resolved = await epicCwd(() => fallback);
+    expect("error" in resolved).toBe(false);
+    if ("error" in resolved) return;
+    expect(resolved.cwd).toBe(fallback);
   });
 });
