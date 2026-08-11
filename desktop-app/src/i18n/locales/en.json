@@ -132,6 +132,7 @@
   "execution": {
     "title": "Execution",
     "package": "Package",
+    "executor": "Executor",
     "runs": "Runs",
     "status": {
       "queued": "Queued",

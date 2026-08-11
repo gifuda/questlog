@@ -132,6 +132,7 @@
   "execution": {
     "title": "执行记录",
     "package": "任务包",
+    "executor": "执行器",
     "runs": "运行",
     "status": {
       "queued": "排队中",

@@ -71,6 +71,11 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
               <>Attempt {exec.attempt_no}</>
             )}
           </span>
+          {exec.executor && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-200">
+              {exec.executor}
+            </span>
+          )}
           <span className="text-xs text-gray-500">
             #{exec.attempts} · {formatTimestamp(exec.updated_at)}
           </span>
@@ -101,6 +106,11 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
           {exec.branch && (
             <div>
               <span className="font-medium">{t("execution.branch")}:</span> {exec.branch}
+            </div>
+          )}
+          {exec.executor && (
+            <div>
+              <span className="font-medium">{t("execution.executor")}:</span> {exec.executor}
             </div>
           )}
           {exec.last_error && (
