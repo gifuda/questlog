@@ -68,21 +68,173 @@ S1 通过。安全基线成立：**ymos 当前完全不可被 Runner 触碰**。
 - 全部 10 个 epic 工具声明 project_dir 但路由时完全忽略，跨项目注册静默落到 cwd 项目（Canary S2 epic 被写到桌面清单贴）。
 - 修复：epicCwd 优先使用显式 project_dir（commit 3d6d028，回归测试 9/9 通过）。
 
-**发现 4（未修复，暂停点）：活跃项目工作区常态不干净，与 git_clean 硬门禁不兼容**
+**发现 4（已解决）：活跃项目工作区常态不干净，与 git_clean 硬门禁不兼容**
 - ymos 自动机持续回写 tracked 文件（writeback_review.json、s1-observation-log.jsonl），且**有意提交**（"data(自动): 自动机产出同步" 是其常规提交模式）。
 - .gitignore 无法解决已跟踪文件的持续修改；等待同步窗口不可靠。
-- 用户决策（2026-08-11）：**暂停 Canary，记录发现**。S2-S5 待收口决策后继续。
+- 架构修正（2026-08-11，用户拍板）：**标准执行包是独立载体（.task-packages/），代码修改发生在隔离 worktree（从 base_sha 创建，天然干净）；主工作区脏不脏与执行无关**。据此：
+  - `prepareTaskPackage` 不再自动注入 `git_clean` precondition（默认 `[]`）
+  - `validateTaskPackage` 只在包**显式声明** `git_clean` precondition 时才检查主工作区
+  - Rust `validate_before_claim` 移除主工作区 `is_worktree_clean` 检查；base_sha drift 检查保留（语义正确性，非"干净"检查）
+  - 快照记录（EnvironmentSnapshot 的 git_clean 字段）保留为信息性数据，非门禁
+  - 回归测试反转："脏树默认可 seal" + "声明 git_clean 才拒绝"
 
 ### 暂停状态
 
 - S1 shadow 观察：✅ 完成（三层防护确认）
 - S1.1 git_clean 修复：✅ 完成（已合并 fb45c03）
 - S1.2 MCP project_dir 修复：✅ 完成（已合并 3d6d028）
-- S2 read-only：⏸ 暂停（ymos 工作区常态脏 vs git_clean 门禁不兼容）
-- S3/S4/S5：⏸ 待 S2 解锁
+- S1.3 git_clean 架构修正（声明式 precondition）：✅ 完成（移除主工作区门禁）
+- S2 read-only：✅ 解锁（ymos 工作区常态脏不再阻塞；待实际执行）
+- S3/S4/S5：⏸ 待 S2 完成
 
 ### 待决策项（下次收口）
 
-1. git_clean 门禁是否改为"按 preconditions 声明检查"（不声明 git_clean 的包不检查）——让 Canary 包可跳过该前置
-2. 或为真实活跃项目提供"允许运行时回写窗口"策略
-3. 或 Canary 改用影子 clone 仓库（git clone 而非 worktree），完全避开主仓脏状态
+1. ~~git_clean 门禁改为"按 preconditions 声明检查"~~ ✅ 已执行（S1.3）
+2. 或为真实活跃项目提供"允许运行时回写窗口"策略 —— 已不再需要（门禁已移除）
+3. 或 Canary 改用影子 clone 仓库 —— 已不再需要（worktree 天然隔离）
+
+---
+
+## 更新（2026-08-11，S2 read-only 链完成后追加）
+
+### S2 执行记录（真实 read-only 包，全链路通过）
+
+**包**：`pkg_f1dfe3dd-5e5a-4460-997d-f1c7e51326ed`（step_188b19f9 "S2-1 只读总结 Brain/SOP_初始调研.md"）
+**链**：prepare（新 dist，声明式 git_clean）→ 手动调 sandbox=read-only → validate **valid=true（ymos 脏工作区不阻塞）** → seal rev2 → enqueue runner_eligible=true → **Runner 领取 → ZCode 在 worktree 只读执行（完整中文总结，exit 0）→ 无 diff → NoDiff → package passed**
+
+**证据**：
+| 项 | 值 |
+|---|---|
+| execution | exec_78fba69b status=**passed**，无候选 commit |
+| bundle outcome | **no_diff**（stdout 含完整 SOP 总结，outcome.json 落盘） |
+| step stage | ymos .epics.json step_188b19f9 → **verified**（Runner 自动推进） |
+| ymos 主工作区 | 零触碰（与执行前基线一致，无新增改动；Brain/ 未动） |
+| worktree | 临时目录自动清理（temp_dir 下，随执行结束移除） |
+
+**首次尝试暴露缺陷 → 修复**（pkg_4e6e7456 被旧 Runner 判 blocked）：
+- **发现 5：NoDiff 语义缺陷**——Runner 把 NoDiff 一律视为"未产出候选"的失败（blocked + DecisionRequest）；但 **read-only 任务无 diff 是预期成功**（产出是 stdout 报告本身）。
+- 修复（runner.rs poll_once NoDiff 分支）：`sandbox == "read-only"` 时 NoDiff → Passed（finish Passed + package passed + step Verified，无候选 commit）；`workspace-write` 维持原 blocked 语义。
+- **回归测试**：`e2e_bridge.rs` 新增 `bridge_readonly_package_no_diff_counts_as_passed`（真实 ZCode 只读执行 → 断言 Passed + bundle outcome=no_diff + package passed + step verified + 主仓 untouched）。全量 cargo test 127+3 通过。
+- **附带修复 e2e 基建**：① 测试直接写 runner-config.json 替代 set_project_enabled（避免启动后台 Runner 线程与显式 poll_once 竞争抢包）；② 两个 e2e 测试同进程并行竞争 QUESTLOG_RUNTIME env → 文件级 RUNTIME_LOCK 串行化。
+- **部署**：重建 release bundle + 重启 App（新 Runner 逻辑生效，旧逻辑验证了 S1.3 前行为）。
+
+### S2 结论
+
+✅ **S2 read-only 链通过**：真实活跃项目（ymos，工作区常态脏）在 S1.3 修正后可以封包、被领取、在隔离 worktree 只读执行、NoDiff 正确判为成功、step 自动推进。**主工作区全程零触碰**——Canary 安全边界保持。
+
+### 下一步（S3 单 Step write）
+
+- 在 ymos 注册一个 write step（如"向某个明确允许的文件追加一行记录"）
+- 封包：sandbox=workspace-write，allowed_paths 限定该文件，executor=zcode
+- 验证：ZCode 在 worktree 写入 → 候选 commit 创建（QuestLog trailers）→ 验收通过 → 主仓零触碰、worktree 清理
+
+---
+
+## 更新（2026-08-11，S3 单 Step write 完成后追加）
+
+### S3 执行记录（真实 write 包，全链路通过）
+
+**包**：`pkg_6a7eae9a-dcee-43fc-a073-a612116dd282`（step_a99ef02f "S3-1 单 Step write 探针"）
+**链**：prepare → validate（ymos 脏工作区不阻塞）→ seal rev2 → enqueue runner_eligible=true → **Runner 领取 → ZCode 在隔离 worktree 创建 `Canary_write_probe.md` → diff → 候选 commit → verify:candidate 验收 → passed**
+
+**证据**：
+| 项 | 值 |
+|---|---|
+| execution | exec_f04ddf4f status=**passed**，candidate_sha=`d9a0ac5069` |
+| 候选 commit | `d9a0ac5 QuestLog auto-execution`（ymos-manager，**仅新增 Canary_write_probe.md 3 行**，scope 精确） |
+| verifier | verify:candidate 在 worktree 跑 `git diff --check HEAD^ HEAD`，passed |
+| bundle outcome | **passed**（verifier-results.json 绑定候选 SHA） |
+| step stage | ymos .epics.json step_a99ef02f → **verified**（Runner 自动推进） |
+| ymos 主仓 | **零触碰**：Canary_write_probe.md 不存在于主仓，git status 无 probe 痕迹；HEAD 未动（候选 commit 只在 worktree 分支 questlog/exec_*） |
+
+### 附带修复（decision 残留尾巴）
+
+- **发现 6：read-only NoDiff 成功但残留无意义 DecisionRequest**——seal_bundle 的 decision 生成对 NoDiff 无条件生成（retry/revise/cancel），与 poll_once 的 read-only NoDiff→Passed 判定不一致。
+- 修复：decision 生成处同样按 `pkg.sandbox == "read-only"` 跳过 NoDiff 决策；CliFailed/Timeout 维持原逻辑。全量 cargo test 127+3 通过，重建 release bundle + 重启 App。
+- 2 个历史 DecisionRequest（dec_d08fae07 / dec_2c620714）已 resolve cancel（对应包均已 passed/废弃）。
+
+### S3 结论
+
+✅ **S3 单 Step write 通过**：真实项目（ymos）中 write 链完整跑通——worktree 写入 → 候选 commit（仅限定文件）→ 验收 → passed → step 自动推进 verified。**主仓全程零触碰，候选 commit 不 merge**。
+
+### 下一步（S4 多 Step 串行）
+
+- 在 ymos Canary epic 下注册 2-3 个 write step（各自独立的探针文件，有 order 依赖）
+- 验证：顺序领取、前一步 passed 后下一步才被领取（依赖 gate）、各自独立候选 commit、主仓全程零触碰
+
+---
+
+## 更新（2026-08-11，S4 多 Step 串行完成后追加）
+
+### S4 执行记录（3 个 write step 串行，全链路通过）
+
+**步骤**：S4-1 Canary_probe_1.md → S4-2 Canary_probe_2.md → S4-3 Canary_probe_3.md（同 epic，隐式 order 串行）
+
+**派发方式**：逐个派发——前一步到达 passed 终态后才 enqueue 下一步（避免全量 ready 时后步被 poll 提前领取触发 PreflightBlocked 噪音决策）。
+
+**证据**：
+| 步骤 | 包 | execution | 候选 commit | step stage |
+|---|---|---|---|---|
+| S4-1 | pkg_526e02f9 | exec_7a1e3042 passed | `bb801d95`（仅 Canary_probe_1.md +2） | verified |
+| S4-2 | pkg_12e082af | exec_931dc001 passed | `92068784`（仅 Canary_probe_2.md +2） | verified |
+| S4-3 | pkg_a78e04e6 | exec_66204ceb passed | `885134b4`（仅 Canary_probe_3.md +2） | verified |
+
+- 全部 base_sha=1b5f6876（ymos HEAD），全部 enqueue runner_eligible=true、blockers=[]，verify:candidate 验收通过
+- **主仓零触碰**：3 个 probe 文件均不存在于主仓，HEAD 未动；候选 commit 全部留在独立 worktree 分支
+
+**确认的隔离属性**：每步 worktree 从 base_sha 创建，**前一步的候选 commit 对新 worktree 不可见**——每步候选严格独立（这正是"不 merge、零污染"的设计；若后续需要步骤间承接，须先合并候选或重设 base）。
+
+**依赖 gate 语义（代码确认，runner.rs:1101-1134）**：
+- 隐式 order 前置（order < step.order）→ 前置 ≥ **coded** 才可领取（自动链可跑通）
+- 显式 depends_on → 前置 ≥ **observed** 才可领取（跨会话人工确认）
+
+### S4 结论
+
+✅ **S4 多 Step 串行通过**：3 个 write 步骤顺序完成、各自独立候选 commit、自动推进 verified、主仓全程零触碰。串行派发 + 依赖 gate 语义清晰可复现。
+
+### 下一步（S5 观察裁决与演练）
+
+- 汇总 S2-S4 全链路证据，形成 Canary 裁决（扩大范围 vs 保持单项目）
+- 观察期约定：G4 收口前在 ymos 持续观察，确认无副作用
+- 可选项：多 Step 并行（同 epic 无依赖步骤同时 in-flight）作为 S4 的补充验证
+
+---
+
+## 更新（2026-08-11，S5 观察裁决与演练完成后追加）
+
+### S5 并行演练（跨 epic 并发包）
+
+**设计**：Runner 单线程串行处理包；同 epic 有隐式 order 依赖无法并行。用**两个独立 epic**（S5-P1/P2）各 1 个 write step，back-to-back enqueue。
+
+**证据**：
+- pkg_2fd85ee7（P1）→ exec_161d3666 passed，候选 `a6dbcb80`
+- pkg_7140f759（P2）→ exec_23cf4c9e passed，候选 `d691b34c`
+- **串行顺序确认**：P2 的 execution 在 P1 完成后才创建（created_at 相差 8s = 一个 poll 间隔）——无抢包、无 in-flight 冲突、无跨包污染
+- 主仓零触碰（HEAD 1b5f6876 不变，probe 文件不存在）
+
+### 发现 7：执行后 worktree 不清理（已修复）
+
+- **现象**：S2-S5 每次执行在 temp 目录留完整 checkout + git worktree 注册（本次 Canary 累积 8 个）。
+- **修复**：poll_once 在执行结果处理完成后统一调 `remove_worktree`（git worktree remove --force + 目录删除，失败 warn 不阻断）；e2e 测试断言执行后 `git worktree list` 无 questlog 残留。
+- **上线验证**：S5-v read-only 包执行后 worktree 残留 = **0**。
+- 8 个历史残留已手动清理。
+
+### 决策盘点
+
+- DecisionRequest 共 15 条历史请求，**全部已 resolve**（pending=0）；本 Canary 产生的 2 条已 cancel（对应包均已 passed/废弃）。无未决人工决策。
+
+### S5 观察裁决（Canary 全链结论）
+
+**S2-S5 共 8 个真实包（1 read-only + 7 write）在 ymos 全部 passed，主仓全程零触碰（HEAD 保持 1b5f6876，无 probe 文件、无 merge、无污染）。**
+
+**裁决建议**：
+1. **保持单项目观察**：暂不扩大执行范围。ymos 作为 Canary 项目继续观察（观察期建议 3 天，确认自动机/人工工作流无副作用）。
+2. **扩大范围的前置条件**（观察期通过后）：
+   - 新项目必须注册在 `~/.todo-board.json`（路由正确性已验证）
+   - 新项目的 epic 需 `auto_execute` 显式开启 + runner-config 项目开关开启
+   - 每项目首次执行前先做 read-only 包验证
+3. **系统修复收益**（本 Canary 阶段发现并修复 4 项）：git_clean 声明式架构修正（S1.3）、read-only NoDiff=passed（发现 5）、NoDiff 决策残留（发现 6）、worktree 自动清理（发现 7）——均有回归测试。
+
+**遗留说明**：
+- 隔离属性：后续步骤 worktree 从 base_sha 创建，前步候选不可见（步骤间承接需先合并候选或重设 base）——有意设计，已确认
+- 依赖 gate：隐式 order ≥ coded（自动链）、显式 depends_on ≥ observed（人工确认）——语义分界清晰
