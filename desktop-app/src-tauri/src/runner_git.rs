@@ -34,7 +34,13 @@ fn is_control_plane_path(path: &str) -> bool {
 }
 
 fn is_runner_internal_path(path: &str) -> bool {
-    path == ".questlog-output" || path.starts_with(".questlog-output/")
+    path == ".questlog-output"
+        || path.starts_with(".questlog-output/")
+        // node_modules symlinks are dependency provisioning, not candidate source
+        || path == "node_modules"
+        || path.starts_with("node_modules/")
+        || path.ends_with("/node_modules")
+        || path.contains("/node_modules/")
 }
 
 /// Result of creating a worktree.
@@ -556,6 +562,32 @@ mod tests {
             10,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn scope_rejects_node_modules_paths() {
+        // node_modules symlinks are provisioned by create_worktree, not candidate source.
+        // They must be rejected as scope violations (same as control-plane files).
+        for path in &[
+            "node_modules",
+            "node_modules/foo",
+            "desktop-app/node_modules",
+            "desktop-app/node_modules/.bin/tsc",
+            "mcp-server/node_modules/typescript/lib",
+        ] {
+            let result = verify_changed_paths_in_scope(
+                &[path.to_string()],
+                &["**".to_string()],
+                &[],
+                10,
+            );
+            assert!(
+                matches!(result, Err(ScopeViolation::ForbiddenPath { .. })),
+                "node_modules path '{}' should be rejected as forbidden, got {:?}",
+                path,
+                result
+            );
+        }
     }
 
     #[test]
