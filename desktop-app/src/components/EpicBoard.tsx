@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useEpics } from "../hooks/useEpics";
-import { useProjectRunner } from "../hooks/useExecutions";
+import { useProjectRunner, getEpicAutoExecute, setEpicAutoExecute } from "../hooks/useExecutions";
 import { epicStatusBadge, stageOrder, stageLabel, stageIcon, statusOptions, statusRank } from "../epicConstants";
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
@@ -119,6 +119,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
             onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
             onDeleteStep={(stepId) => deleteStep(stepId)}
             onAddChild={(id, title, opts) => addEpic(title, { ...opts, parentId: id })}
+            projectPath={projectPath}
           />
         ))}
 
@@ -167,16 +168,36 @@ interface EpicCardProps {
   onAddChild?: (epicId: string, title: string, opts: { description?: string; priority?: string }) => void;
   /** 层级缩进（顶层 0，子方案 1） */
   depth?: number;
+  /** 项目路径（用于方案级 auto_execute 控制） */
+  projectPath?: string;
 }
 
-function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep, onDeleteStep, onAddChild, depth = 0 }: EpicCardProps) {
+function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep, onDeleteStep, onAddChild, depth = 0, projectPath }: EpicCardProps) {
   const { t } = useTranslation();
   const badge = epicStatusBadge[epic.status];
   const [expanded, setExpanded] = useState(false);
   const [showAddStep, setShowAddStep] = useState(false);
   const [showAddChild, setShowAddChild] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [autoExec, setAutoExec] = useState<boolean | null>(null);
   const hasChildren = epic.children?.length > 0;
+  const isTopLevel = depth === 0;
+
+  // Load auto_execute setting for top-level epics
+  useEffect(() => {
+    if (isTopLevel && projectPath) {
+      getEpicAutoExecute(epic.id, projectPath).then(setAutoExec);
+    }
+  }, [epic.id, projectPath, isTopLevel]);
+
+  const toggleAutoExec = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!projectPath) return;
+    // Cycle: null(inherit) → true → false → null
+    const next = autoExec === null ? true : autoExec === true ? false : null;
+    await setEpicAutoExecute(epic.id, projectPath, next);
+    setAutoExec(next);
+  };
 
   return (
     <div className={`rounded-lg border ${epic.status === "active" ? "border-blue-500/40 bg-blue-500/5" : "border-line bg-surface/50"} transition-colors`}>
@@ -190,6 +211,25 @@ function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep,
           <span className={`text-[9px] px-1 py-px rounded shrink-0 ${priorityBadge(epic.priority)}`}>
             {epic.priority}
           </span>
+          {isTopLevel && projectPath && (
+            <button
+              onClick={toggleAutoExec}
+              title={
+                autoExec === true ? t("execution.epicAutoOn")
+                  : autoExec === false ? t("execution.epicAutoOff")
+                  : t("execution.epicAutoInherit")
+              }
+              className={`text-[9px] px-1.5 py-0.5 rounded shrink-0 transition-colors ${
+                autoExec === true
+                  ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                  : autoExec === false
+                    ? "bg-red-500/15 text-red-400 hover:bg-red-500/25"
+                    : "bg-elevated text-faint hover:bg-line-hover"
+              }`}
+            >
+              {autoExec === true ? "▶" : autoExec === false ? "⏸" : "⇆"}
+            </button>
+          )}
           {epic.close_reason && (
             <span
               className="text-[8px] px-1 py-px rounded shrink-0 bg-yellow-500/15 text-yellow-300"
