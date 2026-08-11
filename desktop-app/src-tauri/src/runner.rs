@@ -1050,14 +1050,29 @@ impl Runner {
             .map(|candidate| candidate.id.as_str())
             .chain(step.depends_on.iter().map(String::as_str));
         for dependency_id in dependency_ids {
-            let observed = epics
+            let dep_stage = epics
                 .steps
                 .iter()
                 .find(|candidate| candidate.id == dependency_id)
-                .map(|candidate| candidate.stage == StepStage::Observed)
+                .map(|candidate| &candidate.stage);
+            // Order-predecessors must be at least coded (candidate produced).
+            // Explicit depends_on must be observed (cross-session confirmed).
+            let is_explicit_dep = step.depends_on.iter().any(|d| d == dependency_id);
+            let required_stage = if is_explicit_dep {
+                StepStage::Observed
+            } else {
+                StepStage::Coded
+            };
+            let sufficient = dep_stage
+                .map(|stage| stage_rank(stage) >= stage_rank(&required_stage))
                 .unwrap_or(false);
-            if !observed {
-                return Err(format!("dependency '{}' is not observed", dependency_id));
+            if !sufficient {
+                return Err(format!(
+                    "dependency '{}' is below required stage {:?} (current: {:?})",
+                    dependency_id,
+                    required_stage,
+                    dep_stage.map(|s| format!("{:?}", s)).unwrap_or_else(|| "missing".to_string())
+                ));
             }
         }
         Ok(())
