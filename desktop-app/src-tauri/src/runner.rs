@@ -1529,6 +1529,162 @@ mod tests {
         assert!(error.contains("hash mismatch"));
     }
 
+    /// Run a git command inside `dir`, asserting success and returning stdout.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Seed a throwaway repo with an initial commit and return its SHA.
+    fn init_repo(dir: &std::path::Path) -> String {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "runner@test.local"]);
+        git(dir, &["config", "user.name", "Runner Test"]);
+        std::fs::write(dir.join("file.txt"), "v1").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "initial"]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn preflight_rejects_base_sha_drift() {
+        // Real repo: package sealed against the FIRST commit, HEAD then moves
+        // forward — validate_before_claim must refuse before touching anything.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let stale_sha = init_repo(repo);
+        std::fs::write(repo.join("file.txt"), "v2").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "second"]);
+        let head_sha = git(repo, &["rev-parse", "HEAD"]);
+        assert_ne!(head_sha, stale_sha, "second commit must move HEAD");
+
+        let repo_path = repo.to_string_lossy().to_string();
+        let package = TaskPackageSummary {
+            package_id: "pkg_drift".to_string(),
+            epic_id: "e1".to_string(),
+            step_id: "s1".to_string(),
+            plan_revision: 1,
+            project_path: repo_path.clone(),
+            repo_root: repo_path,
+            base_sha: stale_sha,
+            objective: "test".to_string(),
+            allowed_paths: vec!["src/**".to_string()],
+            forbidden_paths: vec![],
+            max_changed_files: 5,
+            executor_preferred: "zcode".to_string(),
+            executor_fallbacks: vec![],
+            sandbox: "workspace-write".to_string(),
+            timeout_seconds: 60,
+            max_attempts: 2,
+            acceptance_command_ids: vec!["verify:candidate".to_string()],
+            preconditions: vec![],
+            auto_edit_worktree: true,
+            auto_commit_candidate: true,
+            auto_merge: false,
+            auto_push: false,
+            auto_deploy: false,
+            sealed_at: "2026-08-11T00:00:00Z".to_string(),
+            status: "ready".to_string(),
+            package_hash: "sealed".to_string(),
+            computed_hash: "sealed".to_string(),
+        };
+
+        let error = Runner::validate_before_claim(&package, 1).unwrap_err();
+        assert!(error.contains("base SHA drift"));
+    }
+
+    #[test]
+    fn preflight_accepts_current_base_sha() {
+        // Same fixture but sealed against the CURRENT HEAD — must not
+        // false-positive on the drift check and must pass preflight entirely.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let head_sha = init_repo(repo);
+        let repo_path = repo.to_string_lossy().to_string();
+
+        // The checks after the drift gate read the epics store: an active epic
+        // with a step whose sealed package summary matches the package.
+        let epics = serde_json::json!({
+            "version": 1,
+            "project": "drift-test",
+            "epics": [{
+                "id": "e1",
+                "title": "drift test",
+                "status": "active",
+                "priority": "P1",
+                "created_at": "2026-08-11T00:00:00Z",
+                "updated_at": "2026-08-11T00:00:00Z"
+            }],
+            "steps": [{
+                "id": "s1",
+                "epic_id": "e1",
+                "title": "drift step",
+                "order": 0,
+                "depends_on": [],
+                "stage": "pending",
+                "created_at": "2026-08-11T00:00:00Z",
+                "updated_at": "2026-08-11T00:00:00Z",
+                "package": {
+                    "package_id": "pkg_base_ok",
+                    "plan_revision": 1,
+                    "package_hash": "sealed",
+                    "objective": "test",
+                    "executor": "zcode",
+                    "status": "ready"
+                }
+            }]
+        });
+        std::fs::write(
+            repo.join(".epics.json"),
+            serde_json::to_string_pretty(&epics).unwrap(),
+        )
+        .unwrap();
+
+        let package = TaskPackageSummary {
+            package_id: "pkg_base_ok".to_string(),
+            epic_id: "e1".to_string(),
+            step_id: "s1".to_string(),
+            plan_revision: 1,
+            project_path: repo_path.clone(),
+            repo_root: repo_path,
+            base_sha: head_sha,
+            objective: "test".to_string(),
+            allowed_paths: vec!["src/**".to_string()],
+            forbidden_paths: vec![],
+            max_changed_files: 5,
+            executor_preferred: "zcode".to_string(),
+            executor_fallbacks: vec![],
+            sandbox: "workspace-write".to_string(),
+            timeout_seconds: 60,
+            max_attempts: 2,
+            acceptance_command_ids: vec!["verify:candidate".to_string()],
+            preconditions: vec![],
+            auto_edit_worktree: true,
+            auto_commit_candidate: true,
+            auto_merge: false,
+            auto_push: false,
+            auto_deploy: false,
+            sealed_at: "2026-08-11T00:00:00Z".to_string(),
+            status: "ready".to_string(),
+            package_hash: "sealed".to_string(),
+            computed_hash: "sealed".to_string(),
+        };
+
+        Runner::validate_before_claim(&package, 1)
+            .expect("package sealed against current HEAD must pass preflight");
+    }
+
     #[cfg(unix)]
     #[test]
     fn timeout_terminates_executor_process_group() {
