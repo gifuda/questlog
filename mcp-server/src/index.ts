@@ -642,7 +642,6 @@ server.tool(
       `📦 Draft TaskPackage prepared: ${result.package_id}`,
       `   Project: ${result.resolved_project_path}`,
       `   Base SHA: ${result.resolved_base_sha}`,
-      `   Git clean: ${result.git_clean}`,
       `   Issues: ${result.issues.length} (${result.issues.filter((i) => i.severity === "error").length} errors)`,
     ];
     if (result.issues.length > 0) {

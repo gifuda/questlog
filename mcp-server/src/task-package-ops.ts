@@ -8,9 +8,13 @@
  *
  * Flow:
  *   prepare → draft package with server-resolved project_path/repo_root/base_sha
- *   validate → check all fields, Git clean, dependencies, command registry
+ *   validate → check all fields, declared preconditions, dependencies, command registry
  *   seal → freeze content, compute hash, mark sealed (immutable)
  *   enqueue → move sealed package to ready (Runner picks it up)
+ *
+ * git_clean is a *declared* precondition only: packages must opt in
+ * explicitly. Execution happens in an isolated worktree created from
+ * base_sha, so a dirty main workspace is not an obstacle by default.
  *
  * Unsealed, superseded, dependency-insufficient, path-escaping, authority-
  * expanding, or schema-incomplete packages are REJECTED.
@@ -71,7 +75,6 @@ export interface PrepareResult {
   resolved_project_path: string;
   resolved_repo_root: string;
   resolved_base_sha: string | null;
-  git_clean: boolean;
   /** Issues to fix before sealing (from content validation). */
   issues: ValidationIssue[];
   /** Summary of what was prepared. */
@@ -108,8 +111,6 @@ export async function prepareTaskPackage(
     return { error: "cannot read git HEAD SHA — is the repository initialized with at least one commit?" };
   }
 
-  const gitClean = await isGitClean(repoRoot);
-
   // Build draft package
   const packageId = `pkg_${crypto.randomUUID()}`;
   const draftPkg: TaskPackage = {
@@ -128,9 +129,9 @@ export async function prepareTaskPackage(
       forbidden_paths: input.forbidden_paths ?? [],
       max_changed_files: input.max_changed_files ?? 10,
     },
-    preconditions: [
-      { type: "git_clean", value: true },
-    ],
+    // No implicit preconditions: git_clean is opt-in (the standard package is
+    // an independent carrier; execution happens in an isolated worktree).
+    preconditions: [],
     executor: {
       preferred: (input.executor_preferred as TaskPackage["executor"]["preferred"]) ?? "zcode",
       fallbacks: [],
@@ -172,7 +173,6 @@ export async function prepareTaskPackage(
     resolved_project_path: projectPath,
     resolved_repo_root: repoRoot,
     resolved_base_sha: baseSha,
-    git_clean: gitClean,
     issues,
     summary,
   };
@@ -302,8 +302,12 @@ export async function validateTaskPackage(
     }
   }
 
-  // Server-state issues
-  if (!gitClean) {
+  // Server-state issues. git_clean is a *declared* precondition: packages must
+  // opt in explicitly. The standard package is an independent carrier and the
+  // Runner executes in an isolated worktree, so a dirty main workspace is not
+  // an obstacle by default.
+  const demandsGitClean = pkg.preconditions.some((p) => p.type === "git_clean" && p.value === true);
+  if (demandsGitClean && !gitClean) {
     issues.push({ field: "git", message: "working tree is not clean (precondition: git_clean)", severity: "error" });
   }
   if (!baseShaCurrent) {

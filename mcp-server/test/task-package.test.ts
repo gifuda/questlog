@@ -29,7 +29,7 @@ import {
   sealTaskPackage,
   enqueueStep,
 } from "../src/task-package-ops.js";
-import { getPackage, getPackagesForStep, getReadyPackages } from "../src/runtime-store.js";
+import { getPackage, savePackage, getPackagesForStep, getReadyPackages } from "../src/runtime-store.js";
 import { pushEpic, pushStep } from "../src/epic-store.js";
 
 let dir: string;
@@ -426,10 +426,12 @@ describe("prepare → validate → seal → enqueue flow", () => {
     expect(stored.pkg.package_hash).toBe(freshHash);
   });
 
-  it("rejects sealing when git working tree is dirty", async () => {
+  it("seals despite dirty working tree by default (git_clean is opt-in)", async () => {
     const projectDir = path.join(dir, "test-project");
     // Make the tree dirty with a TRACKED modification (untracked files are
-    // a normal state and no longer count as dirty)
+    // a normal state and don't count as dirty). The standard package is an
+    // independent carrier — the Runner executes in an isolated worktree
+    // created from base_sha, so a dirty main workspace is not an obstacle.
     await fs.writeFile(path.join(projectDir, "README.md"), "# Test dirty\n");
 
     const prep = await prepareTaskPackage(projectDir, {
@@ -440,6 +442,31 @@ describe("prepare → validate → seal → enqueue flow", () => {
       acceptance_command_ids: ["test:mcp"],
     });
     if ("error" in prep) throw new Error(prep.error);
+    expect(prep.issues.some((i) => i.field === "git" && i.severity === "error")).toBe(false);
+
+    const sealed = await sealTaskPackage(projectDir, prep.package_id);
+    expect("error" in sealed).toBe(false);
+  });
+
+  it("rejects sealing when git_clean precondition is declared and tree is dirty", async () => {
+    const projectDir = path.join(dir, "test-project");
+    await fs.writeFile(path.join(projectDir, "README.md"), "# Test dirty\n");
+
+    const prep = await prepareTaskPackage(projectDir, {
+      epic_id: "e1",
+      step_id: "s1",
+      objective: "add a test file",
+      allowed_paths: ["test/**"],
+      acceptance_command_ids: ["test:mcp"],
+    });
+    if ("error" in prep) throw new Error(prep.error);
+
+    // Opt in to the git_clean precondition explicitly (prepare no longer
+    // injects it implicitly).
+    const stored = await getPackage(prep.package_id);
+    if ("error" in stored) throw new Error(stored.error);
+    stored.pkg.preconditions = [{ type: "git_clean", value: true }];
+    await savePackage(stored.pkg);
 
     const sealed = await sealTaskPackage(projectDir, prep.package_id);
     expect("error" in sealed).toBe(true);
