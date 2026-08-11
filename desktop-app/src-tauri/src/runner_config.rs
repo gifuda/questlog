@@ -119,6 +119,13 @@ pub fn is_project_enabled(project_path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Check if any project is enabled. Used at app startup to decide
+/// whether to auto-start the Runner thread.
+pub fn any_project_enabled() -> bool {
+    let config = read_config();
+    config.projects.values().any(|e| e.enabled)
+}
+
 /// Enable or disable a project for Runner execution.
 /// When at least one project is enabled, starts the Runner thread.
 /// When no projects are enabled, stops the Runner thread.

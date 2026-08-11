@@ -75,8 +75,16 @@ pub fn run() {
             let handle = app.handle().clone();
             watcher::start_watching(&handle);
 
-            // Runner is intentionally OFF on every app start. Environment
-            // variables must not silently bypass the visible UI control.
+            // Runner auto-start: if any project is enabled in runner-config.json,
+            // start the Runner thread (matches the per-project control model).
+            // If no projects are enabled, the Runner stays off until the user
+            // enables a project from the UI.
+            if crate::runner_config::any_project_enabled() {
+                log::info!("Runner: auto-starting on app launch (project(s) enabled)");
+                crate::runner::ensure_running();
+            } else {
+                log::info!("Runner: staying off (no projects enabled)");
+            }
 
             // Hide main window on close instead of quitting (tray keeps app alive)
             if let Some(main_win) = app.get_webview_window("main") {
