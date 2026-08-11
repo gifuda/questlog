@@ -180,7 +180,7 @@ fn provision_node_modules(repo_root: &Path, worktree_path: &Path) {
 /// control-plane metadata and are intentionally excluded from source Git truth.
 pub fn is_worktree_clean(worktree_path: &Path) -> Result<bool, String> {
     let output = Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["-c", "core.quotePath=false", "status", "--porcelain"])
         .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git status failed: {e}"))?;
@@ -204,7 +204,7 @@ pub fn is_worktree_clean(worktree_path: &Path) -> Result<bool, String> {
 /// excluded here and copied into the AttemptBundle separately.
 pub fn get_changed_paths(worktree_path: &Path, base_sha: &str) -> Result<Vec<String>, String> {
     let output = Command::new("git")
-        .args(["diff", "--name-only", base_sha])
+        .args(["-c", "core.quotePath=false", "diff", "--name-only", base_sha])
         .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git diff failed: {e}"))?;
@@ -223,7 +223,7 @@ pub fn get_changed_paths(worktree_path: &Path, base_sha: &str) -> Result<Vec<Str
         .collect();
 
     let untracked = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
+        .args(["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"])
         .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git ls-files failed: {e}"))?;
@@ -375,7 +375,7 @@ pub fn create_candidate_commit(
             && allowed_patterns.iter().any(|p| glob_match(p, path));
         if is_allowed {
             let _ = Command::new("git")
-                .args(["add", path])
+                .args(["-c", "core.quotePath=false", "add", path])
                 .current_dir(worktree_path)
                 .output();
             staged_any = true;
@@ -569,6 +569,56 @@ mod tests {
             get_changed_paths(repo, &base).unwrap(),
             vec!["new-source.rs"]
         );
+    }
+
+    #[test]
+    fn changed_paths_preserve_chinese_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        Command::new("git").arg("init").current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "base\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let base = read_head_sha(repo).unwrap();
+
+        // Create a file with a Chinese name
+        let chinese_name = "文档/收口方案.md";
+        std::fs::create_dir_all(repo.join("文档")).unwrap();
+        std::fs::write(repo.join("文档").join("收口方案.md"), "# content\n").unwrap();
+
+        let changed = get_changed_paths(repo, &base).unwrap();
+        assert!(
+            changed.contains(&chinese_name.to_string()),
+            "Chinese filename should appear as UTF-8, not octal-escaped. Got: {:?}",
+            changed
+        );
+
+        // Scope check should match with UTF-8 pattern
+        let result = verify_changed_paths_in_scope(
+            &changed,
+            &["文档/**".to_string()],
+            &[],
+            10,
+        );
+        assert!(result.is_ok(), "Chinese path should match UTF-8 glob pattern");
     }
 
     #[test]
