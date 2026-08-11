@@ -1052,7 +1052,46 @@ pub fn resolve_decision_request(
     request_id: String,
     resolution: String,
 ) -> Result<crate::decision_store::DecisionRequest, String> {
-    crate::decision_store::resolve_request(&request_id, &resolution, "ui-user")
+    let request = crate::decision_store::resolve_request(&request_id, &resolution, "ui-user")?;
+
+    // §5.1: resolve triggers a legal state transition, not a direct pass.
+    // The resolution determines what happens next.
+    let action = resolution.trim().to_lowercase();
+    match action.as_str() {
+        "retry" => {
+            // Create a new attempt for the same execution's package.
+            // The Runner (if enabled) will pick it up on the next poll.
+            if let Err(e) = crate::execution_store::create_retry_attempt(&request.execution_id) {
+                log::warn!(
+                    "resolve_decision(retry): failed to create new attempt for {}: {}",
+                    request.execution_id,
+                    e
+                );
+            }
+        }
+        "cancel" => {
+            // Mark the execution as cancelled.
+            let _ = crate::execution_store::release_lease(
+                &request.execution_id,
+                crate::execution_store::ExecutionStatus::Cancelled,
+                Some("cancelled via decision request"),
+            );
+        }
+        "revise_package" | "transfer_manual" | "reject" => {
+            // These require human action outside the Runner — mark blocked execution
+            // as cancelled so it doesn't linger in the queue.
+            let _ = crate::execution_store::release_lease(
+                &request.execution_id,
+                crate::execution_store::ExecutionStatus::Cancelled,
+                Some(&format!("resolved as '{}'", action)),
+            );
+        }
+        _ => {
+            // Custom resolution text — no automatic action.
+        }
+    }
+
+    Ok(request)
 }
 
 #[cfg(test)]
