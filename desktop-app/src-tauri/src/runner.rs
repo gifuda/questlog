@@ -857,8 +857,8 @@ impl Runner {
             )),
             RunResult::PolicyViolation { .. } => Some((
                 "approval",
-                "The package violates the production executor policy. Change it to ZCode or keep it manual?",
-                vec!["use_zcode".to_string(), "manual".to_string(), "cancel".to_string()],
+                "The package violates the production executor policy. Keep it manual or cancel the execution?",
+                vec!["manual".to_string(), "cancel".to_string()],
             )),
             RunResult::PreflightBlocked { .. } => Some((
                 "blocked",
