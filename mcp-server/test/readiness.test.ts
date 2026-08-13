@@ -4,9 +4,10 @@
  * sealed/ready package will be picked up, and surfaces the right blockers.
  *
  * Tested branches:
- *   1. All-clear: project enabled, epic allows, no in-flight → eligible
+ *   1. All-clear: project enabled, epic auto_execute=true, no in-flight → eligible
  *   2. Project disabled → blocker (project_enabled)
  *   3. Epic auto_execute=false → blocker (epic_auto_execute_allows)
+ *   3b. Epic auto_execute absent/null → blocker (fail-closed, mirrors Rust)
  *   4. Already in-flight → blocker (already_in_flight)
  *   5. Unknown acceptance command → blocker (acceptance_commands_available)
  *   6. enqueue_step returns runner_eligible + blockers
@@ -63,6 +64,7 @@ beforeEach(async () => {
         depends_on: [],
         blocks: [],
         links: {},
+        auto_execute: true,
         created_at: now,
         updated_at: now,
       }],
@@ -191,6 +193,25 @@ describe("verifyPickupReadiness", () => {
     const epicsPath = path.join(projectDir, ".epics.json");
     const raw = JSON.parse(await fs.readFile(epicsPath, "utf-8"));
     raw.epics[0].auto_execute = false;
+    await fs.writeFile(epicsPath, JSON.stringify(raw));
+
+    const pkgId = await buildSealedPackage();
+    const result = await verifyPickupReadiness(pkgId);
+    if ("error" in result) throw new Error(result.error);
+    expect(result.will_be_picked_up).toBe(false);
+    expect(result.blockers.some((b) => b.check === "epic_auto_execute_allows")).toBe(true);
+    expect(result.runner_side_checks.epic_auto_execute_allows).toBe(false);
+  });
+
+  it("reports blocker when epic auto_execute is absent (fail-closed)", async () => {
+    await writeRunnerConfig({ [projectDir]: { enabled: true } });
+    await writeExecutions([]);
+
+    // Delete auto_execute → null: with "switch = authorization" the project
+    // switch alone must not authorize execution (mirrors Rust is_epic_auto_execute).
+    const epicsPath = path.join(projectDir, ".epics.json");
+    const raw = JSON.parse(await fs.readFile(epicsPath, "utf-8"));
+    delete raw.epics[0].auto_execute;
     await fs.writeFile(epicsPath, JSON.stringify(raw));
 
     const pkgId = await buildSealedPackage();

@@ -455,7 +455,7 @@ server.tool(
     "- title/description/depends_on: step metadata (same as push_step)",
     "- objective/allowed_paths/acceptance_command_ids: package parameters (same as prepare_task_package)",
     "- The step is created as pending with a sealed package attached (step.package summary written to .epics.json)",
-    "- The package status is 'sealed' (not 'ready') — call enqueue_step separately when you want the Runner to pick it up",
+    "- The package is sealed. If the epic's auto_execute switch is ON (▶) and the project switch is ON, the Runner picks it up on its next poll — no enqueue_step needed. Otherwise it waits as 'sealed'.",
   ].join("\n"),
   {
     epic_id: z.string().describe("Parent epic ID"),
@@ -488,7 +488,7 @@ server.tool(
           `   Package: ${result.package_id} (sealed, rev ${result.plan_revision}, hash ${result.package_hash.slice(0, 8)})`,
           `   Objective: ${result.summary.objective}`,
           ``,
-          `Next: enqueue_step to make it ready for Runner execution.`,
+          `Runner pickup: automatic once the project + epic switches are ON (switch = authorization); enqueue_step is optional.`,
         ].join("\n"),
       }],
     };
@@ -753,7 +753,7 @@ server.tool(
   [
     "Seal a TaskPackage — freeze its content, compute the final hash, mark as sealed (immutable).",
     "Only valid packages can be sealed. After sealing, any field change requires a new revision.",
-    "A sealed package is the prerequisite for enqueue_step.",
+    "A sealed package is claimable by the Runner on its next poll once the project + epic switches are ON (switch = authorization) — enqueue_step is optional, and manual-executor packages stay sealed for tracking only.",
   ].join("\n"),
   {
     package_id: z.string().describe("The package ID to seal"),
@@ -769,7 +769,7 @@ server.tool(
       `   Hash: ${result.package_hash.slice(0, 16)}...`,
       `   Sealed at: ${result.sealed_at}`,
       "",
-      "The package is now immutable. Call enqueue_step to make it available to the Runner.",
+      "The package is now immutable. It runs automatically once the project + epic switches are ON; enqueue_step is optional.",
     ];
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }

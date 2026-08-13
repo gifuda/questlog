@@ -165,6 +165,8 @@ export interface RunnerRuntimeStatus {
   last_processed: number;
   poll_interval_secs: number;
   ready_packages: number;
+  /** sealed but not enqueued — claimable once project + epic switches are ON */
+  sealed_packages: number;
   active_executions: number;
 }
 

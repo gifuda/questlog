@@ -148,6 +148,7 @@ fn bridge_ready_package_to_zcode_execution() {
             "links": {},
             "acceptance": "candidate verified",
             "close_reason": "",
+            "auto_execute": true,
             "created_at": "2026-08-11T00:00:00Z",
             "updated_at": "2026-08-11T00:00:00Z"
         }],
@@ -421,6 +422,7 @@ fn bridge_readonly_package_no_diff_counts_as_passed() {
             "depends_on": [],
             "blocks": [],
             "links": {},
+            "auto_execute": true,
             "created_at": "2026-08-11T00:00:00Z",
             "updated_at": "2026-08-11T00:00:00Z"
         }],

@@ -93,6 +93,14 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                 <span className="w-1.5 h-1.5 rounded-full bg-orange-400" />
                 {t("execution.runnerStatusQueued", { count: runnerStatus.ready_packages })}
               </span>
+            ) : runnerStatus.sealed_packages > 0 ? (
+              <span
+                className="flex items-center gap-1 text-[9px] font-medium text-orange-400/70 shrink-0"
+                title={t("execution.runnerStatusSealedHint")}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-orange-400/70" />
+                {t("execution.runnerStatusSealed", { count: runnerStatus.sealed_packages })}
+              </span>
             ) : (
               <span
                 className="flex items-center gap-1 text-[9px] font-medium text-green-400 shrink-0"

@@ -189,12 +189,17 @@ pub fn set_executor_model(model: Option<String>) -> Result<(), String> {
 
 /// Check if a specific epic should auto-execute.
 /// Reads `auto_execute` from `.epics.json`:
-/// - `None` → inherit project setting (return project status)
-/// - `Some(false)` → always false
-/// - `Some(true)` → defer to project setting
+/// - `Some(true)` → explicitly authorized
+/// - `Some(false)` → explicitly paused
+/// - `None` → fail-closed. With the "switch = authorization" model a sealed
+///   package becomes claimable the moment its switches open, so an epic
+///   without an explicit `▶` must NOT inherit execution authority from the
+///   project switch — otherwise flipping the project switch would batch-run
+///   every sealed package in the project.
 ///
 /// If `.epics.json` doesn't exist or the epic isn't found, returns Ok(true)
-/// (no epic-level restriction → defer to project setting).
+/// (no epic-level restriction) — such orphaned packages then surface as
+/// PreflightBlocked in `validate_before_claim` instead of waiting silently.
 pub fn is_epic_auto_execute(project_path: &str, epic_id: &str) -> Result<bool, String> {
     let project_enabled = is_project_enabled(project_path);
     if !project_enabled {
@@ -214,7 +219,7 @@ pub fn is_epic_auto_execute(project_path: &str, epic_id: &str) -> Result<bool, S
     };
 
     match epic.auto_execute {
-        None => Ok(true),         // inherit project (already checked)
+        None => Ok(false),        // fail-closed: explicit ▶ required
         Some(false) => Ok(false), // explicitly disabled
         Some(true) => Ok(true),   // explicitly enabled
     }

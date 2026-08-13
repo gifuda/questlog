@@ -1,11 +1,15 @@
 //! The Runner — picks up sealed TaskPackages from the queue and executes them.
 //!
 //! Data flow (all three breakpoints bridged):
-//!   Node MCP enqueue_step → packages.json (status=ready)
-//!   → Runner polls packages.json, finds ready packages
+//!   Node MCP prepare/validate/seal → packages.json (status=sealed or ready)
+//!   → Runner polls packages.json, claims sealed/ready packages whose
+//!     project + epic switches are ON ("switch = authorization"; the
+//!     enqueue flip to "ready" is a conversation-side convenience, not a
+//!     precondition). Manual-executor and dependency-blocked packages are
+//!     skipped quietly, keeping their status.
 //!   → Creates an execution in executions.json
 //!   → Acquires lease, creates worktree
-//!   → Runs ZCode/Codex CLI with the package's objective as prompt
+//!   → Runs ZCode CLI with the package's objective as prompt
 //!   → Verifies diff scope, creates candidate commit
 //!   → Updates package status + execution status
 //!
@@ -142,6 +146,26 @@ impl Runner {
                     );
                     continue;
                 }
+            }
+
+            // Quiet-skip gates: packages that must wait silently (keep their
+            // status) instead of being claimed and then blocked.
+            // 1. manual executor = tracking-only, never auto-executed.
+            if pkg.executor_preferred == "manual" {
+                continue;
+            }
+            // 2. Dependencies not yet satisfied (order-predecessor below
+            //    coded, explicit depends_on below observed, step_stage
+            //    preconditions unmet) — wait without burning an execution.
+            //    Hard data errors fall through to the normal claim path so
+            //    validate_before_claim surfaces them as PreflightBlocked.
+            match Self::dependencies_ready(&pkg) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => log::warn!(
+                    "Runner: dependency check error for {}: {} (falling through to preflight)",
+                    pkg.package_id, e
+                ),
             }
 
             let executions = execution_store::list_executions()?;
@@ -980,6 +1004,8 @@ impl Runner {
     }
 
     /// Shadow mode: report what would be picked up without starting any CLI.
+    /// Includes sealed packages — they are claimable when their switches are
+    /// ON ("switch = authorization").
     pub fn shadow_pick() -> Result<Vec<String>, String> {
         let packages = execution_store::read_ready_packages()?;
         Ok(packages.into_iter().map(|p| p.package_id).collect())
@@ -1011,7 +1037,7 @@ impl Runner {
             ));
         }
         if pkg.sealed_at.is_empty() {
-            return Err("ready package is missing sealed_at".to_string());
+            return Err("claimable package is missing sealed_at".to_string());
         }
         if !pkg.auto_edit_worktree
             || !pkg.auto_commit_candidate
@@ -1079,6 +1105,35 @@ impl Runner {
         {
             return Err("step package summary drifted from the Runtime Store".to_string());
         }
+        if !Self::dependencies_ready(pkg)? {
+            return Err("step dependencies are not yet satisfied".to_string());
+        }
+        Ok(())
+    }
+
+    /// Check whether a package's step dependencies are satisfied — without
+    /// consuming an execution. `poll_once` calls this before claiming, so a
+    /// sealed/ready package whose dependencies aren't ready yet waits quietly
+    /// (keeps its status) instead of being claimed and blocked.
+    ///
+    /// Rules (previously inlined in validate_before_claim):
+    /// - order-predecessors must be at least `coded` (candidate produced)
+    /// - explicit `depends_on` must be `observed` (cross-session confirmed)
+    /// - step_stage preconditions must be met
+    ///
+    /// `Ok(false)` = not yet ready, wait. `Err` = hard data problem (epic or
+    /// step missing, invalid stage strings) — callers fall through to the
+    /// normal claim path so it surfaces as PreflightBlocked.
+    fn dependencies_ready(pkg: &TaskPackageSummary) -> Result<bool, String> {
+        let project = PathBuf::from(&pkg.project_path)
+            .canonicalize()
+            .map_err(|e| format!("canonicalize project path: {e}"))?;
+        let epics = crate::epic_store::read_epics(&project)?;
+        let step = epics
+            .steps
+            .iter()
+            .find(|step| step.id == pkg.step_id && step.epic_id == pkg.epic_id)
+            .ok_or_else(|| format!("step '{}' not found in epic", pkg.step_id))?;
         let stage_rank = |stage: &StepStage| match stage {
             StepStage::Pending => 0,
             StepStage::Designed => 1,
@@ -1104,10 +1159,7 @@ impl Runner {
                     _ => return Err("step_stage precondition has an invalid stage".to_string()),
                 };
                 if stage_rank(&dependency.stage) < stage_rank(&required) {
-                    return Err(format!(
-                        "dependency '{}' is below required stage {:?}",
-                        dependency.id, required
-                    ));
+                    return Ok(false);
                 }
             }
         }
@@ -1135,17 +1187,10 @@ impl Runner {
                 .map(|stage| stage_rank(stage) >= stage_rank(&required_stage))
                 .unwrap_or(false);
             if !sufficient {
-                return Err(format!(
-                    "dependency '{}' is below required stage {:?} (current: {:?})",
-                    dependency_id,
-                    required_stage,
-                    dep_stage
-                        .map(|s| format!("{:?}", s))
-                        .unwrap_or_else(|| "missing".to_string())
-                ));
+                return Ok(false);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Advance the Step stage in .epics.json based on execution result.
@@ -1229,6 +1274,9 @@ pub struct RunnerRuntimeStatus {
     pub poll_interval_secs: u64,
     /// Packages currently in `ready` state waiting for pickup.
     pub ready_packages: usize,
+    /// Packages sealed but not enqueued — claimable the moment their project
+    /// and epic switches are ON ("switch = authorization").
+    pub sealed_packages: usize,
     /// Executions currently in flight (running/candidate/verifying/…).
     pub active_executions: usize,
 }
@@ -1236,12 +1284,11 @@ pub struct RunnerRuntimeStatus {
 /// Snapshot the Runner heartbeat for the UI.
 pub fn runtime_status() -> RunnerRuntimeStatus {
     let last = LAST_POLL_AT.load(Ordering::SeqCst);
-    // Live queue counts: packages waiting for pickup + executions in flight.
-    // Read failures degrade to zero — the heartbeat is the liveness signal;
-    // the counts are informational for the status indicator.
-    let ready_packages = crate::execution_store::read_ready_packages()
-        .map(|pkgs| pkgs.len())
-        .unwrap_or(0);
+    // Live queue counts: packages waiting for pickup (by status) + executions
+    // in flight. Read failures degrade to zero — the heartbeat is the liveness
+    // signal; the counts are informational for the status indicator.
+    let (ready_packages, sealed_packages) =
+        crate::execution_store::count_claimable_by_status().unwrap_or((0, 0));
     let active_executions = crate::execution_store::list_executions()
         .map(|execs| {
             execs
@@ -1267,6 +1314,7 @@ pub fn runtime_status() -> RunnerRuntimeStatus {
         last_processed: LAST_PROCESSED.load(Ordering::SeqCst),
         poll_interval_secs: POLL_INTERVAL_SECS.load(Ordering::SeqCst),
         ready_packages,
+        sealed_packages,
         active_executions,
     }
 }
@@ -1608,7 +1656,8 @@ mod tests {
         let runtime = dir.path().join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
 
-        // packages.json: 2 ready + 1 sealed → ready_packages must be 2.
+        // packages.json: 2 ready + 1 sealed → ready=2, sealed=1 (split counts
+        // feed the UI's queued vs sealed status display).
         // Full RawTaskPackage shape (the ready filter parses every ready
         // package before counting).
         let package = |id: &str, status: &str| {
@@ -1675,7 +1724,11 @@ mod tests {
         std::fs::write(runtime.join("executions.json"), executions.to_string()).unwrap();
 
         let status = runtime_status();
-        assert_eq!(status.ready_packages, 2, "ready filter must exclude sealed");
+        assert_eq!(status.ready_packages, 2, "ready count stays ready-only");
+        assert_eq!(
+            status.sealed_packages, 1,
+            "sealed packages are counted separately (claimable, not enqueued)"
+        );
         assert_eq!(status.active_executions, 1, "only in-flight statuses count");
     }
 
@@ -1755,6 +1808,244 @@ mod tests {
         // Package should no longer be "ready"
         let remaining = execution_store::read_ready_packages().unwrap();
         assert!(remaining.is_empty(), "package should be consumed");
+    }
+
+    /// Minimal .epics.json fixture: one epic (`auto_execute` configurable) and
+    /// its steps. Used by the poll-gate tests below.
+    fn write_epics_fixture(
+        project: &std::path::Path,
+        epic_auto_execute: Option<bool>,
+        steps: serde_json::Value,
+    ) {
+        let epics = serde_json::json!({
+            "version": 1,
+            "project": "gate-test",
+            "epics": [{
+                "id": "epic_gate",
+                "title": "gate test",
+                "status": "active",
+                "priority": "P1",
+                "created_at": "2026-08-11T00:00:00Z",
+                "updated_at": "2026-08-11T00:00:00Z",
+                "auto_execute": epic_auto_execute
+            }],
+            "steps": steps
+        });
+        std::fs::write(
+            project.join(".epics.json"),
+            serde_json::to_string_pretty(&epics).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Minimal sealed/ready package fixture for epic_gate/`step` in `project`.
+    fn write_package_fixture(
+        runtime: &std::path::Path,
+        project: &str,
+        status: &str,
+        executor: &str,
+        step: &str,
+    ) {
+        let packages = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "schema_version": 1,
+                "package_id": "pkg_gate",
+                "epic_id": "epic_gate",
+                "step_id": step,
+                "plan_revision": 1,
+                "project_path": project,
+                "repo_root": project,
+                "base_sha": "abc",
+                "objective": "gate test task",
+                "context_refs": [],
+                "scope": {
+                    "allowed_paths": ["**"],
+                    "forbidden_paths": [],
+                    "max_changed_files": 10
+                },
+                "preconditions": [],
+                "executor": {
+                    "preferred": executor,
+                    "fallbacks": [],
+                    "sandbox": "workspace-write",
+                    "timeout_seconds": 3600,
+                    "max_attempts": 2
+                },
+                "acceptance": [],
+                "authority": {
+                    "auto_edit_worktree": true,
+                    "auto_commit_candidate": true,
+                    "auto_merge": false,
+                    "auto_push": false,
+                    "auto_deploy": false
+                },
+                "stop_conditions": ["scope_expanded"],
+                "rollback": {"strategy": "preserve_worktree_and_stop"},
+                "status": status,
+                "sealed_at": "2026-08-11T00:00:00Z",
+                "package_hash": "fake_hash"
+            }]
+        });
+        std::fs::write(
+            runtime.join("packages.json"),
+            serde_json::to_string_pretty(&packages).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn new_runner() -> Runner {
+        Runner::new(RunnerConfig {
+            enabled: true,
+            poll_interval: Duration::from_secs(1),
+            runner_id: "test".to_string(),
+        })
+    }
+
+    #[test]
+    fn poll_picks_up_sealed_package_when_switches_allow() {
+        let (_dir, _guard) = setup();
+        let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        crate::runner_config::set_project_enabled("/nonexistent", true).unwrap();
+        write_package_fixture(
+            std::path::Path::new(&runtime),
+            "/nonexistent",
+            "sealed",
+            "zcode",
+            "s1",
+        );
+
+        // A sealed package must flow through the same claim path as ready.
+        // (Preflight then fails because /nonexistent is not a repo — but the
+        // package must be CLAIMED, not filtered.)
+        let mut runner = new_runner();
+        let count = runner.poll_once().unwrap();
+        assert_eq!(count, 1, "sealed package must be claimed when switches allow");
+        let remaining = execution_store::read_ready_packages().unwrap();
+        assert!(remaining.is_empty(), "claimed package must be consumed");
+    }
+
+    #[test]
+    fn poll_skips_manual_executor_package_quietly() {
+        let (_dir, _guard) = setup();
+        let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_string_lossy().to_string();
+        crate::runner_config::set_project_enabled(&project_path, true).unwrap();
+        write_epics_fixture(
+            project.path(),
+            Some(true),
+            serde_json::json!([{
+                "id": "s1", "epic_id": "epic_gate", "title": "manual step", "order": 0,
+                "depends_on": [], "stage": "pending",
+                "created_at": "2026-08-11T00:00:00Z",
+                "updated_at": "2026-08-11T00:00:00Z"
+            }]),
+        );
+        write_package_fixture(
+            std::path::Path::new(&runtime),
+            &project_path,
+            "sealed",
+            "manual",
+            "s1",
+        );
+
+        let mut runner = new_runner();
+        let count = runner.poll_once().unwrap();
+        assert_eq!(count, 0, "manual packages are tracking-only, never claimed");
+        let (ready, sealed) = execution_store::count_claimable_by_status().unwrap();
+        assert_eq!((ready, sealed), (0, 1), "package must stay sealed");
+        assert!(
+            execution_store::list_executions().unwrap().is_empty(),
+            "no execution may be created for a manual package"
+        );
+    }
+
+    #[test]
+    fn poll_skips_unmet_dependency_and_waits_quietly() {
+        let (_dir, _guard) = setup();
+        let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_string_lossy().to_string();
+        crate::runner_config::set_project_enabled(&project_path, true).unwrap();
+        let steps_with = |s1_stage: &str| {
+            serde_json::json!([
+                {"id": "s1", "epic_id": "epic_gate", "title": "first", "order": 0,
+                 "depends_on": [], "stage": s1_stage,
+                 "created_at": "2026-08-11T00:00:00Z",
+                 "updated_at": "2026-08-11T00:00:00Z"},
+                {"id": "s2", "epic_id": "epic_gate", "title": "second", "order": 1,
+                 "depends_on": [], "stage": "pending",
+                 "created_at": "2026-08-11T00:00:00Z",
+                 "updated_at": "2026-08-11T00:00:00Z"}
+            ])
+        };
+        write_epics_fixture(project.path(), Some(true), steps_with("pending"));
+        write_package_fixture(
+            std::path::Path::new(&runtime),
+            &project_path,
+            "sealed",
+            "zcode",
+            "s2",
+        );
+
+        // s2's order-predecessor s1 is pending (< coded) → wait quietly,
+        // keeping the sealed status instead of being claimed and blocked.
+        let mut runner = new_runner();
+        let count = runner.poll_once().unwrap();
+        assert_eq!(count, 0, "dependency-unready package must not be claimed");
+        let (ready, sealed) = execution_store::count_claimable_by_status().unwrap();
+        assert_eq!((ready, sealed), (0, 1), "package must stay sealed while waiting");
+        assert!(execution_store::list_executions().unwrap().is_empty());
+
+        // Advance s1 to coded → the next poll claims s2 (consumed via
+        // preflight-block because the fixture project is not a real repo).
+        write_epics_fixture(project.path(), Some(true), steps_with("coded"));
+        let count = runner.poll_once().unwrap();
+        assert_eq!(count, 1, "satisfied dependency must release the package");
+        assert!(execution_store::read_ready_packages().unwrap().is_empty());
+    }
+
+    #[test]
+    fn poll_skips_epic_without_explicit_auto_execute() {
+        let (_dir, _guard) = setup();
+        let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_string_lossy().to_string();
+        crate::runner_config::set_project_enabled(&project_path, true).unwrap();
+        // Epic has NO auto_execute field → fail-closed: the project switch
+        // alone must not release sealed packages (authorization is epic-level).
+        write_epics_fixture(
+            project.path(),
+            None,
+            serde_json::json!([{
+                "id": "s1", "epic_id": "epic_gate", "title": "waiting", "order": 0,
+                "depends_on": [], "stage": "pending",
+                "created_at": "2026-08-11T00:00:00Z",
+                "updated_at": "2026-08-11T00:00:00Z"
+            }]),
+        );
+        write_package_fixture(
+            std::path::Path::new(&runtime),
+            &project_path,
+            "sealed",
+            "zcode",
+            "s1",
+        );
+
+        let mut runner = new_runner();
+        let count = runner.poll_once().unwrap();
+        assert_eq!(
+            count, 0,
+            "epic without explicit auto_execute=true must not release packages"
+        );
+        let (ready, sealed) = execution_store::count_claimable_by_status().unwrap();
+        assert_eq!((ready, sealed), (0, 1));
+        assert!(execution_store::list_executions().unwrap().is_empty());
     }
 
     #[test]

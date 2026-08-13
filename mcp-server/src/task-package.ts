@@ -80,8 +80,8 @@ export interface Rollback {
 /** Runtime status of a package — separate from the sealed content. */
 export type PackageStatus =
   | "draft" // prepare called, not yet sealed
-  | "sealed" // all validation passed, hash computed
-  | "ready" // enqueued, waiting for Runner
+  | "sealed" // frozen; claimable by the Runner once project+epic switches are ON
+  | "ready" // explicitly enqueued (optional — switch=authorization model)
   | "superseded" // a newer revision exists
   | "cancelled"
   | "passed" // Runner produced and verified an exact candidate commit

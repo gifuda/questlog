@@ -192,6 +192,18 @@ S1 通过。安全基线成立：**ymos 当前完全不可被 Runner 触碰**。
 
 ✅ **S4 多 Step 串行通过**：3 个 write 步骤顺序完成、各自独立候选 commit、自动推进 verified、主仓全程零触碰。串行派发 + 依赖 gate 语义清晰可复现。
 
+### S6（追加）：开关即授权 — sealed 包可直接领取（2026-08-13）
+
+消灭"开开关仍待命"的最后一块拼图。改动前：sealed 包必须由对话端 `enqueue_step` 翻成 ready，Runner 才领取；App 里的方案 ▶/⏸/⇆ 开关只写授权字段，不触发。改动后：
+
+- `read_ready_packages` 领取过滤器放宽为 sealed+ready——**开关 ON + 包 sealed = 下轮 poll 直接领取**（validate_before_claim 全量校验不变，含 hash/base_sha/依赖/authority）
+- **quiet-skip 双 gate**（claim 前）：manual 执行器包永远不 claim（tracking-only）；依赖未就绪（order 前置<coded、显式 depends_on<observed、step_stage precondition 未达）→ 安静等待保持 sealed，不再被 claim 后误标 blocked
+- **授权收紧（对抗审查发现）**：`is_epic_auto_execute` 的 `auto_execute=None` 分支从"继承项目开关"改为 fail-closed——项目开关 ON 不再批量放行所有 sealed 包，必须给方案显式 ▶。MCP `verify_pickup_readiness` 同步镜像
+- **状态显示拆分**：heartbeat `ready_packages`（已入队）与 `sealed_packages`（已封包待领取）分开，UI 新增"📦 已封包·N"档位
+- 测试：140 Rust + 145 MCP 全绿；新增 sealed 领取/manual 跳过/依赖等待/fail-closed 四组测试
+
+**注意**：上线时 questlog-runtime 有 16 个存量 sealed 包（3 个 manual）——双开关 OFF + fail-closed 双重保护下不会误跑；真实 canary 验证（开一个开关跑通一个 sealed 包）留待用户授权后执行。
+
 ### 下一步（S5 观察裁决与演练）
 
 - 汇总 S2-S4 全链路证据，形成 Canary 裁决（扩大范围 vs 保持单项目）

@@ -981,8 +981,14 @@ fn packages_path() -> PathBuf {
     runtime_dir().join("packages.json")
 }
 
-/// Read all ready packages from packages.json (written by Node MCP enqueue_step).
-/// Returns packages with status "ready" — these are the ones the Runner should pick up.
+/// Read all claimable packages from packages.json (written by Node MCP).
+///
+/// Accepts both "sealed" and "ready": with the "switch = authorization"
+/// model, a sealed package in a project/epic whose switches are ON is
+/// claimable directly — the enqueue flip to "ready" is a conversation-side
+/// convenience, not a precondition for the Runner. Packages that must not
+/// be auto-claimed (manual executor, unmet dependencies) are skipped
+/// quietly by `poll_once`, not by this filter.
 ///
 /// Deserializes the **nested** `RawTaskPackage` shape that Node writes,
 /// then projects to flat `TaskPackageSummary` for the Runner.
@@ -1000,12 +1006,12 @@ pub fn read_ready_packages() -> Result<Vec<TaskPackageSummary>, String> {
         .ok_or_else(|| "packages.json missing packages array".to_string())?;
     let mut ready = Vec::new();
     for package_value in packages {
-        if package_value
+        match package_value
             .get("status")
             .and_then(|status| status.as_str())
-            != Some("ready")
         {
-            continue;
+            Some("sealed") | Some("ready") => {}
+            _ => continue,
         }
         let raw_package: RawTaskPackage = serde_json::from_value(package_value.clone())
             .map_err(|e| format!("parse TaskPackage: {e}"))?;
@@ -1014,6 +1020,34 @@ pub fn read_ready_packages() -> Result<Vec<TaskPackageSummary>, String> {
         ready.push(summary);
     }
     Ok(ready)
+}
+
+/// Count claimable packages by status: (ready, sealed). One file read —
+/// `runtime_status` needs both numbers for the UI without parsing twice.
+pub fn count_claimable_by_status() -> Result<(usize, usize), String> {
+    let path = packages_path();
+    if !path.exists() {
+        return Ok((0, 0));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read packages.json: {e}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse packages.json: {e}"))?;
+    let packages = value
+        .get("packages")
+        .and_then(|packages| packages.as_array())
+        .ok_or_else(|| "packages.json missing packages array".to_string())?;
+    let (mut ready, mut sealed) = (0usize, 0usize);
+    for package_value in packages {
+        match package_value
+            .get("status")
+            .and_then(|status| status.as_str())
+        {
+            Some("ready") => ready += 1,
+            Some("sealed") => sealed += 1,
+            _ => {}
+        }
+    }
+    Ok((ready, sealed))
 }
 
 pub fn compute_package_hash(package: &serde_json::Value) -> Result<String, String> {

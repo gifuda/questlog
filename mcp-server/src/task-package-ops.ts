@@ -352,6 +352,11 @@ export interface SealResult {
  * Seal a TaskPackage — freeze it, compute final hash, mark as sealed.
  * Only valid packages can be sealed. Sealed packages are immutable;
  * any field change requires a new revision.
+ *
+ * With the "switch = authorization" model a sealed package is claimable by
+ * the Runner on its next poll once the project AND epic switches are ON —
+ * no explicit enqueue_step required. Use executor "manual" to keep a package
+ * sealed for tracking only.
  */
 export async function sealTaskPackage(
   cwd: string,
@@ -526,9 +531,11 @@ export interface EnqueueResult {
 }
 
 /**
- * Enqueue a sealed TaskPackage for Runner execution.
+ * Enqueue a sealed TaskPackage for Runner execution (explicit, optional).
  * Only sealed packages with no supersession can be enqueued.
- * The Runner picks up packages with status "ready".
+ * Since the "switch = authorization" change the Runner picks up both
+ * "sealed" and "ready" packages whose switches are ON — enqueue is a
+ * conversation-side convenience, not a precondition.
  */
 export async function enqueueStep(
   cwd: string,
@@ -728,16 +735,21 @@ export async function verifyPickupReadiness(
     });
   }
 
-  // Check 2: epic auto_execute (read .epics.json)
+  // Check 2: epic auto_execute (read .epics.json). Mirrors Rust
+  // is_epic_auto_execute: only an explicit `auto_execute: true` authorizes —
+  // null is fail-closed (no implicit inheritance from the project switch).
   let epicAutoExecuteAllows = true;
   const epicsResult = await readEpicsSafe(pkg.project_path);
   if ("ok" in epicsResult) {
     const epic = epicsResult.data.epics.find((e) => e.id === pkg.epic_id);
-    if (epic && epic.auto_execute === false) {
+    if (epic && epic.auto_execute !== true) {
       epicAutoExecuteAllows = false;
       blockers.push({
         check: "epic_auto_execute_allows",
-        reason: `epic '${pkg.epic_id}' has auto_execute=false (never auto-execute)`,
+        reason:
+          epic.auto_execute === false
+            ? `epic '${pkg.epic_id}' has auto_execute=false (never auto-execute)`
+            : `epic '${pkg.epic_id}' has no explicit auto_execute=true (switch not opened)`,
       });
     }
   }

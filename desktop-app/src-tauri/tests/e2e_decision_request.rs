@@ -98,7 +98,7 @@ fn acceptance_failure_creates_decision_request() {
     // Also need .epics.json for the project (Runner reads it for step stage + package summary)
     let epics = serde_json::json!({
         "version": 1, "project": "e2e", "revision": 1,
-        "epics": [{"id":"epic_test","title":"E2E","description":"","status":"active","priority":"P0","depends_on":[],"blocks":[],"links":{},"acceptance":"test","close_reason":"","created_at":"2026-08-11T00:00:00Z","updated_at":"2026-08-11T00:00:00Z"}],
+        "epics": [{"id":"epic_test","title":"E2E","description":"","status":"active","priority":"P0","depends_on":[],"blocks":[],"links":{},"acceptance":"test","close_reason":"","auto_execute":true,"created_at":"2026-08-11T00:00:00Z","updated_at":"2026-08-11T00:00:00Z"}],
         "steps": [{"id":"step_test","epic_id":"epic_test","title":"Test","description":"","order":1,"depends_on":[],"stage":"pending","links":{},"package":{
             "package_id": "pkg_decision_test",
             "plan_revision": 1,
