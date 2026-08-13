@@ -184,7 +184,13 @@
     "runnerStatusHint": "Runner 心跳：每轮轮询（含空转）都会更新。绿灯=正常运转；黄灯=开关开着但很久没有成功轮询；灰灯=未运转。",
     "runnerStatusActive": "⚡ 执行中 · {{count}} 个",
     "runnerStatusQueued": "📥 待执行 · {{count}} 包",
-    "runnerStatusIdle": "○ 待命中 · {{secs}}s 前"
+    "runnerStatusIdle": "○ 待命中 · {{secs}}s 前",
+    "modelSelectorTitle": "执行模型",
+    "modelSelectorHint": "Runner 自动执行用的模型（从 ZCode 配置读取，写入 worktree 项目级配置）",
+    "modelDefault": "默认（CLI 配置）",
+    "modelNoneFound": "未找到已配置的模型（~/.zcode/cli/config.json）",
+    "thinkingDefault": "思考 {{variant}}",
+    "thinkingReadOnlyHint": "思考档 {{variant}} 由模型 API 默认决定。当前 CLI 0.16.3 暂不支持运行时切换思考程度，升级后开放。"
   },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",

@@ -210,6 +210,58 @@ export interface ProjectRunnerStatus {
   project_enabled: boolean;
 }
 
+// ─── Executor model selection ───
+
+export interface ExecutorModelOption {
+  id: string; // "provider/model"
+  name: string;
+  thinking_default: string | null;
+}
+
+export interface ExecutorProviderOption {
+  name: string;
+  display_name: string;
+  models: ExecutorModelOption[];
+}
+
+export interface ExecutorOptions {
+  providers: ExecutorProviderOption[];
+  current_model: string | null;
+}
+
+/**
+ * useExecutorOptions — which model the Runner's executor uses. Options come
+ * from ~/.zcode/cli/config.json providers; the selection is stored in
+ * runner-config.json and injected into each worktree as a project-level
+ * .zcode/config.json (the CLI has no --model flag).
+ */
+export function useExecutorOptions() {
+  const [options, setOptions] = useState<ExecutorOptions | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const data = await invoke<ExecutorOptions>("get_executor_options");
+      setOptions(data);
+    } catch {
+      setOptions(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const select = useCallback(
+    async (model: string | null) => {
+      await invoke("set_executor_model", { model });
+      await refresh();
+    },
+    [refresh],
+  );
+
+  return { options, select, refresh };
+}
+
 /**
  * useProjectRunner — manage Runner execution for a specific project.
  * The global toggle must also be ON for execution to happen.

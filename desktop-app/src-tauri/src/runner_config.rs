@@ -32,6 +32,11 @@ pub struct RunnerRuntimeConfig {
     pub global_enabled: bool,
     #[serde(default)]
     pub projects: HashMap<String, ProjectRunnerEntry>,
+    /// Which model the Runner's executor should use ("provider/model", e.g.
+    /// "deepseek/deepseek-v4-flash"). None = use the ZCode CLI's own default.
+    /// Injected into each worktree as a project-level .zcode/config.json.
+    #[serde(default)]
+    pub executor_model: Option<String>,
     #[serde(default)]
     pub revision: u64,
 }
@@ -42,6 +47,7 @@ impl Default for RunnerRuntimeConfig {
             version: 1,
             global_enabled: false,
             projects: HashMap::new(),
+            executor_model: None,
             revision: 0,
         }
     }
@@ -163,6 +169,22 @@ pub struct ProjectRunnerStatus {
     pub project_enabled: bool,
 }
 
+// ─── Executor model selection ───
+
+/// Get the configured executor model ("provider/model"), or None to use the
+/// ZCode CLI's own default.
+pub fn get_executor_model() -> Option<String> {
+    read_config().executor_model
+}
+
+/// Set the executor model. Does NOT restart the Runner thread — the value is
+/// picked up on the next worktree creation.
+pub fn set_executor_model(model: Option<String>) -> Result<(), String> {
+    let mut config = read_config();
+    config.executor_model = model;
+    write_config(&mut config)
+}
+
 // ─── Per-epic auto_execute ───
 
 /// Check if a specific epic should auto-execute.
@@ -260,5 +282,31 @@ mod tests {
 
         set_globally_enabled(false).unwrap();
         assert!(!is_globally_enabled());
+    }
+
+    #[test]
+    fn executor_model_roundtrip_and_backward_compat() {
+        let (_dir, _guard) = setup_temp_runtime();
+
+        // Default: None (use CLI default)
+        assert!(get_executor_model().is_none());
+
+        // Set → read back
+        set_executor_model(Some("bigmodel/GLM-5.2".to_string())).unwrap();
+        assert_eq!(get_executor_model().as_deref(), Some("bigmodel/GLM-5.2"));
+
+        // Clear → None again
+        set_executor_model(None).unwrap();
+        assert!(get_executor_model().is_none());
+
+        // Old config without the field must deserialize (serde default)
+        let raw = serde_json::json!({
+            "version": 1,
+            "global_enabled": false,
+            "projects": {},
+            "revision": 1
+        });
+        let parsed: RunnerRuntimeConfig = serde_json::from_value(raw).unwrap();
+        assert!(parsed.executor_model.is_none());
     }
 }

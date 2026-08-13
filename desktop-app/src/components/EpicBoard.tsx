@@ -6,6 +6,7 @@ import { epicStatusBadge, stageOrder, stageLabel, stageIcon, statusOptions, stat
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
 import ExecutionPanel, { DecisionInbox } from "./ExecutionPanel";
+import ExecutorModelSelector from "./ExecutorModelSelector";
 
 /** i18n keys for epic status labels (statuses stay lowercase in data). */
 const epicStatusKey: Record<EpicStatus, string> = {
@@ -119,6 +120,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
             {t("execution.runnerStatusOff")}
           </span>
         )}
+        <ExecutorModelSelector />
         <button
           onClick={toggleProjectRunner}
           disabled={projectLoading}

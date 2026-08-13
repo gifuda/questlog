@@ -41,6 +41,10 @@ fn is_runner_internal_path(path: &str) -> bool {
         || path.starts_with("node_modules/")
         || path.ends_with("/node_modules")
         || path.contains("/node_modules/")
+        // .zcode/config.json is executor model provisioning written by the
+        // Runner (project-level ZCode config), not candidate source
+        || path == ".zcode/config.json"
+        || path.ends_with("/.zcode/config.json")
 }
 
 /// Result of creating a worktree.
@@ -102,11 +106,117 @@ pub fn create_worktree(
     // with a clear stderr, which is captured in the AttemptBundle.
     provision_node_modules(repo_root, &worktree_path);
 
+    // Provision the executor model as a project-level ZCode config inside the
+    // worktree (the CLI has no --model flag; a project .zcode/config.json is
+    // the only verified override point). Skipped when no model is configured.
+    if let Some(model) = crate::runner_config::get_executor_model() {
+        provision_zcode_config(&worktree_path, &model);
+    }
+
     Ok(WorktreeInfo {
         path: worktree_path,
         branch: branch_name.to_string(),
         base_sha: base_sha.to_string(),
     })
+}
+
+/// Write a project-level `.zcode/config.json` into the worktree so the ZCode
+/// CLI uses the user-selected model for this execution.
+///
+/// The file must carry BOTH the model string and the full provider definition
+/// (verified: model-only configs fail with "provider is missing baseURL"
+/// because project configs don't merge the global provider table). The
+/// provider def is copied verbatim from `~/.zcode/cli/config.json`.
+///
+/// Zero-intrusion: the file lives only inside the temp worktree and is
+/// removed with it. Failures are non-fatal (warn) — execution then falls back
+/// to the CLI's own default model.
+fn provision_zcode_config(worktree_path: &Path, model: &str) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            log::warn!("no home dir; skipping zcode config provisioning");
+            return;
+        }
+    };
+    provision_zcode_config_from(&home, worktree_path, model);
+}
+
+/// Testable core of `provision_zcode_config`: reads the ZCode config from
+/// `<zcode_home>/.zcode/cli/config.json` instead of the real home.
+fn provision_zcode_config_from(zcode_home: &Path, worktree_path: &Path, model: &str) {
+    let provider_name = model.split('/').next().unwrap_or("");
+    if provider_name.is_empty() || !model.contains('/') {
+        log::warn!(
+            "executor model '{}' is not in provider/model form; skipping zcode config provisioning",
+            model
+        );
+        return;
+    }
+
+    let main_config_path = zcode_home.join(".zcode").join("cli").join("config.json");
+    let raw = match std::fs::read_to_string(&main_config_path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            log::warn!(
+                "cannot read {} ({}); executor falls back to CLI default model",
+                main_config_path.display(),
+                e
+            );
+            return;
+        }
+    };
+    let mut main_config: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!(
+                "corrupt zcode config ({}); executor falls back to CLI default model",
+                e
+            );
+            return;
+        }
+    };
+
+    let provider_def = main_config
+        .get("provider")
+        .and_then(|p| p.get(provider_name))
+        .cloned();
+    let provider_def = match provider_def {
+        Some(def) => def,
+        None => {
+            log::warn!(
+                "provider '{}' not found in zcode config; executor falls back to CLI default model",
+                provider_name
+            );
+            return;
+        }
+    };
+
+    let mut project_config = serde_json::Map::new();
+    project_config.insert(
+        "model".to_string(),
+        serde_json::Value::String(model.to_string()),
+    );
+    let mut providers = serde_json::Map::new();
+    providers.insert(provider_name.to_string(), provider_def);
+    project_config.insert("provider".to_string(), serde_json::Value::Object(providers));
+
+    let config_dir = worktree_path.join(".zcode");
+    if let Err(e) = std::fs::create_dir_all(&config_dir) {
+        log::warn!("mkdir .zcode in worktree failed: {e}");
+        return;
+    }
+    let file = config_dir.join("config.json");
+    match serde_json::to_string_pretty(&serde_json::Value::Object(project_config)) {
+        Ok(content) => {
+            if let Err(e) = std::fs::write(&file, content) {
+                log::warn!("write worktree zcode config failed: {e}");
+            } else {
+                log::info!("executor model '{}' provisioned into worktree", model);
+            }
+        }
+        Err(e) => log::warn!("serialize worktree zcode config failed: {e}"),
+    }
 }
 
 /// Symlink node_modules directories from the main checkout into the worktree.
@@ -879,4 +989,77 @@ mod tests {
             Err(e) => panic!("create_candidate_commit failed: {e}"),
         }
     }
+}
+
+#[test]
+fn runner_internal_paths_exclude_zcode_config() {
+    // The Runner writes .zcode/config.json into the worktree to pin the
+    // executor model — it must never count as a candidate source change.
+    assert!(is_runner_internal_path(".zcode/config.json"));
+    assert!(is_runner_internal_path("sub/dir/.zcode/config.json"));
+    assert!(!is_runner_internal_path(".zcode/other.json"));
+    assert!(!is_runner_internal_path("src/main.rs"));
+}
+
+#[test]
+fn provision_zcode_config_writes_model_and_provider_def() {
+    let home = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+
+    // Fabricate a main zcode config with two providers
+    let main_config = serde_json::json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "provider": {
+            "deepseek": {
+                "kind": "anthropic",
+                "name": "DeepSeek (v4 flash)",
+                "options": {"apiKey": "sk-test", "baseURL": "https://api.deepseek.com/anthropic"},
+                "models": {
+                    "deepseek-v4-flash": {"reasoning": {"enabled": true, "variants": ["off", "high", "max"], "defaultVariant": "max"}}
+                }
+            },
+            "bigmodel": {
+                "kind": "anthropic",
+                "name": "BigModel (GLM-5.2)",
+                "options": {"apiKey": "k2", "baseURL": "https://open.bigmodel.cn/api/anthropic"},
+                "models": {
+                    "GLM-5.2": {"reasoning": {"enabled": true, "variants": ["off", "high"], "defaultVariant": "high"}}
+                }
+            }
+        }
+    });
+    let config_dir = home.path().join(".zcode").join("cli");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.json"), main_config.to_string()).unwrap();
+
+    // Provision GLM-5.2 into the worktree
+    provision_zcode_config_from(home.path(), worktree.path(), "bigmodel/GLM-5.2");
+
+    let written = std::fs::read_to_string(worktree.path().join(".zcode").join("config.json"))
+        .expect("worktree .zcode/config.json must exist");
+    let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+    assert_eq!(parsed["model"].as_str(), Some("bigmodel/GLM-5.2"));
+    // Full provider def must be carried (model-only fails with missing baseURL)
+    assert_eq!(
+        parsed["provider"]["bigmodel"]["options"]["baseURL"].as_str(),
+        Some("https://open.bigmodel.cn/api/anthropic")
+    );
+    // Other providers must NOT leak into the worktree config
+    assert!(parsed["provider"].get("deepseek").is_none());
+}
+
+#[test]
+fn provision_zcode_config_skips_unknown_provider_without_panic() {
+    let home = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".zcode").join("cli")).unwrap();
+    std::fs::write(
+        home.path().join(".zcode").join("cli").join("config.json"),
+        serde_json::json!({"provider": {}}).to_string(),
+    )
+    .unwrap();
+
+    // Unknown provider → warn + skip, no file written, no panic
+    provision_zcode_config_from(home.path(), worktree.path(), "ghost/model-x");
+    assert!(!worktree.path().join(".zcode").join("config.json").exists());
 }

@@ -184,7 +184,13 @@
     "runnerStatusHint": "Runner heartbeat: every poll (even idle) updates it. Green = polling; yellow = on but no successful poll recently; gray = not running.",
     "runnerStatusActive": "⚡ Executing · {{count}}",
     "runnerStatusQueued": "📥 Queued · {{count}} pkgs",
-    "runnerStatusIdle": "○ Idle · {{secs}}s ago"
+    "runnerStatusIdle": "○ Idle · {{secs}}s ago",
+    "modelSelectorTitle": "EXECUTOR MODEL",
+    "modelSelectorHint": "Model used by Runner auto-execution (read from ZCode config, injected into worktree project config)",
+    "modelDefault": "Default (CLI config)",
+    "modelNoneFound": "No configured models found (~/.zcode/cli/config.json)",
+    "thinkingDefault": "thinking {{variant}}",
+    "thinkingReadOnlyHint": "Thinking variant {{variant}} comes from the model's API default. CLI 0.16.3 has no runtime thinking switch yet; opens after CLI upgrade."
   },
   "timeline": {
     "undoRemove": "Removed \"{{name}}\"",

@@ -1579,10 +1579,16 @@ mod tests {
         LAST_PROCESSED.store(0, Ordering::SeqCst);
         let beat = runtime_status();
         assert_eq!(beat.running, RUNNER_RUNNING.load(Ordering::SeqCst));
-        assert_eq!(beat.thread_alive, RUNNER_THREAD_ALIVE.load(Ordering::SeqCst));
+        assert_eq!(
+            beat.thread_alive,
+            RUNNER_THREAD_ALIVE.load(Ordering::SeqCst)
+        );
         assert_eq!(beat.last_poll_at, Some(1_700_000_000));
         assert_eq!(beat.poll_count, 42);
-        assert_eq!(beat.last_processed, 0, "idle poll → 0 processed, still alive");
+        assert_eq!(
+            beat.last_processed, 0,
+            "idle poll → 0 processed, still alive"
+        );
         assert_eq!(beat.poll_interval_secs, 10);
 
         // An empty poll must count as a heartbeat — the UI uses last_poll_at

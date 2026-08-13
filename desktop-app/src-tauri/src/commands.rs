@@ -1049,6 +1049,91 @@ pub fn get_runner_runtime_status() -> Result<crate::runner::RunnerRuntimeStatus,
     Ok(crate::runner::runtime_status())
 }
 
+/// A model entry under a provider in the ZCode CLI config.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExecutorModelOption {
+    /// Full model id ("provider/model") to store in runner-config.
+    pub id: String,
+    /// Human-readable model name (e.g. "deepseek-v4-flash").
+    pub name: String,
+    /// Default thinking variant from the config's reasoning spec, if any.
+    /// Read-only info: the CLI 0.16.3 has no runtime thinking switch.
+    pub thinking_default: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExecutorProviderOption {
+    pub name: String,
+    pub display_name: String,
+    pub models: Vec<ExecutorModelOption>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExecutorOptions {
+    pub providers: Vec<ExecutorProviderOption>,
+    /// Currently selected "provider/model"; None = CLI default.
+    pub current_model: Option<String>,
+}
+
+/// List the executor model options parsed from ~/.zcode/cli/config.json plus
+/// the currently selected model. Read failures degrade to empty options — the
+/// UI then shows "no models configured".
+#[tauri::command]
+pub fn get_executor_options() -> Result<ExecutorOptions, String> {
+    let mut providers: Vec<ExecutorProviderOption> = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".zcode").join("cli").join("config.json");
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(provider_map) = config.get("provider").and_then(|p| p.as_object()) {
+                    for (name, def) in provider_map {
+                        let display_name = def
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or(name)
+                            .to_string();
+                        let mut models = Vec::new();
+                        if let Some(model_map) = def.get("models").and_then(|m| m.as_object()) {
+                            for (model_name, model_def) in model_map {
+                                let thinking_default = model_def
+                                    .get("reasoning")
+                                    .and_then(|r| r.get("defaultVariant"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                models.push(ExecutorModelOption {
+                                    id: format!("{}/{}", name, model_name),
+                                    name: model_name.clone(),
+                                    thinking_default,
+                                });
+                            }
+                        }
+                        if !models.is_empty() {
+                            providers.push(ExecutorProviderOption {
+                                name: name.clone(),
+                                display_name,
+                                models,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ExecutorOptions {
+        providers,
+        current_model: crate::runner_config::get_executor_model(),
+    })
+}
+
+/// Set which model the Runner's executor uses ("provider/model", or None to
+/// use the ZCode CLI's own default). Takes effect on the next worktree.
+#[tauri::command]
+pub fn set_executor_model(model: Option<String>) -> Result<(), String> {
+    crate::runner_config::set_executor_model(model)
+}
+
 /// Get the Runner status for a specific project (global + project + effective).
 #[tauri::command]
 pub fn get_runner_project_status(
