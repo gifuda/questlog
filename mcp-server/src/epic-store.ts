@@ -466,4 +466,19 @@ export async function listEpics(cwd: string): Promise<EpicsFile | { error: strin
   return { error: result.error };
 }
 
+/**
+ * Delete a step by ID. Used for rollback when push_step_with_package fails
+ * mid-flow (step created but prepare/seal failed). Returns ok or error.
+ */
+export async function deleteStep(cwd: string, stepId: string): Promise<{ ok: true } | { error: string }> {
+  const res = await mutateEpics(cwd, (data) => {
+    const idx = data.steps.findIndex((s) => s.id === stepId);
+    if (idx === -1) return { error: `step '${stepId}' not found` };
+    data.steps.splice(idx, 1);
+    return { ok: true as const };
+  });
+  if ("error" in res) return { error: res.error };
+  return res.result;
+}
+
 export { VALID_STATUSES, VALID_STAGES };

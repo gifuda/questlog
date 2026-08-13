@@ -427,6 +427,91 @@ export async function sealTaskPackage(
   };
 }
 
+// ─── push_step_with_package (create step + seal package atomically) ───
+
+export interface PushStepWithPackageInput extends Omit<PrepareInput, "step_id"> {
+  /** Step metadata */
+  title: string;
+  description?: string;
+  depends_on?: string[];
+}
+
+export interface PushStepWithPackageResult {
+  step_id: string;
+  package_id: string;
+  plan_revision: number;
+  package_hash: string;
+  status: "sealed";
+  summary: PackageSummary;
+}
+
+/**
+ * Create a step AND seal its standard package in one atomic operation.
+ * If prepare/seal fails, the step is rolled back (deleted) so no half-created
+ * step without a package is left behind.
+ *
+ * This is the "create step = create package" flow: the conversation-side AI
+ * passes both step metadata and package parameters, and the tool internally
+ * runs pushStep → prepareTaskPackage → validateTaskPackage → sealTaskPackage.
+ */
+export async function pushStepWithPackage(
+  cwd: string,
+  input: PushStepWithPackageInput,
+): Promise<PushStepWithPackageResult | { error: string }> {
+  const { pushStep, deleteStep } = await import("./epic-store.js");
+
+  // 1. Create the step
+  const stepResult = await pushStep(cwd, {
+    epic_id: input.epic_id,
+    title: input.title,
+    description: input.description,
+    depends_on: input.depends_on,
+  });
+  if ("error" in stepResult) return { error: stepResult.error };
+  const stepId = stepResult.step.id;
+
+  // 2. Prepare the package (server resolves project_path/repo_root/base_sha)
+  const prepResult = await prepareTaskPackage(cwd, {
+    ...input,
+    step_id: stepId,
+  });
+  if ("error" in prepResult) {
+    await deleteStep(cwd, stepId);
+    return { error: `prepare failed (step rolled back): ${prepResult.error}` };
+  }
+
+  // 3. Validate
+  const valResult = await validateTaskPackage(cwd, prepResult.package_id);
+  if ("error" in valResult) {
+    await deleteStep(cwd, stepId);
+    return { error: `validate failed (step rolled back): ${valResult.error}` };
+  }
+  if (!valResult.valid) {
+    await deleteStep(cwd, stepId);
+    const errors = valResult.issues
+      .filter((i) => i.severity === "error")
+      .map((i) => `${i.field}: ${i.message}`)
+      .join("; ");
+    return { error: `validation failed (step rolled back): ${errors}` };
+  }
+
+  // 4. Seal (also writes step.package summary back to .epics.json)
+  const sealResult = await sealTaskPackage(cwd, prepResult.package_id);
+  if ("error" in sealResult) {
+    await deleteStep(cwd, stepId);
+    return { error: `seal failed (step rolled back): ${sealResult.error}` };
+  }
+
+  return {
+    step_id: stepId,
+    package_id: sealResult.package_id,
+    plan_revision: sealResult.plan_revision,
+    package_hash: sealResult.package_hash,
+    status: "sealed",
+    summary: sealResult.summary,
+  };
+}
+
 // ─── enqueue ───
 
 export interface EnqueueResult {

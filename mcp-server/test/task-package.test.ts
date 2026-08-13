@@ -28,9 +28,10 @@ import {
   validateTaskPackage,
   sealTaskPackage,
   enqueueStep,
+  pushStepWithPackage,
 } from "../src/task-package-ops.js";
 import { getPackage, savePackage, getPackagesForStep, getReadyPackages } from "../src/runtime-store.js";
-import { pushEpic, pushStep } from "../src/epic-store.js";
+import { pushEpic, pushStep, listEpics } from "../src/epic-store.js";
 
 let dir: string;
 let oldRuntime: string | undefined;
@@ -545,5 +546,63 @@ describe("prepare → validate → seal → enqueue flow", () => {
     const stored = await getPackage(prep.package_id);
     if ("error" in stored) throw new Error(stored.error);
     expect(stored.pkg.status).toBe("sealed");
+  });
+});
+
+// ─── push_step_with_package: atomic create + seal ───
+
+describe("pushStepWithPackage", () => {
+  it("creates a step with a sealed package in one call", async () => {
+    const projectDir = path.join(dir, "test-project");
+    const result = await pushStepWithPackage(projectDir, {
+      epic_id: "e1",
+      title: "Atomic step",
+      description: "Created with sealed package",
+      objective: "add a test file",
+      allowed_paths: ["test/**"],
+      acceptance_command_ids: ["test:mcp"],
+    });
+    if ("error" in result) throw new Error(result.error);
+    expect(result.status).toBe("sealed");
+    expect(result.package_hash).toHaveLength(64);
+    expect(result.step_id).toMatch(/^step_/);
+
+    // step.package summary must be written to .epics.json
+    const epics = await listEpics(projectDir);
+    if ("error" in epics) throw new Error(epics.error);
+    const step = epics.steps.find((s) => s.id === result.step_id);
+    expect(step).toBeDefined();
+    expect(step!.package).toBeDefined();
+    expect(step!.package!.package_id).toBe(result.package_id);
+    expect(step!.package!.package_hash).toBe(result.package_hash);
+
+    // package must be sealed in Runtime Store
+    const stored = await getPackage(result.package_id);
+    if ("error" in stored) throw new Error(stored.error);
+    expect(stored.pkg.status).toBe("sealed");
+  });
+
+  it("rolls back the step when validation fails", async () => {
+    const projectDir = path.join(dir, "test-project");
+    const stepsBefore = (await listEpics(projectDir));
+    const countBefore = "error" in stepsBefore ? 0 : stepsBefore.steps.length;
+
+    // Invalid acceptance command → validation fails → step must be rolled back
+    const result = await pushStepWithPackage(projectDir, {
+      epic_id: "e1",
+      title: "Should rollback",
+      objective: "evil task",
+      allowed_paths: ["src/**"],
+      acceptance_command_ids: ["rm -rf /"], // NOT in registry
+    });
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("rolled back");
+    }
+
+    // step must NOT exist in .epics.json
+    const stepsAfter = (await listEpics(projectDir));
+    const countAfter = "error" in stepsAfter ? 0 : stepsAfter.steps.length;
+    expect(countAfter).toBe(countBefore);
   });
 });

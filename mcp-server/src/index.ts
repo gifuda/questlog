@@ -439,6 +439,62 @@ server.tool(
   }
 );
 
+// ─── push_step_with_package ───
+server.tool(
+  "push_step_with_package",
+  [
+    "Create a step AND seal its standard package in one atomic operation. This is the 'create step = create package' flow: pass both step metadata and package parameters, and the tool internally runs push_step → prepare → validate → seal.",
+    "If prepare/seal fails, the step is rolled back (deleted) — no half-created step without a package is left behind.",
+    "",
+    "## When to call",
+    "- When creating a step that should be auto-executed by the Runner (the standard flow for ymos and other active projects)",
+    "- When the user says '创建步骤' or '添加步骤' and the step is meant for automated execution",
+    "- This replaces the manual push_step → prepare → validate → seal 4-step sequence",
+    "",
+    "## Field rules",
+    "- title/description/depends_on: step metadata (same as push_step)",
+    "- objective/allowed_paths/acceptance_command_ids: package parameters (same as prepare_task_package)",
+    "- The step is created as pending with a sealed package attached (step.package summary written to .epics.json)",
+    "- The package status is 'sealed' (not 'ready') — call enqueue_step separately when you want the Runner to pick it up",
+  ].join("\n"),
+  {
+    epic_id: z.string().describe("Parent epic ID"),
+    title: z.string().describe("Step title, e.g. 'S1 路径修复'"),
+    description: z.string().optional().describe("What this step covers"),
+    depends_on: z.array(z.string()).optional().describe("Step IDs this step depends on"),
+    objective: z.string().describe("Single, verifiable objective — what success looks like"),
+    allowed_paths: z.array(z.string()).describe("Glob patterns for paths the executor MAY modify"),
+    forbidden_paths: z.array(z.string()).optional().describe("Glob patterns for paths the executor MUST NOT touch"),
+    max_changed_files: z.number().optional().describe("Maximum files the executor may change (default 10)"),
+    executor_preferred: z.enum(["zcode", "manual"]).optional().describe("zcode executes automatically; manual is tracking-only"),
+    executor_timeout_seconds: z.number().optional(),
+    executor_max_attempts: z.number().optional(),
+    acceptance_command_ids: z.array(z.string()).optional().describe("Trusted command IDs from the acceptance registry"),
+    context_refs: z.array(z.string()).optional().describe("Reference docs/paths for context"),
+    project_dir: z.string().optional().describe("Override project directory (server validates)"),
+  },
+  async (input) => {
+    const resolved = await epicCwd(() => process.cwd(), input);
+    if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
+    const { pushStepWithPackage } = await import("./task-package-ops.js");
+    const result = await pushStepWithPackage(resolved.cwd, input);
+    if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `✅ Step + sealed package created atomically:`,
+          `   Step: ${result.step_id} (pending)`,
+          `   Package: ${result.package_id} (sealed, rev ${result.plan_revision}, hash ${result.package_hash.slice(0, 8)})`,
+          `   Objective: ${result.summary.objective}`,
+          ``,
+          `Next: enqueue_step to make it ready for Runner execution.`,
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
 // ─── update_step ───
 server.tool(
   "update_step",
