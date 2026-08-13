@@ -80,8 +80,11 @@ pub fn start_watching(app: &AppHandle) {
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
 
-                        // .todos.json changed → emit todos-changed
-                        if fname == FILENAME {
+                        // .todos.json changed → emit todos-changed.
+                        // starts_with (not ==) so the atomic-write pattern
+                        // (".todos.json.tmp-<uuid>" + rename) is caught even
+                        // when fsevents reports only the tmp path.
+                        if fname.starts_with(FILENAME) {
                             let project_dir = path.parent().map(|p| p.to_path_buf());
                             if let Some(dir) = project_dir {
                                 let name = dir
@@ -97,14 +100,19 @@ pub fn start_watching(app: &AppHandle) {
                             }
                         }
 
-                        // .epics.json changed → emit epics-changed (方案追踪实时刷新)
-                        if fname == EPICS_FILENAME {
+                        // .epics.json changed → emit epics-changed (方案追踪实时刷新).
+                        // starts_with (not ==) for the same atomic-write reason.
+                        if fname.starts_with(EPICS_FILENAME) {
                             let project_dir = path.parent().map(|p| p.to_path_buf());
                             if let Some(dir) = project_dir {
                                 let name = dir
                                     .file_name()
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_default();
+                                log::info!(
+                                    "watcher: .epics.json activity in '{name}' ({}) → epics-changed",
+                                    path.display()
+                                );
                                 let _ = app_handle.emit("epics-changed", &name);
                             }
                         }

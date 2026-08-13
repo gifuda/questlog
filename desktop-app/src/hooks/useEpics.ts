@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { EpicsFile, EpicStatus, GlobalEpic, StepStage } from "../types/epics";
+import { useRefreshFallback } from "./useRefreshFallback";
 
 export function useEpics(projectPath: string | null) {
   const [data, setData] = useState<EpicsFile | null>(null);
@@ -19,6 +20,9 @@ export function useEpics(projectPath: string | null) {
     const unlisten = listen<string>("epics-changed", () => { refresh(); });
     return () => { unlisten.then((f) => f()); };
   }, [refresh]);
+
+  // 兜底：watcher 事件丢失时靠轮询+窗口聚焦自愈
+  useRefreshFallback(refresh);
 
   // ── Mutations ──
   async function addEpic(title: string, opts?: { description?: string; priority?: string; dependsOn?: string[]; parentId?: string; acceptance?: string }) {
@@ -99,6 +103,8 @@ export function useEpicsGlobal() {
     const unlisten = listen<string>("epics-changed", () => { refresh(); });
     return () => { unlisten.then((f) => f()); };
   }, [refresh]);
+
+  useRefreshFallback(refresh);
 
   return { epics, refresh };
 }

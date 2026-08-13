@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ProjectInfo, TodosFile, TodoItem, ItemStatus } from "../types";
+import { useRefreshFallback } from "./useRefreshFallback";
 
 export function useProjects() {
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
@@ -21,6 +22,8 @@ export function useProjects() {
     const unlisten = listen("projects-changed", () => { refresh(); });
     return () => { unlisten.then((f) => f()); };
   }, [refresh]);
+
+  useRefreshFallback(refresh);
 
   async function removeProject(name: string): Promise<{ name: string; path: string }> {
     const [removedName, removedPath] = await invoke<[string, string]>("remove_project", { name });
@@ -71,6 +74,8 @@ export function useTodos(projectPath: string | null) {
     const unlisten = listen<string>("todos-changed", () => { refresh(); });
     return () => { unlisten.then((f) => f()); };
   }, [refresh]);
+
+  useRefreshFallback(refresh);
 
   const items = data?.items.filter((i) => i.status === "active") ?? [];
   const filtered = tagFilter ? items.filter((i) => i.tags.includes(tagFilter)) : items;
