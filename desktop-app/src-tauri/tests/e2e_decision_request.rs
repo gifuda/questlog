@@ -119,11 +119,8 @@ fn acceptance_failure_creates_decision_request() {
     // NOTE: set_project_enabled(true) starts the background Runner thread which
     // would race with the explicit poll_once() below (duplicate executions).
     // Stop it immediately — the test's explicit poll_once() must be the only poller.
-    app_lib::runner_config::set_project_enabled(
-        &repo_dir.path().to_string_lossy().to_string(),
-        true,
-    )
-    .expect("enable project for e2e");
+    app_lib::runner_config::set_project_enabled(repo_dir.path().to_string_lossy().as_ref(), true)
+        .expect("enable project for e2e");
     app_lib::runner::stop_runner();
     let mut runner = app_lib::runner::Runner::new(app_lib::runner::RunnerConfig {
         enabled: true,

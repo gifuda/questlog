@@ -164,7 +164,8 @@ impl Runner {
                 Ok(false) => continue,
                 Err(e) => log::warn!(
                     "Runner: dependency check error for {}: {} (falling through to preflight)",
-                    pkg.package_id, e
+                    pkg.package_id,
+                    e
                 ),
             }
 
@@ -1921,7 +1922,10 @@ mod tests {
         // package must be CLAIMED, not filtered.)
         let mut runner = new_runner();
         let count = runner.poll_once().unwrap();
-        assert_eq!(count, 1, "sealed package must be claimed when switches allow");
+        assert_eq!(
+            count, 1,
+            "sealed package must be claimed when switches allow"
+        );
         let remaining = execution_store::read_ready_packages().unwrap();
         assert!(remaining.is_empty(), "claimed package must be consumed");
     }
@@ -1998,7 +2002,11 @@ mod tests {
         let count = runner.poll_once().unwrap();
         assert_eq!(count, 0, "dependency-unready package must not be claimed");
         let (ready, sealed) = execution_store::count_claimable_by_status().unwrap();
-        assert_eq!((ready, sealed), (0, 1), "package must stay sealed while waiting");
+        assert_eq!(
+            (ready, sealed),
+            (0, 1),
+            "package must stay sealed while waiting"
+        );
         assert!(execution_store::list_executions().unwrap().is_empty());
 
         // Advance s1 to coded → the next poll claims s2 (consumed via

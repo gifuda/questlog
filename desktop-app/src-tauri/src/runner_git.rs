@@ -166,7 +166,7 @@ fn provision_zcode_config_from(zcode_home: &Path, worktree_path: &Path, model: &
             return;
         }
     };
-    let mut main_config: serde_json::Value = match serde_json::from_str(&raw) {
+    let main_config: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(e) => {
             log::warn!(
