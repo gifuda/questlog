@@ -238,3 +238,27 @@ S1 通过。安全基线成立：**ymos 当前完全不可被 Runner 触碰**。
 **遗留说明**：
 - 隔离属性：后续步骤 worktree 从 base_sha 创建，前步候选不可见（步骤间承接需先合并候选或重设 base）——有意设计，已确认
 - 依赖 gate：隐式 order ≥ coded（自动链）、显式 depends_on ≥ observed（人工确认）——语义分界清晰
+
+---
+
+## 更新（2026-08-13，AGENTS.md 施工纪律机制验证）
+
+### 结论：机制天然存在，选 A（接受模型自主判断）
+
+**验证方法**：封中性 objective 施工包（automation/_questlog_review_probe/ 新建 2 个探针 py，不提审查），执行后查证。
+
+**证据**（exec_1a1f56e7，候选 66b2f23e，passed）：
+- headless 施工会话自动加载 worktree 内的 ymos AGENTS.md——stdout 输出"改动分类：2 文件新建隔离探针 stub，零消费方、无现有链路影响，未触发 agent 序列"（"改动分类/agent 序列"概念仅存在于 AGENTS.md 矩阵）
+- 模型自觉跑 python3 边界测试（verifier 行为内化）
+- 候选精确（只含 2 新文件 +31 行）、主仓零触碰
+
+**机制链**：worktree（git 检出 AGENTS.md）→ headless ZCode 自动加载 → 按矩阵自主判断 → subagent 走 ~/.zcode/agents（用户 MiniMax-M3 指定，DB 实锤 zcode-adversarial-auditor 等走 custom provider）。
+
+**用户决策（选 A）**：接受模型按矩阵精神判断（系统性改动才触发全套审查，隔离 stub 等低风险不浪费 token）。Runner 不自建审查编排——AGENTS.md 是单一纪律源。
+
+### 执行器模型选择（同期上线）
+
+- App 方案页开关行新增 🤖 模型选择器：读 ~/.zcode/cli/config.json 的 provider/model，选中值存 runner-config.executor_model
+- Runner 建 worktree 时注入项目级 .zcode/config.json（model + 完整 provider def；实验确认 CLI 0.16.3 无 --model 参数、项目 config 不合并全局 provider 表、.zcode/config.json 需加入 scope 排除）
+- 思考档只读展示（CLI 0.16.3 无运行时切换；defaultVariant 不被解析）
+- 端到端验证：GLM-5.2 注入 → 日志确认 → read-only 执行 passed；用户已在 UI 实际切换过 DeepSeek
