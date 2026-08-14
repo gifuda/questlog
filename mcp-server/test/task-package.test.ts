@@ -547,6 +547,35 @@ describe("prepare → validate → seal → enqueue flow", () => {
     if ("error" in stored) throw new Error(stored.error);
     expect(stored.pkg.status).toBe("sealed");
   });
+
+  it("seal writes the step summary to the package's project, not the caller's cwd", async () => {
+    // The seal tool receives only package_id (no project_dir) — its cwd is the
+    // MCP server's own project. A cross-project package must still write its
+    // summary into the package's project_path (regression: writeback used cwd
+    // and cancelled the package with "step not found").
+    const projectDir = path.join(dir, "test-project");
+    const prep = await prepareTaskPackage(projectDir, {
+      epic_id: "e1",
+      step_id: "s1",
+      objective: "cross-project writeback",
+      allowed_paths: ["README.md"],
+      acceptance_command_ids: ["verify:candidate"],
+    });
+    if ("error" in prep) throw new Error(prep.error);
+
+    // Deliberately pass a DIFFERENT cwd (no such step there)
+    const wrongCwd = path.join(dir, "elsewhere");
+    await fs.mkdir(wrongCwd, { recursive: true });
+    const sealed = await sealTaskPackage(wrongCwd, prep.package_id);
+    if ("error" in sealed) throw new Error(sealed.error);
+
+    // Summary must land in projectDir's .epics.json
+    const epics = await listEpics(projectDir);
+    if ("error" in epics) throw new Error(epics.error);
+    const step = epics.steps.find((s) => s.id === "s1");
+    expect(step?.package?.package_id).toBe(prep.package_id);
+    expect(step?.package?.package_hash).toBe(sealed.package_hash);
+  });
 });
 
 // ─── push_step_with_package: atomic create + seal ───

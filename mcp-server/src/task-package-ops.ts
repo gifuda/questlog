@@ -404,10 +404,13 @@ export async function sealTaskPackage(
   const saveResult = await savePackage(pkg);
   if ("error" in saveResult) return { error: saveResult.error };
 
-  // Write package summary back to .epics.json on the step
+  // Write package summary back to .epics.json on the step — in the PACKAGE's
+  // project, not the caller's cwd. The seal tool only receives package_id
+  // (no project_dir), so cwd is the MCP server's own project; a cross-project
+  // package would fail writeback with "step not found" and get cancelled.
   const summary = packageSummary(pkg);
   const { updateStep } = await import("./epic-store.js");
-  const summaryResult = await updateStep(cwd, pkg.step_id, {
+  const summaryResult = await updateStep(pkg.project_path, pkg.step_id, {
     package: {
       package_id: summary.package_id,
       plan_revision: summary.plan_revision,
