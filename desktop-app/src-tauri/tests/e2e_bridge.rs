@@ -528,7 +528,9 @@ fn bridge_readonly_package_no_diff_counts_as_passed() {
                 .unwrap();
             assert_eq!(status, "passed", "read-only package must be passed");
 
-            // Step must be advanced to Verified in .epics.json
+            // Step advances straight to observed — package acceptance IS the
+            // gate (B mode): a passing execution releases dependent steps
+            // without a human confirmation hop.
             let epics_json = std::fs::read_to_string(repo_dir.path().join(".epics.json")).unwrap();
             let epics_data: serde_json::Value = serde_json::from_str(&epics_json).unwrap();
             let stage = epics_data["steps"]
@@ -539,7 +541,7 @@ fn bridge_readonly_package_no_diff_counts_as_passed() {
                 .unwrap()["stage"]
                 .as_str()
                 .unwrap();
-            assert_eq!(stage, "verified", "step must advance to Verified");
+            assert_eq!(stage, "observed", "step must advance to observed (B mode)");
         }
         Err(e) => {
             panic!("Runner crashed: {}", e);

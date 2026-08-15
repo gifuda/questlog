@@ -170,6 +170,55 @@ impl Runner {
             }
 
             let executions = execution_store::list_executions()?;
+
+            // Auto re-anchor: a sealed package whose base SHA drifted (the
+            // project moved after sealing — normal for an actively-developed
+            // repo) is re-based onto the current HEAD instead of being
+            // claimed and blocked. Content fields are untouched; only
+            // packages with no execution history are eligible.
+            let pkg = {
+                let drifted = match runner_git::read_head_sha(&PathBuf::from(&pkg.repo_root)) {
+                    Ok(head) => head != pkg.base_sha,
+                    Err(_) => false, // unreachable repo fails preflight anyway
+                };
+                if drifted
+                    && !executions
+                        .iter()
+                        .any(|e| e.package_id == pkg.package_id)
+                {
+                    match runner_git::read_head_sha(&PathBuf::from(&pkg.repo_root)) {
+                        Ok(head) => {
+                            match execution_store::reanchor_package(
+                                &pkg.package_id,
+                                &head,
+                                &pkg.project_path,
+                                &pkg.step_id,
+                            ) {
+                                Ok(reshored) => {
+                                    log::info!(
+                                        "Runner: re-anchored {} to HEAD {} (rev {})",
+                                        pkg.package_id,
+                                        &head[..8.min(head.len())],
+                                        reshored.plan_revision
+                                    );
+                                    reshored
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "Runner: re-anchor failed for {}: {} (claiming as-is)",
+                                        pkg.package_id, e
+                                    );
+                                    pkg
+                                }
+                            }
+                        }
+                        Err(_) => pkg,
+                    }
+                } else {
+                    pkg
+                }
+            };
+
             if executions.iter().any(|execution| {
                 execution.package_id == pkg.package_id
                     && matches!(
@@ -242,10 +291,15 @@ impl Runner {
                     match final_status {
                         ExecutionStatus::Passed => {
                             execution_store::mark_package_status(&pkg.package_id, "passed")?;
+                            // Package acceptance IS the gate (user-directed
+                            // B mode): a passing execution advances the step
+                            // straight to observed, releasing dependent steps
+                            // without a human confirmation hop. Deviations
+                            // (blocked/failed) never reach here.
                             Self::advance_step_stage(
                                 &pkg.project_path,
                                 &pkg.step_id,
-                                StepStage::Verified,
+                                StepStage::Observed,
                             );
                         }
                         ExecutionStatus::Cancelled => {
@@ -273,7 +327,7 @@ impl Runner {
                                 Self::advance_step_stage(
                                     &pkg.project_path,
                                     &pkg.step_id,
-                                    StepStage::Verified,
+                                    StepStage::Observed,
                                 );
                             }
                             ExecutionStatus::Cancelled => {
@@ -1209,11 +1263,12 @@ impl Runner {
     ///
     /// Mapping:
     ///   candidate commit produced (but acceptance not yet verified) → coded
-    ///   acceptance passed → verified
+    ///   acceptance passed → observed (package acceptance IS the gate —
+    ///     user-directed B mode; dependent steps release automatically)
     ///   CLI failed / scope violation / no diff → leave stage unchanged
     ///
-    /// The Runner never auto-advances to `observed` — that requires cross-session
-    /// human confirmation per the plan.
+    /// Deviating outcomes never reach the observed advancement — they end
+    /// blocked/failed and surface as DecisionRequests for a human.
     fn advance_step_stage(project_path: &str, step_id: &str, stage: StepStage) {
         let dir = PathBuf::from(project_path);
         match crate::epic_store::mutate_epics(&dir, |data| {
@@ -1941,6 +1996,103 @@ mod tests {
         );
         let remaining = execution_store::read_ready_packages().unwrap();
         assert!(remaining.is_empty(), "claimed package must be consumed");
+    }
+
+    #[test]
+    fn reanchor_package_rebases_to_new_head() {
+        use execution_store::reanchor_package;
+
+        let (dir, _guard) = setup();
+        let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        // Sealed package at a stale base + step summary pointing at it
+        write_package_fixture(
+            std::path::Path::new(&runtime),
+            project.to_str().unwrap(),
+            "sealed",
+            "zcode",
+            "s1",
+        );
+        write_epics_fixture(
+            &project,
+            Some(true),
+            serde_json::json!([{
+                "id": "s1", "epic_id": "epic_gate", "title": "t", "order": 0,
+                "depends_on": [], "stage": "pending",
+                "created_at": "2026-08-11T00:00:00Z",
+                "updated_at": "2026-08-11T00:00:00Z",
+                "package": {
+                    "package_id": "pkg_gate",
+                    "plan_revision": 1,
+                    "package_hash": "fake_hash",
+                    "objective": "gate test task",
+                    "executor": "zcode",
+                    "status": "sealed"
+                }
+            }]),
+        );
+
+        let summary =
+            reanchor_package("pkg_gate", "newhead123", project.to_str().unwrap(), "s1").unwrap();
+        assert_eq!(summary.base_sha, "newhead123");
+        assert_eq!(summary.plan_revision, 2);
+        assert_eq!(summary.package_hash, summary.computed_hash);
+
+        // Old row superseded, exactly one claimable row remains
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(&runtime).join("packages.json"),
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let rows: Vec<&serde_json::Value> = json["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["package_id"].as_str() == Some("pkg_gate"))
+            .collect();
+        assert_eq!(rows.len(), 2, "append-only: old row + new revision");
+        assert_eq!(rows[0]["status"].as_str(), Some("superseded"));
+        assert_eq!(rows[1]["status"].as_str(), Some("sealed"));
+        assert_eq!(rows[1]["base_sha"].as_str(), Some("newhead123"));
+
+        // Step summary kept in sync
+        let epics = crate::epic_store::read_epics(&project).unwrap();
+        let step = epics.steps.iter().find(|s| s.id == "s1").unwrap();
+        let pkg = step.package.as_ref().unwrap();
+        assert_eq!(pkg.plan_revision, 2);
+        assert_eq!(pkg.package_hash, summary.package_hash);
+
+        // Claimable set reflects the re-anchored revision
+        let ready = execution_store::read_ready_packages().unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].base_sha, "newhead123");
+    }
+
+    #[test]
+    fn reanchor_refuses_packages_with_history_or_terminal_status() {
+        let (dir, _guard) = setup();
+        let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        write_package_fixture(
+            std::path::Path::new(&runtime),
+            project.to_str().unwrap(),
+            "blocked",
+            "zcode",
+            "s1",
+        );
+        let err = execution_store::reanchor_package(
+            "pkg_gate",
+            "x",
+            project.to_str().unwrap(),
+            "s1",
+        )
+        .unwrap_err();
+        assert!(err.contains("only sealed/ready"), "got: {err}");
     }
 
     #[test]

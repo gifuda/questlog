@@ -1062,6 +1062,105 @@ pub fn compute_package_hash(package: &serde_json::Value) -> Result<String, Strin
     Ok(crate::attempt_bundle::sha256_hex(canonical.as_bytes()))
 }
 
+/// Auto re-anchor a sealed/ready package to a new base SHA: append a new
+/// revision row (base_sha updated, plan_revision +1, package_hash recomputed),
+/// supersede the old row, and sync the step's package summary in .epics.json.
+///
+/// This is a mechanical content-preserving transform — objective/scope/
+/// authority fields are untouched — so the "seal → HEAD moved → blocked →
+/// manually reseal" dance disappears: the Runner re-anchors at claim time.
+///
+/// Only packages with NO execution history are eligible (a package that was
+/// attempted must be revised by a human, not silently re-based).
+/// Returns the fresh TaskPackageSummary for the new revision.
+pub fn reanchor_package(
+    package_id: &str,
+    new_base_sha: &str,
+    project_path: &str,
+    step_id: &str,
+) -> Result<TaskPackageSummary, String> {
+    let path = packages_path();
+    if !path.exists() {
+        return Err("packages.json missing".to_string());
+    }
+    file_lock::with_file_lock(&path, || {
+        let raw = std::fs::read_to_string(&path).map_err(|e| format!("read: {e}"))?;
+        let mut json: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("parse: {e}"))?;
+        let packages = json
+            .get_mut("packages")
+            .and_then(|p| p.as_array_mut())
+            .ok_or("packages.json missing packages array")?;
+
+        // Latest non-superseded row for this id must be claimable
+        let mut current: Option<(usize, serde_json::Value)> = None;
+        for (idx, pkg) in packages.iter().enumerate() {
+            if pkg.get("package_id").and_then(|v| v.as_str()) != Some(package_id) {
+                continue;
+            }
+            if pkg.get("status").and_then(|v| v.as_str()) == Some("superseded") {
+                continue;
+            }
+            // Convention: one claimable row per id; keep the last seen.
+            current = Some((idx, pkg.clone()));
+        }
+        let (idx, mut row) = current.ok_or_else(|| format!("package '{package_id}' not found"))?;
+        let status = row
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !matches!(status.as_str(), "sealed" | "ready") {
+            return Err(format!(
+                "cannot re-anchor package in status '{status}' (only sealed/ready)"
+            ));
+        }
+
+        // New revision: update base, bump revision, recompute hash.
+        let revision = row.get("plan_revision").and_then(|v| v.as_u64()).unwrap_or(1) + 1;
+        row["base_sha"] = serde_json::Value::String(new_base_sha.to_string());
+        row["plan_revision"] = serde_json::Value::from(revision);
+        let hash = compute_package_hash(&row)?;
+        row["package_hash"] = serde_json::Value::String(hash.clone());
+
+        // Supersede the old row, append the new one.
+        packages[idx]["status"] = serde_json::Value::String("superseded".to_string());
+        row["status"] = serde_json::Value::String(status);
+        packages.push(row.clone());
+
+        let tmp = path.with_extension("json.tmp-bridge");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&json).unwrap())
+            .map_err(|e| format!("write tmp: {e}"))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
+
+        let mut summary = TaskPackageSummary::from(
+            serde_json::from_value::<RawTaskPackage>(row.clone())
+                .map_err(|e| format!("parse re-anchored row: {e}"))?,
+        );
+        summary.computed_hash = hash.clone();
+
+        // Keep the step's package summary in .epics.json in sync — the
+        // claim-time preflight rejects packages whose summary drifted.
+        crate::epic_store::mutate_epics(
+            &std::path::PathBuf::from(project_path),
+            |data| {
+                let step = data
+                    .steps
+                    .iter_mut()
+                    .find(|s| s.id == step_id)
+                    .ok_or_else(|| format!("step '{step_id}' not found"))?;
+                if let Some(summary) = step.package.as_mut() {
+                    summary.plan_revision = revision as u32;
+                    summary.package_hash = hash.clone();
+                }
+                Ok(())
+            },
+        )?;
+
+        Ok(summary)
+    })
+}
+
 /// Mark a package as consumed (status → "passed" or "failed") in packages.json.
 /// This prevents the Runner from re-picking the same package.
 pub fn mark_package_status(package_id: &str, status: &str) -> Result<(), String> {
