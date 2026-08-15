@@ -1092,52 +1092,94 @@ pub struct ExecutorOptions {
     pub current_thinking: Option<String>,
 }
 
-/// List the executor model options parsed from ~/.zcode/cli/config.json plus
-/// the currently selected model. Read failures degrade to empty options — the
-/// UI then shows "no models configured".
+/// Parse one provider's models into ExecutorModelOption entries. Shared by
+/// the v2 and v1 config readers.
+fn executor_models_from_provider(provider_key: &str, def: &serde_json::Value) -> Vec<ExecutorModelOption> {
+    let mut models = Vec::new();
+    if let Some(model_map) = def.get("models").and_then(|m| m.as_object()) {
+        for (model_name, model_def) in model_map {
+            let reasoning = model_def.get("reasoning");
+            let thinking_default = ["defaultLevel", "defaultVariant"]
+                .iter()
+                .find_map(|key| {
+                    reasoning
+                        .and_then(|r| r.get(key))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
+            let thinking_levels =
+                crate::runner_git::thinking_levels_for(model_name, model_def);
+            models.push(ExecutorModelOption {
+                id: format!("{}/{}", provider_key, model_name),
+                name: model_name.clone(),
+                thinking_levels,
+                thinking_default,
+            });
+        }
+    }
+    models
+}
+
+/// List the executor model options from the user's ZCode configs plus the
+/// currently selected model. Primary source is `~/.zcode/v2/config.json`
+/// custom providers (where the ZCode desktop app writes user-managed models);
+/// builtin:* providers are skipped (OAuth-based, not standalone-usable by the
+/// headless CLI). Falls back to the legacy `~/.zcode/cli/config.json` when
+/// the v2 config has no custom providers. Read failures degrade to empty
+/// options — the UI then shows "no models configured".
 #[tauri::command]
 pub fn get_executor_options() -> Result<ExecutorOptions, String> {
     let mut providers: Vec<ExecutorProviderOption> = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
-        let path = home.join(".zcode").join("cli").join("config.json");
-        if let Ok(raw) = std::fs::read_to_string(&path) {
+        // v2: custom providers only (builtin:* rely on OAuth credentials the
+        // headless CLI can't use standalone).
+        let v2_path = home.join(".zcode").join("v2").join("config.json");
+        if let Ok(raw) = std::fs::read_to_string(&v2_path) {
             if let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(provider_map) = config.get("provider").and_then(|p| p.as_object()) {
-                    for (name, def) in provider_map {
+                    for (key, def) in provider_map {
+                        if key.starts_with("builtin:") {
+                            continue;
+                        }
                         let display_name = def
                             .get("name")
                             .and_then(|n| n.as_str())
-                            .unwrap_or(name)
+                            .unwrap_or(key)
                             .to_string();
-                        let mut models = Vec::new();
-                        if let Some(model_map) = def.get("models").and_then(|m| m.as_object()) {
-                            for (model_name, model_def) in model_map {
-                                let reasoning = model_def.get("reasoning");
-                                let thinking_default = ["defaultLevel", "defaultVariant"]
-                                    .iter()
-                                    .find_map(|key| {
-                                        reasoning
-                                            .and_then(|r| r.get(key))
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string())
-                                    });
-                                let thinking_levels =
-                                    crate::runner_git::thinking_levels_for(model_name, model_def);
-                                models.push(ExecutorModelOption {
-                                    id: format!("{}/{}", name, model_name),
-                                    name: model_name.clone(),
-                                    thinking_levels,
-                                    thinking_default,
-                                });
-                            }
-                        }
+                        let models = executor_models_from_provider(key, def);
                         if !models.is_empty() {
                             providers.push(ExecutorProviderOption {
-                                name: name.clone(),
+                                name: key.clone(),
                                 display_name,
                                 models,
                             });
+                        }
+                    }
+                }
+            }
+        }
+
+        // v1 fallback: only when the v2 config yielded nothing.
+        if providers.is_empty() {
+            let path = home.join(".zcode").join("cli").join("config.json");
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(provider_map) = config.get("provider").and_then(|p| p.as_object()) {
+                        for (name, def) in provider_map {
+                            let display_name = def
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or(name)
+                                .to_string();
+                            let models = executor_models_from_provider(name, def);
+                            if !models.is_empty() {
+                                providers.push(ExecutorProviderOption {
+                                    name: name.clone(),
+                                    display_name,
+                                    models,
+                                });
+                            }
                         }
                     }
                 }

@@ -225,8 +225,35 @@ pub fn thinking_levels_for(model_name: &str, model_def: &serde_json::Value) -> V
     vec!["high".into(), "max".into()]
 }
 
+/// Resolve the provider def for `provider_name` from the user's ZCode
+/// configs: `~/.zcode/v2/config.json` (the desktop app — where the user
+/// manages models) first, then `~/.zcode/cli/config.json` (the legacy
+/// headless CLI config) as fallback. Returns (def, "v2"|"v1") or None.
+fn resolve_provider_def(
+    zcode_home: &Path,
+    provider_name: &str,
+) -> Option<(serde_json::Value, &'static str)> {
+    for (rel, tag) in [
+        (".zcode/v2/config.json", "v2"),
+        (".zcode/cli/config.json", "v1"),
+    ] {
+        if let Ok(raw) = std::fs::read_to_string(zcode_home.join(rel)) {
+            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(def) = config
+                    .get("provider")
+                    .and_then(|p| p.get(provider_name))
+                    .cloned()
+                {
+                    return Some((def, tag));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Testable core of `provision_zcode_config`: reads the ZCode config from
-/// `<zcode_home>/.zcode/cli/config.json` instead of the real home.
+/// `<zcode_home>/.zcode/{v2,cli}/config.json` instead of the real home.
 fn provision_zcode_config_from(
     zcode_home: &Path,
     worktree_path: &Path,
@@ -242,38 +269,14 @@ fn provision_zcode_config_from(
         return;
     }
 
-    let main_config_path = zcode_home.join(".zcode").join("cli").join("config.json");
-    let raw = match std::fs::read_to_string(&main_config_path) {
-        Ok(raw) => raw,
-        Err(e) => {
-            log::warn!(
-                "cannot read {} ({}); executor falls back to CLI default model",
-                main_config_path.display(),
-                e
-            );
-            return;
+    let provider_def = match resolve_provider_def(zcode_home, provider_name) {
+        Some((def, tag)) => {
+            log::debug!("executor provider '{}' resolved from {} config", provider_name, tag);
+            def
         }
-    };
-    let main_config: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!(
-                "corrupt zcode config ({}); executor falls back to CLI default model",
-                e
-            );
-            return;
-        }
-    };
-
-    let provider_def = main_config
-        .get("provider")
-        .and_then(|p| p.get(provider_name))
-        .cloned();
-    let provider_def = match provider_def {
-        Some(def) => def,
         None => {
             log::warn!(
-                "provider '{}' not found in zcode config; executor falls back to CLI default model",
+                "provider '{}' not found in zcode configs (v2/cli); executor falls back to CLI default model",
                 provider_name
             );
             return;
@@ -1191,6 +1194,72 @@ fn provision_zcode_config_skips_unknown_provider_without_panic() {
     // Unknown provider → warn + skip, no file written, no panic
     provision_zcode_config_from(home.path(), worktree.path(), "ghost/model-x", None);
     assert!(!worktree.path().join(".zcode").join("config.json").exists());
+}
+
+#[test]
+fn provision_prefers_v2_config_over_v1() {
+    // The ZCode desktop app writes user-managed models to
+    // ~/.zcode/v2/config.json under uuid provider keys; the headless CLI's
+    // legacy config is ~/.zcode/cli/config.json. Provisioning must resolve
+    // v2 first so the selector's models (v2) and the injected def match.
+    let home = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+
+    let v2_config = serde_json::json!({
+        "provider": {
+            "e7a18242-b22b-43bc-844f-00d6921ffcbd": {
+                "kind": "anthropic",
+                "name": "Deepseek",
+                "source": "custom",
+                "options": {"apiKey": "v2-key", "baseURL": "https://api.deepseek.com/anthropic"},
+                "models": {
+                    "deepseek-v4-pro": {"reasoning": {"variants": ["off", "high", "max"], "defaultVariant": "max"}}
+                }
+            }
+        }
+    });
+    let v1_config = serde_json::json!({
+        "provider": {
+            "deepseek": {
+                "kind": "anthropic",
+                "options": {"apiKey": "v1-key", "baseURL": "https://v1.example"},
+                "models": {"deepseek-v4-flash": {}}
+            }
+        }
+    });
+    for (rel, cfg) in [
+        (".zcode/v2/config.json", &v2_config),
+        (".zcode/cli/config.json", &v1_config),
+    ] {
+        let p = home.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, cfg.to_string()).unwrap();
+    }
+
+    // v2 provider (uuid key): injected from v2 with v2 credentials
+    provision_zcode_config_from(
+        home.path(),
+        worktree.path(),
+        "e7a18242-b22b-43bc-844f-00d6921ffcbd/deepseek-v4-pro",
+        None,
+    );
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(worktree.path().join(".zcode").join("config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        written["provider"]["e7a18242-b22b-43bc-844f-00d6921ffcbd"]["options"]["apiKey"],
+        "v2-key"
+    );
+
+    // v1-only provider (legacy key): still resolved from v1 fallback
+    let worktree2 = tempfile::tempdir().unwrap();
+    provision_zcode_config_from(home.path(), worktree2.path(), "deepseek/deepseek-v4-flash", None);
+    let written2: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(worktree2.path().join(".zcode").join("config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written2["provider"]["deepseek"]["options"]["apiKey"], "v1-key");
 }
 
 #[test]
