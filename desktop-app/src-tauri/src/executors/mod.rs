@@ -71,6 +71,21 @@ pub trait Executor {
         timeout: Duration,
     ) -> Result<ExecutionHandle, String>;
 
+    /// Start a continuation of a previous CLI session (timeout fallback):
+    /// resume the session's context instead of re-running the analysis from
+    /// scratch. Default: no resume support — delegates to `start`.
+    fn start_with_resume(
+        &mut self,
+        task: &str,
+        session_id: &str,
+        worktree_path: &Path,
+        sandbox: &str,
+        timeout: Duration,
+    ) -> Result<ExecutionHandle, String> {
+        let _ = session_id;
+        self.start(task, worktree_path, sandbox, timeout)
+    }
+
     /// Wait for the execution to complete and parse events.
     fn wait_and_collect(&mut self, handle: ExecutionHandle) -> Result<Vec<ExecutorEvent>, String>;
 

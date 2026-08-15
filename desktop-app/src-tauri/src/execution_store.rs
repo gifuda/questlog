@@ -717,6 +717,22 @@ pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
             parent_exec_id
         ));
     }
+    // Idempotency (adversarial review G4): the Runner's timeout auto-retry
+    // and a human resolve("retry")/retry_execution can race. If a queued
+    // child of this parent already exists, return it instead of creating a
+    // duplicate — otherwise parallel retries multiply queued executions.
+    {
+        let executions = list_executions()?;
+        if let Some(existing) = executions.iter().find(|e| {
+            e.parent_attempt_id.as_deref() == Some(parent.id.as_str())
+                && matches!(
+                    e.status,
+                    ExecutionStatus::Queued | ExecutionStatus::Running
+                )
+        }) {
+            return Ok(existing.id.clone());
+        }
+    }
     let package = read_package(&parent.package_id)?;
     if parent.attempt_no >= package.max_attempts.max(1) {
         return Err(format!(

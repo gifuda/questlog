@@ -174,17 +174,20 @@ impl Runner {
             // Auto re-anchor: a sealed package whose base SHA drifted (the
             // project moved after sealing — normal for an actively-developed
             // repo) is re-based onto the current HEAD instead of being
-            // claimed and blocked. Content fields are untouched; only
-            // packages with no execution history are eligible.
+            // claimed and blocked. Content fields are untouched. Eligible
+            // unless this package already SUCCEEDED once (a passed execution
+            // is the trust anchor; failed/timeout attempts don't block —
+            // their retry re-anchors fresh, which also disables resume via
+            // the base-mismatch check).
             let pkg = {
                 let drifted = match runner_git::read_head_sha(&PathBuf::from(&pkg.repo_root)) {
                     Ok(head) => head != pkg.base_sha,
                     Err(_) => false, // unreachable repo fails preflight anyway
                 };
                 if drifted
-                    && !executions
-                        .iter()
-                        .any(|e| e.package_id == pkg.package_id)
+                    && !executions.iter().any(|e| {
+                        e.package_id == pkg.package_id && e.status == ExecutionStatus::Passed
+                    })
                 {
                     match runner_git::read_head_sha(&PathBuf::from(&pkg.repo_root)) {
                         Ok(head) => {
@@ -257,16 +260,32 @@ impl Runner {
             // Process the execution
             let result = self.process_execution(&exec_id, &pkg);
 
-            // Clean up the execution worktree regardless of outcome — every
-            // result leaves a full checkout in the temp dir plus a git
-            // worktree registration. Remove both so repeated executions don't
-            // accumulate disk usage or stale registrations.
+            // Worktree cleanup: removed on every terminal outcome EXCEPT a
+            // timeout that scheduled an auto-retry — the retry resumes the
+            // same session in the same worktree, so the scene must survive.
+            let mut keep_worktree = false;
             if let Ok(final_exec) = execution_store::get_execution(&exec_id) {
-                if let Some(worktree_path) = &final_exec.worktree_path {
-                    let _ = runner_git::remove_worktree(
-                        &PathBuf::from(&pkg.repo_root),
-                        Path::new(worktree_path),
-                    );
+                if final_exec.status == ExecutionStatus::TimedOut {
+                    // Auto-retry child (queued/running) exists for this package?
+                    if let Ok(all) = execution_store::list_executions() {
+                        keep_worktree = all.iter().any(|e| {
+                            e.parent_attempt_id.as_deref() == Some(final_exec.id.as_str())
+                                && matches!(
+                                    e.status,
+                                    ExecutionStatus::Queued | ExecutionStatus::Running
+                                )
+                        });
+                    }
+                }
+            }
+            if !keep_worktree {
+                if let Ok(final_exec) = execution_store::get_execution(&exec_id) {
+                    if let Some(worktree_path) = &final_exec.worktree_path {
+                        let _ = runner_git::remove_worktree(
+                            &PathBuf::from(&pkg.repo_root),
+                            Path::new(worktree_path),
+                        );
+                    }
                 }
             }
 
@@ -400,7 +419,32 @@ impl Runner {
                         ExecutionStatus::TimedOut,
                         Some("timeout"),
                     )?;
-                    execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                    // Budget governance: a timeout is a budget signal, not a
+                    // defect. While attempts remain, auto-schedule a retry
+                    // (with exponentially escalated budget) instead of
+                    // blocking the package and paging a human. Only an
+                    // exhausted budget becomes a DecisionRequest.
+                    let attempt_no = execution_store::get_execution(execution_id)
+                        .map(|e| e.attempt_no)
+                        .unwrap_or(1);
+                    if (attempt_no as u64) < pkg.max_attempts.max(1) as u64 {
+                        match execution_store::create_retry_attempt(execution_id) {
+                            Ok(child_id) => {
+                                log::info!(
+                                    "Runner: timeout on attempt {} → auto-retry scheduled ({}), worktree kept for resume",
+                                    attempt_no, child_id
+                                );
+                                // create_retry_attempt already flipped the
+                                // package back to ready.
+                            }
+                            Err(e) => {
+                                log::warn!("Runner: auto-retry failed for {execution_id}: {e}");
+                                execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                            }
+                        }
+                    } else {
+                        execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                    }
                 }
                 Ok(RunResult::Cancelled { execution_id }) => {
                     execution_store::finish_execution(
@@ -508,6 +552,77 @@ impl Runner {
         }
     }
 
+    /// Create a fresh worktree for an execution and record it.
+    fn fresh_worktree(
+        repo_root: &Path,
+        base_sha: &str,
+        exec_id: &str,
+        bundle_dir: &Path,
+    ) -> Result<(PathBuf, String), String> {
+        let branch_name = format!("questlog/{}", exec_id);
+        let worktree = runner_git::create_worktree(repo_root, base_sha, &branch_name)?;
+        execution_store::update_execution(
+            exec_id,
+            ExecutionUpdates {
+                worktree_path: Some(worktree.path.to_string_lossy().to_string()),
+                branch: Some(branch_name.clone()),
+                ..Default::default()
+            },
+        )?;
+        let _ = attempt_bundle::append_event(
+            bundle_dir,
+            &serde_json::json!({
+                "event": "worktree_created",
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "worktree_path": worktree.path.to_string_lossy(),
+            }),
+        );
+        Ok((worktree.path, branch_name))
+    }
+
+    /// Per-attempt execution budget: the package's base timeout grows
+    /// exponentially with each attempt (capped at 2h). A timeout means the
+    /// estimate was too small, not that the work is impossible — retries
+    /// get more room. Purely runtime: never written back into the package
+    /// (which would break the sealed hash).
+    fn effective_timeout_secs(base: u64, attempt_no: u32) -> u64 {
+        let exp = attempt_no.saturating_sub(1).min(8);
+        base.saturating_mul(1u64 << exp).min(7200)
+    }
+
+    /// Resolve the CLI session id for a finished execution. The headless CLI
+    /// does NOT print its session id, but it always records a row in the
+    /// ZCode session DB keyed by the (resolved) working directory — look it
+    /// up there, excluding subagent sessions. Best-effort: any failure means
+    /// "no resume", never a hard error.
+    fn resolve_cli_session(worktree_path: &Path) -> Option<String> {
+        let dir = worktree_path.canonicalize().unwrap_or_else(|_| worktree_path.to_path_buf());
+        let dir = dir.to_string_lossy().replace('\'', "''");
+        let home = dirs::home_dir()?;
+        let db = home.join(".zcode").join("cli").join("db").join("db.sqlite");
+        if !db.exists() {
+            return None;
+        }
+        let sql = format!(
+            "SELECT id FROM session WHERE directory = '{}' AND id NOT LIKE 'sess_subagent%' ORDER BY time_created DESC LIMIT 1",
+            dir
+        );
+        let out = std::process::Command::new("sqlite3")
+            .arg(db)
+            .arg(&sql)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let sid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if sid.starts_with("sess_") {
+            Some(sid)
+        } else {
+            None
+        }
+    }
+
     /// Process a single execution: acquire lease → worktree → CLI → verify → commit.
     ///
     /// This method creates an AttemptBundle at the start and writes evidence
@@ -596,26 +711,65 @@ impl Runner {
         }
 
         // 2. Create worktree
-        let branch_name = format!("questlog/{}", exec.id);
-        let worktree = runner_git::create_worktree(&repo_root, &pkg.base_sha, &branch_name)?;
-
-        execution_store::update_execution(
-            &exec.id,
-            ExecutionUpdates {
-                worktree_path: Some(worktree.path.to_string_lossy().to_string()),
-                branch: Some(branch_name.clone()),
-                ..Default::default()
-            },
-        )?;
-
-        let _ = attempt_bundle::append_event(
-            &bundle_dir,
-            &serde_json::json!({
-                "event": "worktree_created",
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "worktree_path": worktree.path.to_string_lossy(),
-            }),
-        );
+        // 2. Worktree — or a resume of the parent's interrupted scene.
+        // A timeout auto-retry whose parent left a resumable CLI session AND
+        // an intact worktree at the SAME base reuses both: the session
+        // context (analysis already paid for) plus the half-done work. Any
+        // mismatch (no session, worktree gone, base re-anchored) falls back
+        // to a fresh worktree — resume is best-effort, never blocking.
+        let mut resume: Option<String> = None;
+        let (worktree_path, _branch_name) = if let Some(parent_id) = exec.parent_attempt_id.clone() {
+            let parent = execution_store::get_execution(&parent_id)?;
+            let eligible = parent.package_id == pkg.package_id
+                && parent.base_sha == pkg.base_sha
+                && parent
+                    .cli_session
+                    .as_deref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+            if eligible {
+                if let Some(wtp) = parent.worktree_path.clone() {
+                    let path = PathBuf::from(&wtp);
+                    if path.is_dir() {
+                        let branch = parent.branch.clone().unwrap_or_default();
+                        execution_store::update_execution(
+                            &exec.id,
+                            ExecutionUpdates {
+                                worktree_path: Some(wtp),
+                                branch: Some(branch.clone()),
+                                ..Default::default()
+                            },
+                        )?;
+                        let _ = attempt_bundle::append_event(
+                            &bundle_dir,
+                            &serde_json::json!({
+                                "event": "resumed_from_parent",
+                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                "parent_attempt_id": parent_id,
+                                "cli_session": parent.cli_session,
+                                "worktree_path": path.to_string_lossy(),
+                            }),
+                        );
+                        resume = parent.cli_session.clone();
+                        (path, branch)
+                    } else {
+                        Self::fresh_worktree(&repo_root, &pkg.base_sha, &exec.id, &bundle_dir)?
+                    }
+                } else {
+                    Self::fresh_worktree(&repo_root, &pkg.base_sha, &exec.id, &bundle_dir)?
+                }
+            } else {
+                // Parent kept its worktree for a resume that can no longer
+                // happen (base re-anchored / no session) — clean the orphan
+                // scene, then start fresh.
+                if let Some(wtp) = &parent.worktree_path {
+                    let _ = runner_git::remove_worktree(&repo_root, Path::new(wtp));
+                }
+                Self::fresh_worktree(&repo_root, &pkg.base_sha, &exec.id, &bundle_dir)?
+            }
+        } else {
+            Self::fresh_worktree(&repo_root, &pkg.base_sha, &exec.id, &bundle_dir)?
+        };
 
         // 3. Production policy: only ZCode may execute. Codex is allowed to
         // create/push packages through MCP but is never a Runner executor;
@@ -642,17 +796,28 @@ impl Runner {
             self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
             return Ok(result);
         }
-        let timeout = Duration::from_secs(pkg.timeout_seconds.max(1));
-        let mut handle = executor.start(
-            &pkg.objective,
-            &worktree.path,
-            if pkg.sandbox.is_empty() {
-                "workspace-write"
-            } else {
-                &pkg.sandbox
-            },
-            timeout,
-        )?;
+        // Budget governance: each retry attempt gets an exponentially larger
+        // budget (capped) — a timeout means the estimate was small, not that
+        // the work is impossible.
+        let timeout = Duration::from_secs(Self::effective_timeout_secs(
+            pkg.timeout_seconds,
+            exec.attempt_no,
+        ));
+        let sandbox = if pkg.sandbox.is_empty() {
+            "workspace-write"
+        } else {
+            &pkg.sandbox
+        };
+        let mut handle = if let Some(sid) = &resume {
+            let task = format!(
+                "{}\n\n[续接说明] 你在恢复一个因超时中断的会话：已完成的分析和阶段不要重做，先查看工作区当前状态再继续。剩余预算约 {} 秒。",
+                pkg.objective,
+                timeout.as_secs()
+            );
+            executor.start_with_resume(&task, sid, &worktree_path, sandbox, timeout)?
+        } else {
+            executor.start(&pkg.objective, &worktree_path, sandbox, timeout)?
+        };
         let stdout_path = Some(handle.stdout_path.clone());
         let stderr_path = Some(handle.stderr_path.clone());
         let supervision = Self::supervise_execution(&mut handle, &exec.id, timeout)?;
@@ -663,6 +828,25 @@ impl Runner {
             .find(|event| event.event_type == "execution.completed")
             .and_then(|event| event.success)
             .unwrap_or(false);
+
+        // Persist the CLI session id so a timeout auto-retry can --resume it.
+        // The events rarely carry it (the CLI doesn't print it) — the session
+        // DB lookup by worktree directory is the reliable path.
+        {
+            let sid = events
+                .iter()
+                .find_map(|event| event.session_id.clone())
+                .or_else(|| Self::resolve_cli_session(&worktree_path));
+            if let Some(sid) = sid {
+                let _ = execution_store::update_execution(
+                    &exec.id,
+                    ExecutionUpdates {
+                        cli_session: Some(sid),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
 
         // ─── AttemptBundle: copy CLI output + write events ───
         let (stdout_ref, stderr_ref) = attempt_bundle::copy_cli_output(
@@ -731,7 +915,7 @@ impl Runner {
         }
 
         // 5. Check for changes
-        let changed = runner_git::get_changed_paths(&worktree.path, &pkg.base_sha)?;
+        let changed = runner_git::get_changed_paths(&worktree_path, &pkg.base_sha)?;
         if changed.is_empty() {
             let result = RunResult::NoDiff {
                 execution_id: exec.id.clone(),
@@ -775,7 +959,7 @@ impl Runner {
 
         // 7. Create candidate commit with QuestLog trailers
         let candidate_sha = runner_git::create_candidate_commit(
-            &worktree.path,
+            &worktree_path,
             &pkg.epic_id,
             &pkg.step_id,
             &pkg.package_id,
@@ -807,7 +991,7 @@ impl Runner {
 
         // ─── AttemptBundle: write diff patch + candidate info ───
         manifest.diff_ref =
-            attempt_bundle::write_diff_patch(&bundle_dir, &worktree.path, &pkg.base_sha)?;
+            attempt_bundle::write_diff_patch(&bundle_dir, &worktree_path, &pkg.base_sha)?;
         manifest.candidate_ref = attempt_bundle::write_candidate(
             &bundle_dir,
             &CandidateInfo {
@@ -857,7 +1041,7 @@ impl Runner {
         let mut verifier_results: Vec<VerifierResult> = Vec::new();
         for cmd_id in &pkg.acceptance_command_ids {
             let vr =
-                resolve_and_run_acceptance_verbose(cmd_id, &worktree.path, Some(&candidate_sha));
+                resolve_and_run_acceptance_verbose(cmd_id, &worktree_path, Some(&candidate_sha));
             verifier_results.push(vr.clone());
             if !vr.passed {
                 let result = RunResult::AcceptanceFailed {
@@ -987,7 +1171,22 @@ impl Runner {
                     ))
                 }
             }
-            RunResult::CliFailed { .. } | RunResult::Timeout { .. } => {
+            // Timeout is budget governance territory: attempts remaining →
+            // the poll loop auto-schedules an escalated retry (no human
+            // involved); only an exhausted budget pages the human.
+            RunResult::Timeout { .. } => {
+                let exhausted = manifest.attempt_no >= pkg.max_attempts.max(1);
+                if exhausted {
+                    Some((
+                        "retry_exhausted",
+                        "The attempt budget is exhausted. Inspect evidence, revise the package, or cancel.",
+                        vec!["revise_package".to_string(), "cancel".to_string()],
+                    ))
+                } else {
+                    None
+                }
+            }
+            RunResult::CliFailed { .. } => {
                 let exhausted = manifest.attempt_no >= pkg.max_attempts.max(1);
                 Some((
                     if exhausted { "retry_exhausted" } else { "blocked" },
@@ -2411,6 +2610,72 @@ mod tests {
 
         Runner::validate_before_claim(&package, 1)
             .expect("package sealed against current HEAD must pass preflight");
+    }
+
+    #[test]
+    fn effective_timeout_escalates_per_attempt_with_cap() {
+        // G2: attempt 1 keeps the base budget; each retry doubles it; 7200 cap.
+        assert_eq!(Runner::effective_timeout_secs(1800, 1), 1800);
+        assert_eq!(Runner::effective_timeout_secs(1800, 2), 3600);
+        assert_eq!(Runner::effective_timeout_secs(1800, 3), 7200);
+        assert_eq!(Runner::effective_timeout_secs(1800, 9), 7200);
+        // Large bases clamp immediately.
+        assert_eq!(Runner::effective_timeout_secs(9000, 1), 7200);
+        assert_eq!(Runner::effective_timeout_secs(0, 1), 0);
+    }
+
+    #[test]
+    fn create_retry_attempt_is_idempotent_per_parent() {
+        // G4: auto-retry and a human resolve("retry") can race — the second
+        // caller must get the SAME child id, not a duplicate queued execution.
+        let (_dir, _guard) = setup();
+        let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        // create_retry_attempt reads the package (max_attempts) — provide it.
+        let packages = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "schema_version": 1,
+                "package_id": "pkg-r",
+                "epic_id": "e", "step_id": "s",
+                "plan_revision": 1,
+                "project_path": "/tmp/p", "repo_root": "/tmp/p", "base_sha": "abc",
+                "objective": "t", "context_refs": [],
+                "scope": {"allowed_paths": ["**"], "forbidden_paths": [], "max_changed_files": 5},
+                "preconditions": [],
+                "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write", "timeout_seconds": 60, "max_attempts": 3},
+                "acceptance": [], "authority": {"auto_edit_worktree": true, "auto_commit_candidate": true, "auto_merge": false, "auto_push": false, "auto_deploy": false},
+                "status": "ready",
+                "sealed_at": "2026-08-15T00:00:00Z", "package_hash": "h"
+            }]
+        });
+        std::fs::write(
+            std::path::Path::new(&runtime).join("packages.json"),
+            packages.to_string(),
+        )
+        .unwrap();
+        execution_store::enqueue_execution("pkg-r", "e", "s", "/tmp/p", "abc").unwrap();
+        // Bring the parent to a retryable terminal state.
+        let execs = execution_store::list_executions().unwrap();
+        let parent = execs.iter().find(|e| e.package_id == "pkg-r").unwrap();
+        execution_store::acquire_lease(&parent.id, "t").unwrap();
+        execution_store::release_lease(&parent.id, ExecutionStatus::TimedOut, Some("timeout"))
+            .unwrap();
+
+        let first = execution_store::create_retry_attempt(&parent.id).unwrap();
+        let second = execution_store::create_retry_attempt(&parent.id).unwrap();
+        assert_eq!(first, second, "duplicate retry must return the existing child");
+
+        // And the queue holds exactly one queued child for this parent.
+        let execs = execution_store::list_executions().unwrap();
+        let queued = execs
+            .iter()
+            .filter(|e| {
+                e.parent_attempt_id.as_deref() == Some(parent.id.as_str())
+                    && e.status == ExecutionStatus::Queued
+            })
+            .count();
+        assert_eq!(queued, 1);
     }
 
     #[cfg(unix)]

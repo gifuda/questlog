@@ -193,6 +193,61 @@ impl Executor for ZCodeExecutor {
         })
     }
 
+    fn start_with_resume(
+        &mut self,
+        task: &str,
+        session_id: &str,
+        worktree_path: &Path,
+        sandbox: &str,
+        _timeout: Duration,
+    ) -> Result<ExecutionHandle, String> {
+        // Same safety posture as start().
+        if task.contains("--danger") || task.contains("--skip") || task.contains("--yolo") {
+            return Err("task contains forbidden executor parameters".to_string());
+        }
+        if session_id.is_empty() || !session_id.starts_with("sess_") {
+            return Err(format!("invalid resume session id: '{session_id}'"));
+        }
+
+        let output_dir = worktree_path.join(".questlog-output");
+        std::fs::create_dir_all(&output_dir).map_err(|e| format!("mkdir output: {e}"))?;
+        // Per-attempt files: never truncate a previous attempt's raw output
+        // (its bundle copy happened, but keep the originals intact anyway).
+        let stdout_path = output_dir.join("zcode-stdout-resume.txt");
+        let stderr_path = output_dir.join("zcode-stderr-resume.log");
+        let stdout_file =
+            std::fs::File::create(&stdout_path).map_err(|e| format!("create stdout: {e}"))?;
+        let stderr_file =
+            std::fs::File::create(&stderr_path).map_err(|e| format!("create stderr: {e}"))?;
+
+        let mode = if sandbox == "read-only" { "plan" } else { "yolo" };
+
+        let mut command = self.build_command();
+        command
+            .arg("--prompt")
+            .arg(task)
+            .arg("--resume")
+            .arg(session_id)
+            .arg("--cwd")
+            .arg(worktree_path)
+            .arg("--mode")
+            .arg(mode)
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file));
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command
+            .spawn()
+            .map_err(|e| format!("failed to start zcode (resume {session_id}): {e}"))?;
+
+        Ok(ExecutionHandle {
+            child,
+            session_id: Some(session_id.to_string()),
+            stdout_path,
+            stderr_path,
+        })
+    }
+
     fn wait_and_collect(
         &mut self,
         mut handle: ExecutionHandle,
@@ -300,5 +355,22 @@ mod tests {
             Duration::from_secs(60),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn start_with_resume_rejects_malformed_session_ids() {
+        let mut exec = ZCodeExecutor::new();
+        let dir = tempfile::tempdir().unwrap();
+        // Non-sess_ prefix / empty → hard error, never spawn
+        for bad in ["", "not-a-session", "sess"] {
+            let result = exec.start_with_resume(
+                "task",
+                bad,
+                dir.path(),
+                "workspace-write",
+                Duration::from_secs(60),
+            );
+            assert!(result.is_err(), "session id '{bad}' must be rejected");
+        }
     }
 }
