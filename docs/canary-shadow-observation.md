@@ -274,3 +274,11 @@ S1 通过。安全基线成立：**ymos 当前完全不可被 Runner 触碰**。
 - Runner 建 worktree 时注入项目级 .zcode/config.json（model + 完整 provider def；实验确认 CLI 0.16.3 无 --model 参数、项目 config 不合并全局 provider 表、.zcode/config.json 需加入 scope 排除）
 - 思考档只读展示（CLI 0.16.3 无运行时切换；defaultVariant 不被解析）
 - 端到端验证：GLM-5.2 注入 → 日志确认 → read-only 执行 passed；用户已在 UI 实际切换过 DeepSeek
+
+### S7（追加）：B 模式受控自动化（2026-08-15，拓扑方案首跑驱动）
+
+用户三项决策：①merge 选 B（AGENTS.md 单一纪律源，merge_to_main=完工语义）②auto-reanchor（drift 自动重锚）③封包验收标准即闸门，Passed→observed 自主推进。
+
+S1 实跑结论（40 分钟，GLM-5.3 max + MiniMax subagents）：工作全绿落地主仓（5 commits，verifier 6/6），执行器经 MCP 自主登记面板；两个真实缺口被抓——原封包测试范围过窄（scope violation）、执行期心跳停打（UI 误报停滞）。三项修复 + auto-reanchor + auto-observed 全部上线（a43943c/1bc527f），S2-S4 链条全自动点火（S2 领取于 09:41）。
+
+新前置 = 对话端封包 → 开开关，零人工（偏差才回流人）。
