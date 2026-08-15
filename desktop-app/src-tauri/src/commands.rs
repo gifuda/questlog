@@ -1121,25 +1121,52 @@ fn executor_models_from_provider(provider_key: &str, def: &serde_json::Value) ->
 }
 
 /// List the executor model options from the user's ZCode configs plus the
-/// currently selected model. Primary source is `~/.zcode/v2/config.json`
-/// custom providers (where the ZCode desktop app writes user-managed models);
-/// builtin:* providers are skipped (OAuth-based, not standalone-usable by the
-/// headless CLI). Falls back to the legacy `~/.zcode/cli/config.json` when
-/// the v2 config has no custom providers. Read failures degrade to empty
-/// options — the UI then shows "no models configured".
+/// currently selected model.
+///
+/// Sources, in priority order:
+/// 1. `~/.zcode/v2/config.json` (where the ZCode desktop app manages models):
+///    custom providers plus builtin providers that are BOTH enabled and
+///    self-contained (apiKey + baseURL present — verified standalone-usable
+///    by the headless CLI, e.g. builtin:bigmodel-coding-plan/GLM-5.3).
+/// 2. `~/.zcode/cli/config.json` (legacy headless config): providers with
+///    apiKey merged in, deduped by model name (e.g. v1 bigmodel still offers
+///    GLM-5.2 when v2's coding-plan only has GLM-5.3).
+///
+/// Read failures degrade to empty options — the UI shows "no models
+/// configured".
 #[tauri::command]
 pub fn get_executor_options() -> Result<ExecutorOptions, String> {
     let mut providers: Vec<ExecutorProviderOption> = Vec::new();
+    let mut offered_models: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let provider_self_contained = |def: &serde_json::Value| -> bool {
+        let opts = def.get("options");
+        opts.and_then(|o| o.get("apiKey"))
+            .and_then(|k| k.as_str())
+            .map(|k| !k.is_empty())
+            .unwrap_or(false)
+            && opts
+                .and_then(|o| o.get("baseURL"))
+                .and_then(|u| u.as_str())
+                .is_some()
+    };
 
     if let Some(home) = dirs::home_dir() {
-        // v2: custom providers only (builtin:* rely on OAuth credentials the
-        // headless CLI can't use standalone).
         let v2_path = home.join(".zcode").join("v2").join("config.json");
         if let Ok(raw) = std::fs::read_to_string(&v2_path) {
             if let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(provider_map) = config.get("provider").and_then(|p| p.as_object()) {
                     for (key, def) in provider_map {
-                        if key.starts_with("builtin:") {
+                        let is_builtin = key.starts_with("builtin:");
+                        // Custom providers pass as-is; builtin ones must be
+                        // enabled + self-contained (OAuth-less key present).
+                        if is_builtin
+                            && (def.get("enabled").and_then(|e| e.as_bool()) != Some(true)
+                                || !provider_self_contained(def))
+                        {
+                            continue;
+                        }
+                        if !is_builtin && !provider_self_contained(def) {
                             continue;
                         }
                         let display_name = def
@@ -1148,6 +1175,7 @@ pub fn get_executor_options() -> Result<ExecutorOptions, String> {
                             .unwrap_or(key)
                             .to_string();
                         let models = executor_models_from_provider(key, def);
+                        offered_models.extend(models.iter().map(|m| m.name.clone()));
                         if !models.is_empty() {
                             providers.push(ExecutorProviderOption {
                                 name: key.clone(),
@@ -1160,27 +1188,35 @@ pub fn get_executor_options() -> Result<ExecutorOptions, String> {
             }
         }
 
-        // v1 fallback: only when the v2 config yielded nothing.
-        if providers.is_empty() {
-            let path = home.join(".zcode").join("cli").join("config.json");
-            if let Ok(raw) = std::fs::read_to_string(&path) {
-                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    if let Some(provider_map) = config.get("provider").and_then(|p| p.as_object()) {
-                        for (name, def) in provider_map {
-                            let display_name = def
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or(name)
-                                .to_string();
-                            let models = executor_models_from_provider(name, def);
-                            if !models.is_empty() {
-                                providers.push(ExecutorProviderOption {
-                                    name: name.clone(),
-                                    display_name,
-                                    models,
-                                });
-                            }
+        // v1 merge: legacy config providers add models not already offered
+        // (e.g. GLM-5.2 when only GLM-5.3 came from v2).
+        let path = home.join(".zcode").join("cli").join("config.json");
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(provider_map) = config.get("provider").and_then(|p| p.as_object()) {
+                    for (name, def) in provider_map {
+                        if !provider_self_contained(def) {
+                            continue;
                         }
+                        let all = executor_models_from_provider(name, def);
+                        let models: Vec<_> = all
+                            .into_iter()
+                            .filter(|m| !offered_models.contains(&m.name))
+                            .collect();
+                        if models.is_empty() {
+                            continue;
+                        }
+                        offered_models.extend(models.iter().map(|m| m.name.clone()));
+                        let display_name = def
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or(name)
+                            .to_string();
+                        providers.push(ExecutorProviderOption {
+                            name: name.clone(),
+                            display_name,
+                            models,
+                        });
                     }
                 }
             }
