@@ -437,6 +437,17 @@ impl Runner {
             }
             if last_heartbeat.elapsed() >= Duration::from_secs(10) {
                 execution_store::heartbeat(execution_id)?;
+                // Beat the RUNNER heartbeat too: the thread is alive and
+                // working (synchronously executing this package), it just
+                // can't return to the poll loop. Without this beat the UI
+                // reports a false "stale" for the whole execution duration.
+                LAST_POLL_AT.store(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    Ordering::SeqCst,
+                );
                 last_heartbeat = Instant::now();
             }
             thread::sleep(Duration::from_millis(100));
@@ -1265,7 +1276,9 @@ pub struct RunnerRuntimeStatus {
     pub running: bool,
     /// Is the polling thread actually alive? (false right after a crash)
     pub thread_alive: bool,
-    /// Unix seconds of the last successful poll; None = never polled.
+    /// Unix seconds of the last poll — or the last in-execution heartbeat
+    /// (the thread beats every 10s while synchronously executing a package,
+    /// since it can't return to the poll loop); None = never.
     pub last_poll_at: Option<u64>,
     /// Total number of polls since the thread started.
     pub poll_count: u64,

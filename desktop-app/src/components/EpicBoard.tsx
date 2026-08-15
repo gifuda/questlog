@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, Fragment } from "react";
 import { useTranslation } from "react-i18next";
 import { useEpics } from "../hooks/useEpics";
 import { useProjectRunner, useRunnerStatus, getEpicAutoExecute, setEpicAutoExecute } from "../hooks/useExecutions";
-import { epicStatusBadge, stageOrder, stageLabel, stageIcon, statusOptions, statusRank } from "../epicConstants";
+import { epicStatusBadge, stageOrder, statusOptions, statusRank } from "../epicConstants";
+import { formatDate } from "../utils";
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
 import ExecutionPanel, { DecisionInbox } from "./ExecutionPanel";
@@ -28,106 +29,56 @@ const stepStageKey: Record<StepStage, string> = {
   observed: "epic.stageObserved",
 };
 
+/** 总表四列的栅格模板（表头与行共用，保证对齐）。 */
+const GRID =
+  "grid grid-cols-[minmax(240px,2.2fr)_110px_150px_minmax(200px,1.8fr)] items-center gap-3 px-4";
+
+/** 在办步骤 = 处于中段（已设计/已实施/已验证）的步骤。 */
+const IN_PROGRESS_STAGES: StepStage[] = ["designed", "coded", "verified"];
+
+/** 排序：按方案自身状态权重（done 严格沉底，与状态徽章一致），同级按创建时间倒序。
+ *  子方案跟随父方案渲染，不参与顶级排序；父方案 done 但子方案未完属数据不一致，
+ *  徽章与位置保持一致比掩盖更重要。 */
+function sortEpics(list: Epic[]): Epic[] {
+  return [...list].sort((a, b) => {
+    const r = statusRank(a.status) - statusRank(b.status);
+    if (r !== 0) return r;
+    return (b.created_at || "").localeCompare(a.created_at || "");
+  });
+}
+
 interface EpicBoardProps {
   projectPath: string;
 }
 
 export default function EpicBoard({ projectPath }: EpicBoardProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep } = useEpics(projectPath);
   const { status: projectStatus, loading: projectLoading, toggle: toggleProjectRunner } = useProjectRunner(projectPath);
   const { status: runnerStatus, lastPollSecsAgo } = useRunnerStatus();
   const [showNewEpic, setShowNewEpic] = useState(false);
+  const lang = i18n.resolvedLanguage ?? "zh";
 
-  // Backend already returns top-level epics newest-first; sort defensively.
-  const sorted = [...epics].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  const sorted = sortEpics(epics);
 
   return (
     <div className="flex flex-col h-full">
-      {/* Global summary — 3-second glance */}
+      {/* 摘要条 — 大号等宽数字 + Runner 心跳，3 秒扫读 */}
       {summary && summary.total > 0 && (
-        <div className="px-4 py-2.5 border-b border-line bg-surface/30">
-          <div className="flex items-center gap-3 text-[11px] text-muted flex-wrap">
-            <span className="font-bold text-heading">{t("epic.summaryTotal", { total: summary.total })}</span>
-            <span className="text-blue-400">{t("epic.summaryActive", { count: summary.active })}</span>
-            <span className="text-yellow-400">{t("epic.summaryObserving", { count: summary.observing })}</span>
-            <span className="text-red-400">{t("epic.summaryBlocked", { count: summary.blocked })}</span>
-            <span className="text-green-400">{t("epic.summaryDone", { count: summary.done })}</span>
+        <div className="px-4 py-3 border-b border-line bg-surface/40 flex items-center gap-6 flex-wrap">
+          <Metric num={summary.total} label={t("epic.sumTotal")} />
+          <Metric num={summary.active} label={t("epic.sumActive")} numClass="text-accent" />
+          <Metric num={summary.observing} label={t("epic.sumObserving")} numClass="text-amber" />
+          <Metric num={summary.blocked} label={t("epic.sumBlocked")} numClass="text-danger" />
+          <Metric num={summary.done} label={t("epic.sumDone")} numClass="text-success" />
+          <div className="ml-auto">
+            <RunnerHeartbeat runnerStatus={runnerStatus} lastPollSecsAgo={lastPollSecsAgo} />
           </div>
-          {summary.focus && (
-            <div className="mt-1 text-[11px]">
-              <span className="text-faint">{t("epic.focus")}</span>
-              <span className="text-heading font-medium">{summary.focus.title}</span>
-              <span className="ml-2 text-blue-400">{summary.focus.progress}%</span>
-            </div>
-          )}
-          {summary.next && (
-            <div className="mt-0.5 text-[11px]">
-              <span className="text-faint">{t("epic.next")}</span>
-              <span className="text-body">{summary.next.title}</span>
-              {summary.next.waiting_for.length > 0 && (
-                <span className="ml-1.5 text-red-400">{t("epic.waiting", { names: summary.next.waiting_for.join("、") })}</span>
-              )}
-            </div>
-          )}
         </div>
       )}
 
-      {/* Runner toggle — per-project execution control + live heartbeat */}
-      <div className="px-4 py-1 border-b border-line/50 flex items-center justify-end gap-1.5">
-        {runnerStatus?.running ? (
-          runnerStatus.thread_alive && (lastPollSecsAgo ?? 999) < 30 ? (
-            runnerStatus.active_executions > 0 ? (
-              <span
-                className="flex items-center gap-1 text-[9px] font-medium text-blue-400 shrink-0"
-                title={t("execution.runnerStatusHint")}
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                {t("execution.runnerStatusActive", { count: runnerStatus.active_executions })}
-              </span>
-            ) : runnerStatus.ready_packages > 0 ? (
-              <span
-                className="flex items-center gap-1 text-[9px] font-medium text-orange-400 shrink-0"
-                title={t("execution.runnerStatusHint")}
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-orange-400" />
-                {t("execution.runnerStatusQueued", { count: runnerStatus.ready_packages })}
-              </span>
-            ) : runnerStatus.sealed_packages > 0 ? (
-              <span
-                className="flex items-center gap-1 text-[9px] font-medium text-orange-400/70 shrink-0"
-                title={t("execution.runnerStatusSealedHint")}
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-orange-400/70" />
-                {t("execution.runnerStatusSealed", { count: runnerStatus.sealed_packages })}
-              </span>
-            ) : (
-              <span
-                className="flex items-center gap-1 text-[9px] font-medium text-green-400 shrink-0"
-                title={t("execution.runnerStatusHint")}
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                {t("execution.runnerStatusIdle", { secs: lastPollSecsAgo ?? "—" })}
-              </span>
-            )
-          ) : (
-            <span
-              className="flex items-center gap-1 text-[9px] font-medium text-yellow-400 shrink-0"
-              title={t("execution.runnerStatusHint")}
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
-              {t("execution.runnerStatusStale", { secs: lastPollSecsAgo ?? "—" })}
-            </span>
-          )
-        ) : (
-          <span
-            className="flex items-center gap-1 text-[9px] font-medium text-faint shrink-0"
-            title={t("execution.runnerStatusHint")}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-line-hover" />
-            {t("execution.runnerStatusOff")}
-          </span>
-        )}
+      {/* Runner 控制行 — 模型选择 + 项目开关 */}
+      <div className="px-4 py-1.5 border-b border-line/50 flex items-center justify-end gap-2">
         <ExecutorModelSelector />
         <button
           onClick={toggleProjectRunner}
@@ -137,9 +88,9 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
               ? t("execution.projectRunnerEffective")
               : t("execution.projectRunnerOn")
           }
-          className={`px-2 py-0.5 rounded-full text-[9px] font-medium transition-colors shrink-0 disabled:opacity-40 ${
+          className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors shrink-0 disabled:opacity-40 ${
             projectStatus?.project_enabled
-              ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+              ? "bg-success/15 text-success hover:bg-success/25"
               : "bg-elevated text-faint hover:bg-line-hover"
           }`}
         >
@@ -148,47 +99,76 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
       </div>
       <DecisionInbox />
 
-      {/* 路线图主视图 */}
-      <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2.5">
-        {sorted.length === 0 && !showNewEpic && (
+      {/* 总表 */}
+      <div className="flex-1 overflow-auto">
+        {sorted.length === 0 && !showNewEpic ? (
           <div className="flex flex-col items-center justify-center h-full text-faint gap-3">
             <span className="text-3xl">📊</span>
             <span className="text-sm">{t("epic.emptyTitle")}</span>
-            <span className="text-[11px]">{t("epic.emptyDesc")}</span>
+            <span className="text-xs">{t("epic.emptyDesc")}</span>
             <button
-              className="text-[11px] px-3 py-1.5 bg-accent text-white rounded-lg hover:opacity-90"
+              className="text-[13px] px-3 py-1.5 bg-accent text-white rounded-lg hover:opacity-90"
               onClick={() => setShowNewEpic(true)}
             >
               {t("epic.newPlan")}
             </button>
           </div>
-        )}
+        ) : (
+          <div className="min-w-[720px]">
+            {/* 表头 */}
+            <div className={`${GRID} h-9 border-b border-line font-mono text-[11px] tracking-widest uppercase text-faint sticky top-0 bg-page z-10`}>
+              <span>{t("epic.colPlan")}</span>
+              <span>{t("epic.colStatus")}</span>
+              <span>{t("epic.colProgress")}</span>
+              <span>{t("epic.colFocus")}</span>
+            </div>
 
-        {sorted.map((epic) => (
-          <EpicCard
-            key={epic.id}
-            epic={epic}
-            allEpics={epics}
-            onUpdate={(id, patch) => updateEpic(id, patch)}
-            onDelete={(id) => deleteEpic(id)}
-            onAddStep={(id, title, desc, dependsOn) => addStep(id, title, desc, dependsOn)}
-            onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
-            onDeleteStep={(stepId) => deleteStep(stepId)}
-            onAddChild={(id, title, opts) => addEpic(title, { ...opts, parentId: id })}
-            projectPath={projectPath}
-          />
-        ))}
+            {sorted.map((epic) => (
+              <Fragment key={epic.id}>
+                <EpicRow
+                  epic={epic}
+                  depth={0}
+                  allEpics={epics}
+                  lang={lang}
+                  onUpdate={(id, patch) => updateEpic(id, patch)}
+                  onDelete={(id) => deleteEpic(id)}
+                  onAddStep={(id, title, desc, dependsOn) => addStep(id, title, desc, dependsOn)}
+                  onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
+                  onDeleteStep={(stepId) => deleteStep(stepId)}
+                  onAddChild={(id, title, opts) => addEpic(title, { ...opts, parentId: id })}
+                  projectPath={projectPath}
+                />
+                {sortEpics(epic.children ?? []).map((child) => (
+                  <EpicRow
+                    key={child.id}
+                    epic={child}
+                    depth={1}
+                    allEpics={epics}
+                    lang={lang}
+                    onUpdate={(id, patch) => updateEpic(id, patch)}
+                    onDelete={(id) => deleteEpic(id)}
+                    onAddStep={(id, title, desc, dependsOn) => addStep(id, title, desc, dependsOn)}
+                    onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
+                    onDeleteStep={(stepId) => deleteStep(stepId)}
+                  />
+                ))}
+              </Fragment>
+            ))}
 
-        {/* 新建方案 */}
-        {showNewEpic && (
-          <NewEpicForm
-            existingTitles={epics.map((e) => ({ id: e.id, title: e.title }))}
-            onCancel={() => setShowNewEpic(false)}
-            onSubmit={async (title, opts) => {
-              await addEpic(title, opts);
-              setShowNewEpic(false);
-            }}
-          />
+            {/* 新建方案 */}
+            {showNewEpic && (
+              <div className="p-3">
+                <NewEpicForm
+                  existingTitles={epics.map((e) => ({ id: e.id, title: e.title }))}
+                  onCancel={() => setShowNewEpic(false)}
+                  onSubmit={async (title, opts) => {
+                    await addEpic(title, opts);
+                    setShowNewEpic(false);
+                  }}
+                />
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -196,7 +176,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
       {!showNewEpic && sorted.length > 0 && (
         <div className="px-4 py-2 border-t border-line">
           <button
-            className="text-[11px] text-accent hover:underline"
+            className="text-[13px] text-accent hover:underline"
             onClick={() => setShowNewEpic(true)}
           >
             {t("epic.newPlan")}
@@ -208,27 +188,181 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
 }
 
 // ══════════════════════════════════════════════
-// EpicCard — 单个方案卡，可展开看步骤
+// Metric — 摘要条的大号等宽数字
+// ══════════════════════════════════════════════
+function Metric({ num, label, numClass = "text-heading" }: { num: number; label: string; numClass?: string }) {
+  return (
+    <div className="flex items-baseline gap-1.5">
+      <span className={`font-mono text-xl font-semibold leading-none tabular-nums ${numClass}`}>{num}</span>
+      <span className="text-xs text-muted">{label}</span>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+// RunnerHeartbeat — Runner 运行状态指示灯
+// ══════════════════════════════════════════════
+function RunnerHeartbeat({ runnerStatus, lastPollSecsAgo }: {
+  runnerStatus: ReturnType<typeof useRunnerStatus>["status"];
+  lastPollSecsAgo: number | null;
+}) {
+  const { t } = useTranslation();
+  const base = "flex items-center gap-1.5 text-[11px] font-mono font-medium shrink-0";
+  const hint = t("execution.runnerStatusHint");
+
+  if (!runnerStatus?.running) {
+    return (
+      <span className={`${base} text-faint`} title={hint}>
+        <span className="w-1.5 h-1.5 rounded-full bg-line-hover" />
+        {t("execution.runnerStatusOff")}
+      </span>
+    );
+  }
+  // In-flight executions are the STRONGEST liveness signal — check them
+  // BEFORE the heartbeat staleness gate. The Runner thread executes packages
+  // synchronously, so the heartbeat stops beating for the whole execution
+  // (potentially an hour); a stale heartbeat with active executions is
+  // healthy work, not a stall.
+  if (runnerStatus.active_executions > 0) {
+    return (
+      <span className={`${base} text-accent`} title={hint}>
+        <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+        {t("execution.runnerStatusActive", { count: runnerStatus.active_executions })}
+      </span>
+    );
+  }
+  if (!runnerStatus.thread_alive || (lastPollSecsAgo ?? 999) >= 30) {
+    return (
+      <span className={`${base} text-amber`} title={hint}>
+        <span className="w-1.5 h-1.5 rounded-full bg-amber" />
+        {t("execution.runnerStatusStale", { secs: lastPollSecsAgo ?? "—" })}
+      </span>
+    );
+  }
+  if (runnerStatus.ready_packages > 0) {
+    return (
+      <span className={`${base} text-amber`} title={hint}>
+        <span className="w-1.5 h-1.5 rounded-full bg-amber" />
+        {t("execution.runnerStatusQueued", { count: runnerStatus.ready_packages })}
+      </span>
+    );
+  }
+  if (runnerStatus.sealed_packages > 0) {
+    return (
+      <span className={`${base} text-amber/70`} title={t("execution.runnerStatusSealedHint")}>
+        <span className="w-1.5 h-1.5 rounded-full bg-amber/70" />
+        {t("execution.runnerStatusSealed", { count: runnerStatus.sealed_packages })}
+      </span>
+    );
+  }
+  return (
+    <span className={`${base} text-success`} title={hint}>
+      <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+      {t("execution.runnerStatusIdle", { secs: lastPollSecsAgo ?? "—" })}
+    </span>
+  );
+}
+
+// ══════════════════════════════════════════════
+// SignalCell — 焦点列：每行只显示最重要的一个信号，且必须与真实进度一致
+// 优先级：堵点 > 在办步骤 > 在办子方案 > 可做步骤 > 收尾语义
+// 收尾语义三分：已闭环(done) / 观察期中(observing) / 待收尾(全部完成但未标 done)
+// ══════════════════════════════════════════════
+function SignalCell({ epic, currentStep, nextStep }: {
+  epic: Epic;
+  currentStep: Epic["steps"][number] | undefined;
+  nextStep: Epic["steps"][number] | undefined;
+}) {
+  const { t } = useTranslation();
+  const children = epic.children ?? [];
+  const nonDoneChildren = children.filter((c) => c.status !== "done");
+
+  if (epic.status === "blocked") {
+    return (
+      <span className="text-danger">
+        ⚠ {epic.depends_on_titles.length > 0
+          ? t("epic.waitFor", { names: epic.depends_on_titles.join("、") })
+          : t("epic.resolveDeps")}
+      </span>
+    );
+  }
+  if (epic.status === "paused") {
+    return <span className="text-faint">{t("epic.statusPaused")}</span>;
+  }
+  // 在办：自己的中段步骤
+  if (currentStep) {
+    return (
+      <>
+        <span className="font-mono text-[11px] text-accent mr-1.5">{t(stepStageKey[currentStep.stage])}</span>
+        <span className="text-body">{currentStep.title}</span>
+      </>
+    );
+  }
+  // 在办：还有未完成的子方案（父方案进度来自子方案均值）
+  if (nonDoneChildren.length > 0) {
+    const focusChild = [...nonDoneChildren].sort((a, b) => statusRank(a.status) - statusRank(b.status))[0];
+    return (
+      <>
+        <span className="text-faint mr-1">→</span>
+        <span className="text-body">{focusChild.title}</span>
+        <span className="text-faint text-xs ml-1.5 whitespace-nowrap">
+          {t("epic.closedCount", { done: children.length - nonDoneChildren.length, total: children.length })}
+        </span>
+      </>
+    );
+  }
+  // 下一步：可做的自己的步骤
+  if (nextStep) {
+    return (
+      <>
+        <span className="text-faint mr-1">→</span>
+        <span className="text-body">{nextStep.title}</span>
+      </>
+    );
+  }
+  // 收尾语义（自己的步骤全部 observed 或没有，子方案全部 done 或没有）
+  if (epic.status === "done") {
+    return <span className="text-faint">{t("epic.closed")}</span>;
+  }
+  if (epic.status === "observing") {
+    return (
+      <span className="text-amber break-words">
+        ⏱ {epic.acceptance ? t("epic.observingWith", { acceptance: epic.acceptance }) : t("epic.observingPeriod")}
+      </span>
+    );
+  }
+  if (epic.progress >= 100 || (epic.steps.length > 0 && epic.steps.every((s) => s.stage === "observed"))) {
+    return <span className="text-amber">{t("epic.pendingClose")}</span>;
+  }
+  if (epic.steps.length === 0 || epic.steps.every((s) => s.stage === "pending")) {
+    return <span className="text-faint">{t("epic.notStarted")}</span>;
+  }
+  return <span className="text-faint">{t("epic.none")}</span>;
+}
+
+// ══════════════════════════════════════════════
+// EpicRow — 总表中的一行（顶级方案或子方案），可展开看详情
 // ══════════════════════════════════════════════
 type EpicPatch = { title?: string; description?: string; status?: EpicStatus; priority?: string; dependsOn?: string[]; linksDoc?: string; linksBranch?: string; linksNote?: string; acceptance?: string; closeReason?: string };
 
-interface EpicCardProps {
+interface EpicRowProps {
   epic: Epic;
+  /** 0 = 顶级方案，1 = 子方案（缩进 + 树形标记） */
+  depth: 0 | 1;
   allEpics: Epic[];
+  lang: string;
   onUpdate: (id: string, patch: EpicPatch) => void;
   onDelete: (id: string) => void;
   onAddStep: (epicId: string, title: string, desc?: string, dependsOn?: string[]) => void;
   onUpdateStep: (stepId: string, patch: { title?: string; stage?: StepStage; description?: string }) => void;
   onDeleteStep: (stepId: string) => void;
-  /** 创建子方案（parent_id 指向 epicId）。仅顶层方案需要。 */
+  /** 创建子方案（仅顶级方案）。 */
   onAddChild?: (epicId: string, title: string, opts: { description?: string; priority?: string }) => void;
-  /** 层级缩进（顶层 0，子方案 1） */
-  depth?: number;
-  /** 项目路径（用于方案级 auto_execute 控制） */
+  /** 项目路径（用于方案级 auto_execute 控制，仅顶级方案）。 */
   projectPath?: string;
 }
 
-function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep, onDeleteStep, onAddChild, depth = 0, projectPath }: EpicCardProps) {
+function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, onUpdateStep, onDeleteStep, onAddChild, projectPath }: EpicRowProps) {
   const { t } = useTranslation();
   const badge = epicStatusBadge[epic.status];
   const [expanded, setExpanded] = useState(false);
@@ -236,7 +370,6 @@ function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep,
   const [showAddChild, setShowAddChild] = useState(false);
   const [editing, setEditing] = useState(false);
   const [autoExec, setAutoExec] = useState<boolean | null>(null);
-  const hasChildren = epic.children?.length > 0;
   const isTopLevel = depth === 0;
 
   // Load auto_execute setting for top-level epics
@@ -255,16 +388,45 @@ function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep,
     setAutoExec(next);
   };
 
+  const currentStep = epic.steps.find((s) => IN_PROGRESS_STAGES.includes(s.stage));
+  // 下一步排除在办步骤本身，避免两列显示同一条
+  const nextStep = epic.steps.find((s) => s !== currentStep && s.actionable && s.stage !== "observed");
+  const isDone = epic.status === "done";
+  const isBlocked = epic.status === "blocked";
+
+  const barColor =
+    isDone ? "bg-success" :
+    isBlocked ? "bg-danger" :
+    epic.status === "paused" ? "bg-faint" :
+    epic.status === "observing" ? "bg-amber" :
+    "bg-accent";
+
   return (
-    <div className={`rounded-lg border ${epic.status === "active" ? "border-blue-500/40 bg-blue-500/5" : "border-line bg-surface/50"} transition-colors`}>
-      {/* 卡片头部 */}
-      <div className="px-3 py-2.5 cursor-pointer" onClick={() => setExpanded(!expanded)}>
-        <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full shrink-0 ${badge.dot}`} />
-          <span className={`text-xs font-medium flex-1 truncate ${epic.status === "done" ? "line-through text-faint" : "text-heading"}`}>
-            {epic.title}
-          </span>
-          <span className={`text-[9px] px-1 py-px rounded shrink-0 ${priorityBadge(epic.priority)}`}>
+    <>
+      {/* ── 行 ── */}
+      <div
+        className={`${GRID} py-2.5 border-b border-line/60 cursor-pointer hover:bg-surface/60 transition-colors ${
+          isDone ? "opacity-50" : isBlocked ? "opacity-70" : ""
+        } ${depth === 1 ? "bg-white/[.012]" : ""}`}
+        onClick={() => setExpanded(!expanded)}
+      >
+        {/* 方案 */}
+        <div className="flex items-center gap-2 min-w-0">
+          {depth === 1 && <span className="text-faint shrink-0 w-4 text-center text-[10px]">└</span>}
+          <span className={`text-faint shrink-0 w-4 text-center text-[10px] transition-transform ${expanded ? "rotate-90" : ""}`}>▶</span>
+          <div className="min-w-0">
+            <div className={`break-words leading-snug ${depth === 0 ? "text-sm font-semibold" : "text-[13px] font-medium"} ${isDone ? "text-faint line-through" : "text-heading"}`}>
+              {epic.title}
+            </div>
+            <div className="text-xs text-faint font-mono truncate mt-0.5">
+              {epic.child_count > 0
+                ? t("epic.children", { count: epic.child_count })
+                : t("epic.steps", { count: epic.step_count })}
+              {" · "}
+              {formatDate(epic.updated_at, lang)}
+            </div>
+          </div>
+          <span className={`text-[11px] font-mono px-1.5 py-px rounded shrink-0 ${priorityBadge(epic.priority)}`}>
             {epic.priority}
           </span>
           {isTopLevel && projectPath && (
@@ -275,11 +437,11 @@ function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep,
                   : autoExec === false ? t("execution.epicAutoOff")
                   : t("execution.epicAutoInherit")
               }
-              className={`text-[9px] px-1.5 py-0.5 rounded shrink-0 transition-colors ${
+              className={`text-[11px] px-1.5 py-0.5 rounded shrink-0 transition-colors ${
                 autoExec === true
-                  ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                  ? "bg-success/15 text-success hover:bg-success/25"
                   : autoExec === false
-                    ? "bg-red-500/15 text-red-400 hover:bg-red-500/25"
+                    ? "bg-danger/15 text-danger hover:bg-danger/25"
                     : "bg-elevated text-faint hover:bg-line-hover"
               }`}
             >
@@ -288,46 +450,40 @@ function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep,
           )}
           {epic.close_reason && (
             <span
-              className="text-[8px] px-1 py-px rounded shrink-0 bg-yellow-500/15 text-yellow-300"
+              className="text-[11px] px-1.5 py-px rounded shrink-0 bg-amber-bg text-amber"
               title={`${t("epic.earlyClose")}: ${epic.close_reason}`}
             >
-              ⚠️{t("epic.earlyClose")}
+              ⚠{t("epic.earlyClose")}
             </span>
           )}
-          <span className="text-[10px] text-muted shrink-0">{epic.progress}%</span>
-          <span className={`text-[9px] px-1.5 py-0.5 rounded ${badge.bg} ${badge.text} shrink-0`}>
+        </div>
+
+        {/* 状态 */}
+        <div>
+          <span className={`inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded w-fit ${badge.bg} ${badge.text}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
             {t(epicStatusKey[epic.status])}
           </span>
-          <span className="text-[10px] text-faint shrink-0">{expanded ? "▾" : "▸"}</span>
         </div>
 
-        {/* 进度条 */}
-        <div className="mt-1.5 flex items-center gap-2">
-          <div className="flex-1 h-1.5 bg-elevated rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all ${
-                epic.status === "done" ? "bg-green-500" :
-                epic.status === "blocked" ? "bg-red-500" :
-                epic.status === "paused" ? "bg-gray-500" :
-                "bg-blue-500"
-              }`}
-              style={{ width: `${epic.progress}%` }}
-            />
+        {/* 进度 */}
+        <div className="flex items-center gap-2.5">
+          <div className="flex-1 max-w-[76px] h-1 bg-line rounded-sm overflow-hidden">
+            <div className={`h-full rounded-sm transition-all ${barColor}`} style={{ width: `${epic.progress}%` }} />
           </div>
-          <span className="text-[9px] text-faint shrink-0">{t("epic.steps", { count: epic.step_count })}</span>
+          <span className="font-mono text-xs text-muted tabular-nums min-w-[36px]">{epic.progress}%</span>
         </div>
 
-        {/* Dependency hint (collapsed) */}
-        {!expanded && epic.depends_on_titles.length > 0 && epic.status === "blocked" && (
-          <div className="mt-1 text-[10px] text-red-400">
-            {t("epic.blockedWait", { names: epic.depends_on_titles.join("、") })}
-          </div>
-        )}
+        {/* 焦点 — 每行最重要的一个信号：堵点 > 在办 > 下一步 > 待收尾 > 状态兜底。
+            min-w-0 让栅格列可收缩，内容自然换行而非撑宽整行 */}
+        <div className="text-[13px] leading-snug min-w-0 break-words">
+          <SignalCell epic={epic} currentStep={currentStep} nextStep={nextStep} />
+        </div>
       </div>
 
-      {/* 展开内容 */}
+      {/* ── 展开的详情 ── */}
       {expanded && (
-        <div className="px-3 pb-3 border-t border-line/50 pt-2.5">
+        <div className={`border-b border-line/60 bg-surface/30 px-4 py-3 space-y-3 ${depth === 1 ? "pl-12" : "pl-10"}`}>
           {editing ? (
             <EpicEditForm
               epic={epic}
@@ -337,102 +493,81 @@ function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep,
             />
           ) : (
             <>
-              {/* 子方案（如果有）— 递归渲染，缩进一级 */}
-              {(hasChildren || onAddChild) && (
-                <div className={`mb-2 flex flex-col gap-1.5 ${depth === 0 ? "ml-0" : "ml-3 border-l-2 border-line pl-2"}`}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-faint">{t("epic.children", { count: epic.children?.length ?? 0 })}</span>
-                    {onAddChild && depth === 0 && !showAddChild && (
-                      <button className="text-[10px] text-accent hover:underline" onClick={(e) => { e.stopPropagation(); setShowAddChild(true); }}>
-                        {t("epic.addChild")}
-                      </button>
+              {/* 详情区 — 有内容才渲染，标签小写等宽，内容分层 */}
+              {(epic.description ||
+                epic.depends_on_titles.length > 0 ||
+                epic.blocks_titles.length > 0 ||
+                epic.acceptance ||
+                epic.close_reason ||
+                epic.links.doc || epic.links.branch || epic.links.note) && (
+                <section>
+                  <div className="font-mono text-[10px] tracking-widest uppercase text-faint mb-1.5">{t("epic.secDetails")}</div>
+                  <div className="space-y-1.5">
+                    {epic.description && (
+                      <p className="text-[13px] text-body leading-relaxed">{epic.description}</p>
+                    )}
+                    {epic.depends_on_titles.length > 0 && (
+                      <div className="text-xs">
+                        <span className="text-faint">{t("epic.depends")}</span>
+                        <span className={isBlocked ? "text-danger" : "text-muted"}>{epic.depends_on_titles.join("、")}</span>
+                      </div>
+                    )}
+                    {epic.blocks_titles.length > 0 && (
+                      <div className="text-xs">
+                        <span className="text-faint">{t("epic.blocking")}</span>
+                        <span className="text-muted">{epic.blocks_titles.join("、")}</span>
+                      </div>
+                    )}
+                    {epic.acceptance && (
+                      <div className="text-xs text-amber leading-relaxed">
+                        📌 {t("epic.acceptance")}{epic.acceptance}
+                      </div>
+                    )}
+                    {epic.close_reason && (
+                      <div className="text-xs text-amber/80 leading-relaxed">
+                        ⚠ {t("epic.closeReason")}{epic.close_reason}
+                      </div>
+                    )}
+                    {(epic.links.doc || epic.links.branch || epic.links.note) && (
+                      <div className="flex flex-wrap gap-3 text-xs">
+                        {epic.links.doc && <span className="text-accent">{t("epic.doc")}</span>}
+                        {epic.links.branch && <span className="text-accent">🌿 {epic.links.branch}</span>}
+                        {epic.links.note && <span className="text-muted">📝 {epic.links.note}</span>}
+                      </div>
                     )}
                   </div>
-                  {epic.children?.map((child) => (
-                    <EpicCard
-                      key={child.id}
-                      epic={child}
-                      allEpics={allEpics}
-                      onUpdate={onUpdate}
-                      onDelete={onDelete}
-                      onAddStep={onAddStep}
-                      onUpdateStep={onUpdateStep}
-                      onDeleteStep={onDeleteStep}
-                      depth={depth + 1}
+                </section>
+              )}
+
+              {/* 步骤区 */}
+              <section>
+                <div className="font-mono text-[10px] tracking-widest uppercase text-faint mb-1">{t("epic.secSteps")}</div>
+                <div className="flex flex-col gap-0.5">
+                  {epic.steps.length === 0 && (
+                    <div className="text-xs text-faint py-1">{t("epic.noSteps")}</div>
+                  )}
+                  {epic.steps.map((step) => (
+                    <StepRow
+                      key={step.id}
+                      step={step}
+                      onUpdate={(patch) => onUpdateStep(step.id, patch)}
+                      onDelete={() => onDeleteStep(step.id)}
                     />
                   ))}
-                  {showAddChild && onAddChild && (
-                    <NewEpicForm
-                      existingTitles={allEpics.map((e) => ({ id: e.id, title: e.title }))}
-                      compact
-                      onCancel={() => setShowAddChild(false)}
-                      onSubmit={async (title, opts) => {
-                        await onAddChild(epic.id, title, opts);
-                        setShowAddChild(false);
-                      }}
-                    />
-                  )}
                 </div>
-              )}
+              </section>
 
-              {/* 描述 */}
-              {epic.description && (
-                <p className="text-[11px] text-muted mb-2 leading-relaxed">{epic.description}</p>
-              )}
-
-              {/* 依赖信息 */}
-              {epic.depends_on_titles.length > 0 && (
-                <div className="text-[10px] text-faint mb-1">
-                  {t("epic.depends")} <span className={epic.status === "blocked" ? "text-red-400" : "text-muted"}>{epic.depends_on_titles.join("、")}</span>
-                </div>
-              )}
-              {epic.blocks_titles.length > 0 && (
-                <div className="text-[10px] text-faint mb-1">
-                  {t("epic.blocking")} <span className="text-muted">{epic.blocks_titles.join("、")}</span>
-                </div>
-              )}
-
-              {/* 验收条件 */}
-              {epic.acceptance && (
-                <div className="text-[10px] text-yellow-300/90 mb-1 leading-relaxed">
-                  📌 {t("epic.acceptance")}{epic.acceptance}
-                </div>
-              )}
-              {epic.close_reason && (
-                <div className="text-[10px] text-yellow-400/80 mb-1 leading-relaxed">
-                  ⚠️ {t("epic.closeReason")}{epic.close_reason}
-                </div>
-              )}
-
-              {/* Links */}
-              {(epic.links.doc || epic.links.branch || epic.links.note) && (
-                <div className="flex flex-wrap gap-2 mb-2 text-[10px]">
-                  {epic.links.doc && <span className="text-accent">{t("epic.doc")}</span>}
-                  {epic.links.branch && <span className="text-accent">🌿 {epic.links.branch}</span>}
-                  {epic.links.note && <span className="text-muted">📝 {epic.links.note}</span>}
-                </div>
-              )}
-
-              {/* Step list */}
-              <div className="flex flex-col gap-1 mb-2">
-                {epic.steps.length === 0 && (
-                  <div className="text-[10px] text-faint py-1">{t("epic.noSteps")}</div>
-                )}
-                {epic.steps.map((step) => (
-                  <StepRow
-                    key={step.id}
-                    step={step}
-                    onUpdate={(patch) => onUpdateStep(step.id, patch)}
-                    onDelete={() => onDeleteStep(step.id)}
-                  />
-                ))}
-              </div>
 
               {/* Actions */}
-              <div className="flex items-center gap-3 text-[10px]">
+              <div className="flex items-center gap-3 text-xs">
                 {!showAddStep && (
                   <button className="text-accent hover:underline" onClick={(e) => { e.stopPropagation(); setShowAddStep(true); }}>
                     {t("epic.addStep")}
+                  </button>
+                )}
+                {onAddChild && isTopLevel && !showAddChild && (
+                  <button className="text-accent hover:underline" onClick={(e) => { e.stopPropagation(); setShowAddChild(true); }}>
+                    {t("epic.addChild")}
                   </button>
                 )}
                 <button className="text-accent hover:underline" onClick={(e) => { e.stopPropagation(); copyEpicRef(epic, t); }}>
@@ -457,16 +592,31 @@ function EpicCard({ epic, allEpics, onUpdate, onDelete, onAddStep, onUpdateStep,
                   onSubmit={(title, desc, dependsOn) => { onAddStep(epic.id, title, desc, dependsOn); setShowAddStep(false); }}
                 />
               )}
+
+              {/* 添加子方案表单 */}
+              {showAddChild && onAddChild && (
+                <div className="mt-2">
+                  <NewEpicForm
+                    existingTitles={allEpics.map((e) => ({ id: e.id, title: e.title }))}
+                    compact
+                    onCancel={() => setShowAddChild(false)}
+                    onSubmit={async (title, opts) => {
+                      await onAddChild(epic.id, title, opts);
+                      setShowAddChild(false);
+                    }}
+                  />
+                </div>
+              )}
             </>
           )}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
 // ══════════════════════════════════════════════
-// StepRow — 单个步骤，可拖动阶段滑块
+// StepRow — 单个步骤，5 段胶囊轨道可点击推进阶段
 // ══════════════════════════════════════════════
 function StepRow({ step, onUpdate, onDelete }: {
   step: Epic["steps"][number];
@@ -478,6 +628,8 @@ function StepRow({ step, onUpdate, onDelete }: {
   const [expanded, setExpanded] = useState(false);
 
   const hasPackage = !!step.package;
+  const stageIdx = stageOrder.indexOf(step.stage);
+  const isObserved = step.stage === "observed";
 
   return (
     <div
@@ -486,48 +638,47 @@ function StepRow({ step, onUpdate, onDelete }: {
       onMouseLeave={() => setHover(false)}
     >
       <div
-        className="flex items-center gap-2 py-1 px-1.5 cursor-pointer"
+        className="flex items-center gap-2.5 py-1.5 px-2 cursor-pointer"
         onClick={() => hasPackage && setExpanded(!expanded)}
       >
-        <span className="text-xs shrink-0 w-4 text-center">{stageIcon[step.stage]}</span>
-        <span className={`text-[11px] flex-1 truncate ${step.stage === "observed" ? "text-faint line-through" : "text-body"}`}>
-          {step.title}
-        </span>
-        {hasPackage && (
-          <span className="text-[8px] text-green-400 bg-green-500/10 px-1 py-px rounded shrink-0" title="Has sealed TaskPackage">
-            📦
-          </span>
-        )}
-        {step.actionable && (
-          <span className="text-[8px] text-blue-400 bg-blue-500/10 px-1 py-px rounded shrink-0">{t("epic.actionable")}</span>
-        )}
-        {step.depends_on_titles.length > 0 && (
-          <span className="text-[8px] text-faint shrink-0 hidden md:inline" title={t("epic.waitFor", { names: step.depends_on_titles.join("、") })}>
-            🔗{step.depends_on_titles.length}
-          </span>
-        )}
-        {/* Stage buttons */}
-        <div className="flex items-center gap-0.5 shrink-0">
-          {stageOrder.map((s) => (
+        {/* 5 段阶段轨道：点击第 N 段 = 推进到第 N 阶段 */}
+        <div className="flex items-center gap-[3px] shrink-0">
+          {stageOrder.map((s, i) => (
             <button
               key={s}
               title={t(stepStageKey[s])}
               onClick={(e) => { e.stopPropagation(); onUpdate({ stage: s }); }}
-              className={`w-3 h-3 rounded-sm transition-colors ${
-                stageOrder.indexOf(step.stage) >= stageOrder.indexOf(s)
-                  ? "bg-blue-500"
-                  : "bg-elevated hover:bg-line-hover"
+              className={`w-3.5 h-1 rounded-sm transition-colors ${
+                i <= stageIdx
+                  ? isObserved ? "bg-success" : "bg-accent"
+                  : "bg-line hover:bg-line-hover"
               }`}
             />
           ))}
         </div>
-        <span className="text-[9px] text-faint w-8 text-right shrink-0">{t(stepStageKey[step.stage])}</span>
+        <span className={`text-[13px] flex-1 truncate ${isObserved ? "text-faint line-through" : "text-body"}`}>
+          {step.title}
+        </span>
+        {hasPackage && (
+          <span className="text-[11px] font-mono text-success bg-success/10 px-1.5 py-px rounded shrink-0" title="Has sealed TaskPackage">
+            📦
+          </span>
+        )}
+        {step.actionable && (
+          <span className="text-[11px] text-accent bg-accent-bg px-1.5 py-px rounded shrink-0">{t("epic.actionable")}</span>
+        )}
+        {step.depends_on_titles.length > 0 && (
+          <span className="text-[11px] text-faint shrink-0 hidden md:inline" title={t("epic.waitFor", { names: step.depends_on_titles.join("、") })}>
+            🔗{step.depends_on_titles.length}
+          </span>
+        )}
+        <span className="text-[11px] font-mono text-faint w-14 text-right shrink-0">{t(stepStageKey[step.stage])}</span>
         {hover && (
           <ConfirmButton
             label="×"
             confirmLabel="✓"
             onConfirm={() => onDelete()}
-            className="w-3.5 h-3.5 flex items-center justify-center text-[8px] text-faint hover:text-danger rounded-full"
+            className="w-4 h-4 flex items-center justify-center text-[11px] text-faint hover:text-danger rounded-full"
           />
         )}
       </div>
@@ -559,7 +710,7 @@ function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
     <div className={`rounded-lg border border-accent/40 bg-accent-bg/30 ${compact ? "p-2" : "p-3"}`}>
       <input
         autoFocus
-        className="w-full bg-transparent border-b border-line px-1 py-1 text-xs text-heading focus:outline-none focus:border-accent"
+        className="w-full bg-transparent border-b border-line px-1 py-1 text-[13px] text-heading focus:outline-none focus:border-accent"
         placeholder={t("epic.titlePlaceholder")}
         value={title}
         onChange={(e) => setTitle(e.target.value)}
@@ -569,20 +720,20 @@ function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
         }}
       />
       <input
-        className="w-full bg-transparent px-1 py-1 mt-1 text-[11px] text-muted focus:outline-none"
+        className="w-full bg-transparent px-1 py-1 mt-1 text-xs text-muted focus:outline-none"
         placeholder={t("epic.descPlaceholder")}
         value={description}
         onChange={(e) => setDescription(e.target.value)}
       />
       <input
-        className="w-full bg-transparent px-1 py-1 mt-0.5 text-[10px] text-yellow-300/80 focus:outline-none"
+        className="w-full bg-transparent px-1 py-1 mt-0.5 text-xs text-amber/80 focus:outline-none"
         placeholder={t("epic.acceptancePlaceholder")}
         value={acceptance}
         onChange={(e) => setAcceptance(e.target.value)}
       />
       <div className="flex items-center gap-2 mt-2">
         <select
-          className="bg-elevated text-[11px] text-body rounded px-1.5 py-0.5 focus:outline-none"
+          className="bg-elevated text-xs text-body rounded px-1.5 py-0.5 focus:outline-none"
           value={priority}
           onChange={(e) => setPriority(e.target.value)}
         >
@@ -594,7 +745,7 @@ function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
         {existingTitles.length > 0 && (
           <select
             multiple
-            className="flex-1 bg-elevated text-[10px] text-body rounded px-1 py-0.5 focus:outline-none h-12"
+            className="flex-1 bg-elevated text-xs text-body rounded px-1 py-0.5 focus:outline-none h-12"
             value={dependsOn}
             onChange={(e) => {
               const selected = Array.from(e.target.selectedOptions).map((o) => o.value);
@@ -610,14 +761,14 @@ function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
       </div>
       <div className="flex items-center gap-3 mt-2">
         <button
-          className="text-[11px] px-2 py-1 bg-accent text-white rounded hover:opacity-90 disabled:opacity-40"
+          className="text-xs px-2 py-1 bg-accent text-white rounded hover:opacity-90 disabled:opacity-40"
           disabled={!title.trim()}
           onClick={() => onSubmit(title.trim(), { description: description.trim() || undefined, priority, dependsOn: dependsOn.length ? dependsOn : undefined, acceptance: acceptance.trim() || undefined })}
         >
           {t("epic.create")}
         </button>
-        <button className="text-[11px] text-faint hover:text-body" onClick={onCancel}>{t("epic.cancel")}</button>
-        <span className="text-[9px] text-faint ml-auto">{t("epic.cmdMultiSelect")}</span>
+        <button className="text-xs text-faint hover:text-body" onClick={onCancel}>{t("epic.cancel")}</button>
+        <span className="text-[11px] text-faint ml-auto">{t("epic.cmdMultiSelect")}</span>
       </div>
     </div>
   );
@@ -648,21 +799,21 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
     <div className="flex flex-col gap-2 py-1">
       <input
         autoFocus
-        className="bg-transparent border-b border-line px-1 py-1 text-xs text-heading focus:outline-none focus:border-accent"
+        className="bg-transparent border-b border-line px-1 py-1 text-[13px] text-heading focus:outline-none focus:border-accent"
         value={title}
         onChange={(e) => setTitle(e.target.value)}
       />
       <textarea
-        className="bg-transparent px-1 py-1 text-[11px] text-muted focus:outline-none resize-none"
+        className="bg-transparent px-1 py-1 text-xs text-muted focus:outline-none resize-none"
         rows={2}
         placeholder={t("epic.epicDescPlaceholder")}
         value={description}
         onChange={(e) => setDescription(e.target.value)}
       />
       <div className="flex items-center gap-2">
-        <label className="text-[10px] text-faint">{t("epic.status")}</label>
+        <label className="text-xs text-faint">{t("epic.status")}</label>
         <select
-          className="bg-elevated text-[11px] text-body rounded px-1.5 py-0.5 focus:outline-none"
+          className="bg-elevated text-xs text-body rounded px-1.5 py-0.5 focus:outline-none"
           value={status}
           onChange={(e) => setStatus(e.target.value as EpicStatus)}
         >
@@ -670,9 +821,9 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
             <option key={s} value={s}>{t(epicStatusKey[s])}</option>
           ))}
         </select>
-        <label className="text-[10px] text-faint ml-2">{t("epic.priority")}</label>
+        <label className="text-xs text-faint ml-2">{t("epic.priority")}</label>
         <select
-          className="bg-elevated text-[11px] text-body rounded px-1.5 py-0.5 focus:outline-none"
+          className="bg-elevated text-xs text-body rounded px-1.5 py-0.5 focus:outline-none"
           value={priority}
           onChange={(e) => setPriority(e.target.value)}
         >
@@ -684,10 +835,10 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
       </div>
       {/* Dependencies (multi-select) */}
       <div className="flex items-center gap-2">
-        <label className="text-[10px] text-faint shrink-0">{t("epic.deps")}</label>
+        <label className="text-xs text-faint shrink-0">{t("epic.deps")}</label>
         <select
           multiple
-          className="flex-1 bg-elevated text-[10px] text-body rounded px-1 py-0.5 focus:outline-none h-14"
+          className="flex-1 bg-elevated text-xs text-body rounded px-1 py-0.5 focus:outline-none h-14"
           value={dependsOn}
           onChange={(e) => setDependsOn(Array.from(e.target.selectedOptions).map((o) => o.value))}
         >
@@ -697,14 +848,14 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
         </select>
       </div>
       <div className="flex flex-col gap-1">
-        <input className="bg-transparent border-b border-line px-1 py-0.5 text-[10px] text-muted focus:outline-none" placeholder={t("epic.docPlaceholder")} value={linksDoc} onChange={(e) => setLinksDoc(e.target.value)} />
-        <input className="bg-transparent border-b border-line px-1 py-0.5 text-[10px] text-muted focus:outline-none" placeholder={t("epic.branchPlaceholder")} value={linksBranch} onChange={(e) => setLinksBranch(e.target.value)} />
-        <input className="bg-transparent border-b border-line px-1 py-0.5 text-[10px] text-muted focus:outline-none" placeholder={t("epic.notePlaceholder")} value={linksNote} onChange={(e) => setLinksNote(e.target.value)} />
+        <input className="bg-transparent border-b border-line px-1 py-0.5 text-xs text-muted focus:outline-none" placeholder={t("epic.docPlaceholder")} value={linksDoc} onChange={(e) => setLinksDoc(e.target.value)} />
+        <input className="bg-transparent border-b border-line px-1 py-0.5 text-xs text-muted focus:outline-none" placeholder={t("epic.branchPlaceholder")} value={linksBranch} onChange={(e) => setLinksBranch(e.target.value)} />
+        <input className="bg-transparent border-b border-line px-1 py-0.5 text-xs text-muted focus:outline-none" placeholder={t("epic.notePlaceholder")} value={linksNote} onChange={(e) => setLinksNote(e.target.value)} />
       </div>
       {/* 验收条件 + 收尾原因 */}
       <div className="flex flex-col gap-1">
         <textarea
-          className="bg-transparent border-b border-line px-1 py-0.5 text-[10px] text-yellow-300/90 focus:outline-none resize-none"
+          className="bg-transparent border-b border-line px-1 py-0.5 text-xs text-amber/90 focus:outline-none resize-none"
           rows={2}
           placeholder={t("epic.acceptancePlaceholder")}
           value={acceptance}
@@ -712,7 +863,7 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
         />
         {status === "done" && (
           <input
-            className="bg-transparent border-b border-line px-1 py-0.5 text-[10px] text-yellow-400/80 focus:outline-none"
+            className="bg-transparent border-b border-line px-1 py-0.5 text-xs text-amber/80 focus:outline-none"
             placeholder={t("epic.closeReasonPlaceholder")}
             value={closeReason}
             onChange={(e) => setCloseReason(e.target.value)}
@@ -721,7 +872,7 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
       </div>
       <div className="flex items-center gap-3">
         <button
-          className="text-[11px] px-2 py-1 bg-accent text-white rounded hover:opacity-90"
+          className="text-xs px-2 py-1 bg-accent text-white rounded hover:opacity-90"
           onClick={() => onSubmit({
             title, description,
             status, priority,
@@ -732,7 +883,7 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
         >
           {t("epic.save")}
         </button>
-        <button className="text-[11px] text-faint hover:text-body" onClick={onCancel}>{t("epic.cancel")}</button>
+        <button className="text-xs text-faint hover:text-body" onClick={onCancel}>{t("epic.cancel")}</button>
       </div>
     </div>
   );
@@ -741,9 +892,9 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
 /** 优先级徽章配色（P0 红 / P1 蓝 / P2 黄 / P3 灰）。 */
 function priorityBadge(priority: string): string {
   switch ((priority || "").toUpperCase()) {
-    case "P0": return "bg-red-500/15 text-red-300";
-    case "P1": return "bg-blue-500/15 text-blue-300";
-    case "P2": return "bg-yellow-500/15 text-yellow-300";
+    case "P0": return "bg-danger/15 text-danger";
+    case "P1": return "bg-accent-bg text-accent";
+    case "P2": return "bg-amber-bg text-amber";
     default: return "bg-elevated text-faint";
   }
 }
@@ -792,7 +943,7 @@ function StepAddForm({ onCancel, onSubmit, existingSteps }: {
       <div className="flex items-center gap-2">
         <input
           autoFocus
-          className="flex-1 bg-elevated/50 rounded px-2 py-1 text-[11px] text-heading focus:outline-none focus:ring-1 focus:ring-accent"
+          className="flex-1 bg-elevated/50 rounded px-2 py-1 text-[13px] text-heading focus:outline-none focus:ring-1 focus:ring-accent"
           placeholder={t("epic.stepTitlePlaceholder")}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
@@ -802,20 +953,20 @@ function StepAddForm({ onCancel, onSubmit, existingSteps }: {
           }}
         />
         <button
-          className="text-[10px] px-1.5 py-0.5 bg-accent text-white rounded disabled:opacity-40"
+          className="text-xs px-1.5 py-0.5 bg-accent text-white rounded disabled:opacity-40"
           disabled={!title.trim()}
           onClick={() => onSubmit(title.trim(), desc.trim() || undefined, dependsOn)}
         >
           {t("epic.addStep")}
         </button>
-        <button className="text-[10px] text-faint hover:text-body" onClick={onCancel}>{t("epic.cancel")}</button>
+        <button className="text-xs text-faint hover:text-body" onClick={onCancel}>{t("epic.cancel")}</button>
       </div>
       {existingSteps.length > 0 && (
         <div className="flex items-center gap-1.5">
-          <span className="text-[9px] text-faint shrink-0">{t("epic.depsOptional")}</span>
+          <span className="text-[11px] text-faint shrink-0">{t("epic.depsOptional")}</span>
           <select
             multiple
-            className="flex-1 bg-elevated/50 text-[9px] text-body rounded px-1 py-0.5 focus:outline-none h-10"
+            className="flex-1 bg-elevated/50 text-[11px] text-body rounded px-1 py-0.5 focus:outline-none h-10"
             value={dependsOn}
             onChange={(e) => setDependsOn(Array.from(e.target.selectedOptions).map((o) => o.value))}
             title={t("epic.stepDepsTitle")}
