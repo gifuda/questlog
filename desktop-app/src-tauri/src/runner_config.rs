@@ -7,7 +7,8 @@
 //! - `global_enabled = false` → nothing runs (master kill switch)
 //! - `global_enabled = true` → only projects with `enabled = true` are picked up
 //! - Per-epic `auto_execute` in `.epics.json` provides a third layer:
-//!   - `None` → inherit project setting
+//!   - `None` → fail-closed (explicit ▶ required; the project switch alone
+//!     must not batch-release every sealed package)
 //!   - `Some(true)` → execute when project is enabled
 //!   - `Some(false)` → never execute (even if project is enabled)
 
@@ -37,6 +38,12 @@ pub struct RunnerRuntimeConfig {
     /// Injected into each worktree as a project-level .zcode/config.json.
     #[serde(default)]
     pub executor_model: Option<String>,
+    /// Which thinking level the executor should run at (e.g. "high", "max",
+    /// "off"). None = don't inject thinking params (CLI/runtime defaults
+    /// apply). Injected by normalizing every level's providerOptionsByLevel
+    /// to the chosen level's params — decoupled from the model choice.
+    #[serde(default)]
+    pub executor_thinking: Option<String>,
     #[serde(default)]
     pub revision: u64,
 }
@@ -48,6 +55,7 @@ impl Default for RunnerRuntimeConfig {
             global_enabled: false,
             projects: HashMap::new(),
             executor_model: None,
+            executor_thinking: None,
             revision: 0,
         }
     }
@@ -185,6 +193,19 @@ pub fn set_executor_model(model: Option<String>) -> Result<(), String> {
     write_config(&mut config)
 }
 
+/// Get the configured executor thinking level, or None to use CLI/runtime
+/// defaults (no thinking params injected).
+pub fn get_executor_thinking() -> Option<String> {
+    read_config().executor_thinking
+}
+
+/// Set the executor thinking level. Takes effect on the next worktree.
+pub fn set_executor_thinking(thinking: Option<String>) -> Result<(), String> {
+    let mut config = read_config();
+    config.executor_thinking = thinking;
+    write_config(&mut config)
+}
+
 // ─── Per-epic auto_execute ───
 
 /// Check if a specific epic should auto-execute.
@@ -313,5 +334,28 @@ mod tests {
         });
         let parsed: RunnerRuntimeConfig = serde_json::from_value(raw).unwrap();
         assert!(parsed.executor_model.is_none());
+    }
+
+    #[test]
+    fn executor_thinking_roundtrip_and_backward_compat() {
+        let (_dir, _guard) = setup_temp_runtime();
+
+        assert!(get_executor_thinking().is_none());
+
+        set_executor_thinking(Some("high".to_string())).unwrap();
+        assert_eq!(get_executor_thinking().as_deref(), Some("high"));
+
+        set_executor_thinking(None).unwrap();
+        assert!(get_executor_thinking().is_none());
+
+        // Old config without the field must deserialize (serde default)
+        let raw = serde_json::json!({
+            "version": 1,
+            "global_enabled": false,
+            "projects": {},
+            "revision": 1
+        });
+        let parsed: RunnerRuntimeConfig = serde_json::from_value(raw).unwrap();
+        assert!(parsed.executor_thinking.is_none());
     }
 }

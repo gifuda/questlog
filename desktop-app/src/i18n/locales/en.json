@@ -127,7 +127,26 @@
     "stageDesigned": "Designed",
     "stageCoded": "Coded",
     "stageVerified": "Verified",
-    "stageObserved": "Observed"
+    "stageObserved": "Observed",
+    "colPlan": "Plan",
+    "colStatus": "Status",
+    "colProgress": "Progress",
+    "colFocus": "Focus",
+    "secDetails": "Details",
+    "secSteps": "Steps",
+    "pendingClose": "Pending close",
+    "observingPeriod": "Observing",
+    "observingWith": "Observing · {{acceptance}}",
+    "closedCount": " ({{done}}/{{total}} closed)",
+    "none": "—",
+    "notStarted": "Not started",
+    "resolveDeps": "Resolve dependencies",
+    "closed": "Closed",
+    "sumTotal": "Plans",
+    "sumActive": "Active",
+    "sumObserving": "Observing",
+    "sumBlocked": "Blocked",
+    "sumDone": "Done"
   },
   "execution": {
     "title": "Execution",
@@ -192,7 +211,11 @@
     "modelDefault": "Default (CLI config)",
     "modelNoneFound": "No configured models found (~/.zcode/cli/config.json)",
     "thinkingDefault": "thinking {{variant}}",
-    "thinkingReadOnlyHint": "Thinking variant {{variant}} comes from the model's API default. CLI 0.16.3 has no runtime thinking switch yet; opens after CLI upgrade."
+    "thinkingTitle": "THINKING LEVEL",
+    "thinkingLevel": "{{level}}",
+    "thinkingIsDefault": "default",
+    "thinkingFollowDefault": "Follow default (no injection)",
+    "thinkingSelectorHint": "Thinking is selected independently of the model; the level list follows your ZCode config (reasoning.variants/levels) automatically. When set, the chosen level's params are normalized across all levels in the worktree, unaffected by the CLI's global thinking setting."
   },
   "timeline": {
     "undoRemove": "Removed \"{{name}}\"",

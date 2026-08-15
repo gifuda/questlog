@@ -62,6 +62,7 @@ pub fn run() {
             commands::get_runner_runtime_status,
             commands::get_executor_options,
             commands::set_executor_model,
+            commands::set_executor_thinking,
             commands::get_runner_project_status,
             commands::set_runner_project_enabled,
             commands::get_epic_auto_execute,

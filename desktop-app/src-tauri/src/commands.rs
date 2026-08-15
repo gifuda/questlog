@@ -71,6 +71,16 @@ pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, St
             }
         };
         let (knowhow, todo, idea) = store::count_active(&data);
+        // 方案追踪 tab 的徽标：未完成（非 done）的顶级方案数。
+        // 读失败（缺文件/损坏）按 0 处理，不影响项目显示。
+        let active_epics = match epic_store::read_epics(path) {
+            Ok(d) => d
+                .epics
+                .iter()
+                .filter(|e| e.parent_id.is_none() && e.status != EpicStatus::Done)
+                .count(),
+            Err(_) => 0,
+        };
         let last_active_at = data
             .items
             .iter()
@@ -83,6 +93,7 @@ pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, St
             "name": name,
             "path": path.to_string_lossy(),
             "counts": { "knowhow": knowhow, "todo": todo, "idea": idea },
+            "active_epics": active_epics,
             "last_active_at": last_active_at
         }));
     }
@@ -1056,8 +1067,12 @@ pub struct ExecutorModelOption {
     pub id: String,
     /// Human-readable model name (e.g. "deepseek-v4-flash").
     pub name: String,
-    /// Default thinking variant from the config's reasoning spec, if any.
-    /// Read-only info: the CLI 0.16.3 has no runtime thinking switch.
+    /// Thinking levels declared for this model, following the user's ZCode
+    /// config (reasoning.levels/variants) with CLI-builtin fallbacks. The UI
+    /// lists these in the thinking selector; changing the ZCode config
+    /// automatically changes this list.
+    pub thinking_levels: Vec<String>,
+    /// Default thinking level from the config's reasoning spec, if any.
     pub thinking_default: Option<String>,
 }
 
@@ -1073,6 +1088,8 @@ pub struct ExecutorOptions {
     pub providers: Vec<ExecutorProviderOption>,
     /// Currently selected "provider/model"; None = CLI default.
     pub current_model: Option<String>,
+    /// Currently selected thinking level; None = CLI/runtime defaults.
+    pub current_thinking: Option<String>,
 }
 
 /// List the executor model options parsed from ~/.zcode/cli/config.json plus
@@ -1096,14 +1113,21 @@ pub fn get_executor_options() -> Result<ExecutorOptions, String> {
                         let mut models = Vec::new();
                         if let Some(model_map) = def.get("models").and_then(|m| m.as_object()) {
                             for (model_name, model_def) in model_map {
-                                let thinking_default = model_def
-                                    .get("reasoning")
-                                    .and_then(|r| r.get("defaultVariant"))
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
+                                let reasoning = model_def.get("reasoning");
+                                let thinking_default = ["defaultLevel", "defaultVariant"]
+                                    .iter()
+                                    .find_map(|key| {
+                                        reasoning
+                                            .and_then(|r| r.get(key))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                    });
+                                let thinking_levels =
+                                    crate::runner_git::thinking_levels_for(model_name, model_def);
                                 models.push(ExecutorModelOption {
                                     id: format!("{}/{}", name, model_name),
                                     name: model_name.clone(),
+                                    thinking_levels,
                                     thinking_default,
                                 });
                             }
@@ -1124,7 +1148,17 @@ pub fn get_executor_options() -> Result<ExecutorOptions, String> {
     Ok(ExecutorOptions {
         providers,
         current_model: crate::runner_config::get_executor_model(),
+        current_thinking: crate::runner_config::get_executor_thinking(),
     })
+}
+
+/// Set which thinking level the Runner's executor uses (e.g. "high", "max",
+/// "off"), or None to use CLI/runtime defaults. Injected into each worktree
+/// by normalizing the model's providerOptionsByLevel. Takes effect on the
+/// next worktree.
+#[tauri::command]
+pub fn set_executor_thinking(thinking: Option<String>) -> Result<(), String> {
+    crate::runner_config::set_executor_thinking(thinking)
 }
 
 /// Set which model the Runner's executor uses ("provider/model", or None to

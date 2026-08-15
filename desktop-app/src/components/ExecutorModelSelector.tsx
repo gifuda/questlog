@@ -2,18 +2,29 @@ import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useExecutorOptions } from "../hooks/useExecutions";
 
+function Check({ on }: { on: boolean }) {
+  if (!on) return null;
+  return (
+    <svg className="ml-auto w-3.5 h-3.5 text-accent shrink-0" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" />
+    </svg>
+  );
+}
+
 /**
- * ExecutorModelSelector — pick which model the Runner's executor uses.
- * Options come from ~/.zcode/cli/config.json; the selection is injected into
- * each worktree as a project-level .zcode/config.json.
+ * ExecutorModelSelector — pick which model AND thinking level the Runner's
+ * executor uses. The two are decoupled: options come from
+ * ~/.zcode/cli/config.json (level lists follow the user's ZCode config
+ * automatically), selections are stored in runner-config.json and injected
+ * into each worktree as a project-level .zcode/config.json.
  *
- * The thinking variant is shown read-only: the ZCode CLI 0.16.3 has no
- * runtime thinking switch for custom providers (verified), so the selected
- * model's API-side default applies.
+ * Thinking injection normalizes every declared level's providerOptionsByLevel
+ * to the chosen level's params, so the choice holds regardless of the CLI's
+ * global runtime reasoningLevel setting.
  */
 export default function ExecutorModelSelector() {
   const { t } = useTranslation();
-  const { options, select } = useExecutorOptions();
+  const { options, select, selectThinking } = useExecutorOptions();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -32,6 +43,8 @@ export default function ExecutorModelSelector() {
   const currentModelDef = options?.providers
     .flatMap((p) => p.models)
     .find((m) => m.id === current);
+  const thinking = options?.current_thinking ?? null;
+  const levels = currentModelDef?.thinking_levels ?? [];
 
   return (
     <div className="relative shrink-0" ref={ref}>
@@ -41,6 +54,7 @@ export default function ExecutorModelSelector() {
         title={t("execution.modelSelectorHint")}
       >
         🤖 {shortLabel}
+        {thinking && <span className="text-faint"> · {thinking}</span>}
       </button>
 
       {open && (
@@ -60,20 +74,14 @@ export default function ExecutorModelSelector() {
                     }`}
                     onClick={() => {
                       void select(model.id);
-                      setOpen(false);
+                      // Reset thinking when the chosen level doesn't exist on the new model
+                      if (thinking && !model.thinking_levels.includes(thinking)) {
+                        void selectThinking(null);
+                      }
                     }}
                   >
                     <span className="truncate">{model.name}</span>
-                    {model.thinking_default && (
-                      <span className="ml-auto text-[9px] text-faint shrink-0">
-                        {t("execution.thinkingDefault", { variant: model.thinking_default })}
-                      </span>
-                    )}
-                    {current === model.id && (
-                      <svg className="w-3.5 h-3.5 text-accent shrink-0" viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" />
-                      </svg>
-                    )}
+                    <Check on={current === model.id} />
                   </button>
                 ))}
               </div>
@@ -88,23 +96,60 @@ export default function ExecutorModelSelector() {
             className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
               current === null ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
             }`}
-            onClick={() => {
-              void select(null);
-              setOpen(false);
-            }}
+            onClick={() => void select(null)}
           >
             <span>{t("execution.modelDefault")}</span>
-            {current === null && (
-              <svg className="ml-auto w-3.5 h-3.5 text-accent" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" />
-              </svg>
-            )}
+            <Check on={current === null} />
           </button>
 
+          <div className="my-1 border-t border-line" />
+
+          <div className="px-3 pb-1 pt-1.5 text-[10px] text-faint uppercase tracking-wider">
+            {t("execution.thinkingTitle")}
+          </div>
+          {levels.length > 0 ? (
+            <>
+              {levels.map((level) => (
+                <button
+                  key={level}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
+                    thinking === level ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
+                  }`}
+                  onClick={() => void selectThinking(level)}
+                >
+                  <span className="truncate">{t("execution.thinkingLevel", { level })}</span>
+                  {currentModelDef?.thinking_default === level && (
+                    <span className="text-[9px] text-faint shrink-0">
+                      {t("execution.thinkingIsDefault")}
+                    </span>
+                  )}
+                  <Check on={thinking === level} />
+                </button>
+              ))}
+              <button
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
+                  thinking === null ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
+                }`}
+                onClick={() => void selectThinking(null)}
+              >
+                <span>{t("execution.thinkingFollowDefault")}</span>
+                <Check on={thinking === null} />
+              </button>
+            </>
+          ) : (
+            <button
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
+                thinking === null ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
+              }`}
+              onClick={() => void selectThinking(null)}
+            >
+              <span>{t("execution.thinkingFollowDefault")}</span>
+              <Check on={thinking === null} />
+            </button>
+          )}
+
           <div className="px-3 pt-2 text-[9px] text-faint leading-relaxed border-t border-line mt-1">
-            {currentModelDef?.thinking_default
-              ? t("execution.thinkingReadOnlyHint", { variant: currentModelDef.thinking_default })
-              : t("execution.modelSelectorHint")}
+            {t("execution.thinkingSelectorHint")}
           </div>
         </div>
       )}

@@ -127,7 +127,26 @@
     "stageDesigned": "已设计",
     "stageCoded": "已实施",
     "stageVerified": "已验证",
-    "stageObserved": "已观察"
+    "stageObserved": "已观察",
+    "colPlan": "方案",
+    "colStatus": "状态",
+    "colProgress": "进度",
+    "colFocus": "焦点",
+    "secDetails": "详情",
+    "secSteps": "步骤",
+    "pendingClose": "待收尾",
+    "observingPeriod": "观察期中",
+    "observingWith": "观察期 · {{acceptance}}",
+    "closedCount": "（{{done}}/{{total}} 已闭环）",
+    "none": "—",
+    "notStarted": "未启动",
+    "resolveDeps": "需解除依赖",
+    "closed": "已闭环",
+    "sumTotal": "方案",
+    "sumActive": "进行",
+    "sumObserving": "观察",
+    "sumBlocked": "阻塞",
+    "sumDone": "完成"
   },
   "execution": {
     "title": "执行记录",
@@ -192,7 +211,11 @@
     "modelDefault": "默认（CLI 配置）",
     "modelNoneFound": "未找到已配置的模型（~/.zcode/cli/config.json）",
     "thinkingDefault": "思考 {{variant}}",
-    "thinkingReadOnlyHint": "思考档 {{variant}} 由模型 API 默认决定。当前 CLI 0.16.3 暂不支持运行时切换思考程度，升级后开放。"
+    "thinkingTitle": "思考程度",
+    "thinkingLevel": "{{level}}",
+    "thinkingIsDefault": "默认",
+    "thinkingFollowDefault": "跟随默认（不注入）",
+    "thinkingSelectorHint": "思考程度与模型独立选择；档位列表自动跟随 ZCode 配置（reasoning.variants/levels）。选择后注入 worktree：所选档参数归一化应用到全部档位，不受 CLI 全局思考设置影响。"
   },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",

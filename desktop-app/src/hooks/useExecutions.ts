@@ -217,6 +217,8 @@ export interface ProjectRunnerStatus {
 export interface ExecutorModelOption {
   id: string; // "provider/model"
   name: string;
+  /** Thinking levels from the user's ZCode config (auto-follows config edits) */
+  thinking_levels: string[];
   thinking_default: string | null;
 }
 
@@ -229,6 +231,7 @@ export interface ExecutorProviderOption {
 export interface ExecutorOptions {
   providers: ExecutorProviderOption[];
   current_model: string | null;
+  current_thinking: string | null;
 }
 
 /**
@@ -261,7 +264,15 @@ export function useExecutorOptions() {
     [refresh],
   );
 
-  return { options, select, refresh };
+  const selectThinking = useCallback(
+    async (thinking: string | null) => {
+      await invoke("set_executor_thinking", { thinking });
+      await refresh();
+    },
+    [refresh],
+  );
+
+  return { options, select, selectThinking, refresh };
 }
 
 /**

@@ -128,6 +128,13 @@ pub fn create_worktree(
 /// because project configs don't merge the global provider table). The
 /// provider def is copied verbatim from `~/.zcode/cli/config.json`.
 ///
+/// `thinking` optionally pins the executor's thinking level by REWRITING the
+/// model's `reasoning` block: every level in `providerOptionsByLevel` gets the
+/// chosen level's params (normalized injection, mock-verified). This decouples
+/// thinking from the model choice without any CLI flag — the runtime DB-level
+/// `reasoningLevel` setting can then name any level; they all resolve to the
+/// same injected params.
+///
 /// Zero-intrusion: the file lives only inside the temp worktree and is
 /// removed with it. Failures are non-fatal (warn) — execution then falls back
 /// to the CLI's own default model.
@@ -139,12 +146,93 @@ fn provision_zcode_config(worktree_path: &Path, model: &str) {
             return;
         }
     };
-    provision_zcode_config_from(&home, worktree_path, model);
+    let thinking = crate::runner_config::get_executor_thinking();
+    provision_zcode_config_from(&home, worktree_path, model, thinking.as_deref());
+}
+
+/// Level names the CLI treats as "thinking disabled" (bundle: sve()).
+const OFF_LEVELS: [&str; 4] = ["off", "nothink", "disabled", "none"];
+
+/// Budget tokens per level, mirroring the CLI 0.16.3 bundle constants:
+/// eFr = {max: 32000, high: 16000} (anthropic), kKo = {low: 8000, high: 16000,
+/// max: 32000} (openai-compatible). Unknown levels fall back to 16000.
+fn native_budget_tokens(model_name: &str, level: &str) -> u64 {
+    // CLI builtin deepseek-v4 matcher uses a fixed small budget (aFr = 1024)
+    // for both its levels.
+    if model_name.contains("deepseek-v4") {
+        return 1024;
+    }
+    match level {
+        "max" => 32000,
+        "high" => 16000,
+        "low" => 8000,
+        _ => 16000,
+    }
+}
+
+/// The per-level provider options the CLI itself would send, for anthropic
+/// kind. Priority: user-declared `providerOptionsByLevel[level]` (CLI-native
+/// schema, copied verbatim — user's ZCode config wins) → off-like level →
+/// generic native table (effort + budgetTokens).
+fn native_thinking_options(model_name: &str, model_def: &serde_json::Value, level: &str) -> serde_json::Value {
+    if let Some(user) = model_def
+        .get("reasoning")
+        .and_then(|r| r.get("providerOptionsByLevel"))
+        .and_then(|p| p.get(level))
+        .filter(|v| v.is_object())
+    {
+        return user.clone();
+    }
+    if OFF_LEVELS.contains(&level) {
+        return serde_json::json!({"anthropic": {"thinking": {"type": "disabled"}}});
+    }
+    serde_json::json!({
+        "anthropic": {
+            "effort": level,
+            "thinking": {"budgetTokens": native_budget_tokens(model_name, level), "type": "enabled"}
+        }
+    })
+}
+
+/// The model's thinking level list, following the user's ZCode config:
+/// `reasoning.levels` (CLI naming) → `reasoning.variants` (v2 desktop naming,
+/// what the user's config actually carries) → CLI builtin matchers → generic.
+pub fn thinking_levels_for(model_name: &str, model_def: &serde_json::Value) -> Vec<String> {
+    let reasoning = model_def.get("reasoning");
+    for key in ["levels", "variants"] {
+        if let Some(list) = reasoning
+            .and_then(|r| r.get(key))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+        {
+            return list;
+        }
+    }
+    // CLI builtin capability matchers (bundle): deepseek-v4 → [high, max];
+    // glm-5.2 → [max, high, nothink]
+    let lower = model_name.to_lowercase();
+    if lower.contains("deepseek-v4") {
+        return vec!["high".into(), "max".into()];
+    }
+    if lower.starts_with("glm-5.2") {
+        return vec!["max".into(), "high".into(), "nothink".into()];
+    }
+    vec!["high".into(), "max".into()]
 }
 
 /// Testable core of `provision_zcode_config`: reads the ZCode config from
 /// `<zcode_home>/.zcode/cli/config.json` instead of the real home.
-fn provision_zcode_config_from(zcode_home: &Path, worktree_path: &Path, model: &str) {
+fn provision_zcode_config_from(
+    zcode_home: &Path,
+    worktree_path: &Path,
+    model: &str,
+    thinking: Option<&str>,
+) {
     let provider_name = model.split('/').next().unwrap_or("");
     if provider_name.is_empty() || !model.contains('/') {
         log::warn!(
@@ -192,6 +280,44 @@ fn provision_zcode_config_from(zcode_home: &Path, worktree_path: &Path, model: &
         }
     };
 
+    let mut provider_def = provider_def;
+    let model_name = model.split('/').nth(1).unwrap_or("");
+    if let Some(level) = thinking {
+        // Normalize: every declared level maps to the CHOSEN level's params,
+        // so whichever level the runtime resolves to, the request carries the
+        // user's selection.
+        let models = provider_def.get_mut("models").and_then(|m| m.as_object_mut());
+        let model_entry = models
+            .and_then(|m| m.get_mut(model_name))
+            .filter(|e| e.is_object());
+        match model_entry {
+            Some(entry) => {
+                let levels = thinking_levels_for(model_name, entry);
+                let mut povl = serde_json::Map::new();
+                for lv in &levels {
+                    povl.insert(lv.clone(), native_thinking_options(model_name, entry, level));
+                }
+                let reasoning = serde_json::json!({
+                    "enabled": true,
+                    "levels": levels,
+                    "defaultLevel": level,
+                    "providerOptionsByLevel": povl,
+                });
+                entry
+                    .as_object_mut()
+                    .expect("filtered is_object above")
+                    .insert("reasoning".to_string(), reasoning);
+            }
+            None => {
+                log::warn!(
+                    "model '{}' not found in provider '{}'; thinking level not injected",
+                    model_name,
+                    provider_name
+                );
+            }
+        }
+    }
+
     let mut project_config = serde_json::Map::new();
     project_config.insert(
         "model".to_string(),
@@ -212,7 +338,10 @@ fn provision_zcode_config_from(zcode_home: &Path, worktree_path: &Path, model: &
             if let Err(e) = std::fs::write(&file, content) {
                 log::warn!("write worktree zcode config failed: {e}");
             } else {
-                log::info!("executor model '{}' provisioned into worktree", model);
+                log::info!(
+                    "executor model '{}' (thinking {:?}) provisioned into worktree",
+                    model, thinking
+                );
             }
         }
         Err(e) => log::warn!("serialize worktree zcode config failed: {e}"),
@@ -1033,7 +1162,7 @@ fn provision_zcode_config_writes_model_and_provider_def() {
     std::fs::write(config_dir.join("config.json"), main_config.to_string()).unwrap();
 
     // Provision GLM-5.2 into the worktree
-    provision_zcode_config_from(home.path(), worktree.path(), "bigmodel/GLM-5.2");
+    provision_zcode_config_from(home.path(), worktree.path(), "bigmodel/GLM-5.2", None);
 
     let written = std::fs::read_to_string(worktree.path().join(".zcode").join("config.json"))
         .expect("worktree .zcode/config.json must exist");
@@ -1060,6 +1189,135 @@ fn provision_zcode_config_skips_unknown_provider_without_panic() {
     .unwrap();
 
     // Unknown provider → warn + skip, no file written, no panic
-    provision_zcode_config_from(home.path(), worktree.path(), "ghost/model-x");
+    provision_zcode_config_from(home.path(), worktree.path(), "ghost/model-x", None);
     assert!(!worktree.path().join(".zcode").join("config.json").exists());
+}
+
+#[test]
+fn thinking_levels_follow_user_config() {
+    // v2 naming (variants array) — what the user's config actually carries
+    let ds = serde_json::json!({"reasoning": {"variants": ["off", "high", "max"]}});
+    assert_eq!(
+        thinking_levels_for("deepseek-v4-flash", &ds),
+        vec!["off", "high", "max"]
+    );
+    // CLI naming wins when present
+    let cli_named = serde_json::json!({"reasoning": {"levels": ["high", "max"]}});
+    assert_eq!(
+        thinking_levels_for("anything", &cli_named),
+        vec!["high", "max"]
+    );
+    // Builtin fallbacks
+    assert_eq!(
+        thinking_levels_for("deepseek-v4-pro", &serde_json::json!({})),
+        vec!["high", "max"]
+    );
+    assert_eq!(
+        thinking_levels_for("GLM-5.2", &serde_json::json!({})),
+        vec!["max", "high", "nothink"]
+    );
+}
+
+#[test]
+fn provision_zcode_config_normalizes_thinking_levels() {
+    let home = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let main_config = serde_json::json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "provider": {
+            "deepseek": {
+                "kind": "anthropic",
+                "options": {"apiKey": "sk", "baseURL": "https://x"},
+                "models": {
+                    "deepseek-v4-flash": {"reasoning": {"enabled": true, "variants": ["off", "high", "max"], "defaultVariant": "max"}}
+                }
+            }
+        }
+    });
+    let config_dir = home.path().join(".zcode").join("cli");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.json"), main_config.to_string()).unwrap();
+
+    // Choose "off": every declared level must map to thinking disabled.
+    provision_zcode_config_from(
+        home.path(),
+        worktree.path(),
+        "deepseek/deepseek-v4-flash",
+        Some("off"),
+    );
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(worktree.path().join(".zcode").join("config.json")).unwrap(),
+    )
+    .unwrap();
+    let reasoning = &written["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["reasoning"];
+    assert_eq!(reasoning["defaultLevel"].as_str(), Some("off"));
+    for level in ["off", "high", "max"] {
+        assert_eq!(
+            reasoning["providerOptionsByLevel"][level]["anthropic"]["thinking"]["type"],
+            "disabled",
+            "level {level} must normalize to disabled"
+        );
+    }
+
+    // Choose "max" on a fresh worktree: every level gets the deepseek-v4
+    // native budget (1024) with type enabled.
+    let worktree2 = tempfile::tempdir().unwrap();
+    provision_zcode_config_from(
+        home.path(),
+        worktree2.path(),
+        "deepseek/deepseek-v4-flash",
+        Some("max"),
+    );
+    let written2: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(worktree2.path().join(".zcode").join("config.json")).unwrap(),
+    )
+    .unwrap();
+    let r2 = &written2["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["reasoning"];
+    for level in ["off", "high", "max"] {
+        assert_eq!(r2["providerOptionsByLevel"][level]["anthropic"]["thinking"]["budgetTokens"], 1024);
+        assert_eq!(r2["providerOptionsByLevel"][level]["anthropic"]["thinking"]["type"], "enabled");
+        assert_eq!(r2["providerOptionsByLevel"][level]["anthropic"]["effort"], "max");
+    }
+}
+
+#[test]
+fn provision_zcode_config_user_provider_options_win() {
+    // If the user's config carries CLI-native providerOptionsByLevel for the
+    // chosen level, those params are copied verbatim (user config wins over
+    // our builtin table).
+    let home = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let main_config = serde_json::json!({
+        "model": "bigmodel/GLM-5.2",
+        "provider": {
+            "bigmodel": {
+                "kind": "anthropic",
+                "options": {"apiKey": "k", "baseURL": "https://x"},
+                "models": {
+                    "GLM-5.2": {"reasoning": {
+                        "enabled": true,
+                        "levels": ["high", "max"],
+                        "providerOptionsByLevel": {
+                            "high": {"anthropic": {"thinking": {"budgetTokens": 5555, "type": "enabled"}}}
+                        }
+                    }}
+                }
+            }
+        }
+    });
+    let config_dir = home.path().join(".zcode").join("cli");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.json"), main_config.to_string()).unwrap();
+
+    provision_zcode_config_from(home.path(), worktree.path(), "bigmodel/GLM-5.2", Some("high"));
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(worktree.path().join(".zcode").join("config.json")).unwrap(),
+    )
+    .unwrap();
+    let povl = &written["provider"]["bigmodel"]["models"]["GLM-5.2"]["reasoning"]
+        ["providerOptionsByLevel"];
+    // The user's high params (5555) applied to every level
+    for level in ["high", "max"] {
+        assert_eq!(povl[level]["anthropic"]["thinking"]["budgetTokens"], 5555);
+    }
 }
