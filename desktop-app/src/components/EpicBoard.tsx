@@ -54,7 +54,7 @@ interface EpicBoardProps {
 export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { t, i18n } = useTranslation();
   const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep } = useEpics(projectPath);
-  const { status: projectStatus, loading: projectLoading, toggle: toggleProjectRunner } = useProjectRunner(projectPath);
+  const { status: projectStatus, loading: projectLoading, toggle: toggleProjectRunner, toggleGlobal } = useProjectRunner(projectPath);
   const { status: runnerStatus, lastPollSecsAgo } = useRunnerStatus();
   const [showNewEpic, setShowNewEpic] = useState(false);
   const lang = i18n.resolvedLanguage ?? "zh";
@@ -77,16 +77,34 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
         </div>
       )}
 
-      {/* Runner 控制行 — 模型选择 + 项目开关 */}
+      {/* Runner 控制行 — 总闸 + 模型选择 + 项目开关 */}
       <div className="px-4 py-1.5 border-b border-line/50 flex items-center justify-end gap-2">
+        <button
+          onClick={toggleGlobal}
+          disabled={projectLoading || !projectStatus}
+          title={
+            projectStatus?.global_enabled
+              ? t("execution.globalOnTitle")
+              : t("execution.globalOffTitle")
+          }
+          className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors shrink-0 disabled:opacity-40 ${
+            projectStatus?.global_enabled
+              ? "bg-success/15 text-success hover:bg-success/25"
+              : "bg-danger/15 text-danger hover:bg-danger/25"
+          }`}
+        >
+          ⏻ {projectStatus?.global_enabled ? t("execution.globalOn") : t("execution.globalOff")}
+        </button>
         <ExecutorModelSelector />
         <button
           onClick={toggleProjectRunner}
           disabled={projectLoading}
           title={
-            projectStatus?.project_enabled
-              ? t("execution.projectRunnerEffective")
-              : t("execution.projectRunnerOn")
+            projectStatus?.project_enabled && !projectStatus?.global_enabled
+              ? t("execution.projectBlockedByGlobal")
+              : projectStatus?.project_enabled
+                ? t("execution.projectRunnerEffective")
+                : t("execution.projectRunnerOn")
           }
           className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors shrink-0 disabled:opacity-40 ${
             projectStatus?.project_enabled
@@ -150,6 +168,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                     onAddStep={(id, title, desc, dependsOn) => addStep(id, title, desc, dependsOn)}
                     onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
                     onDeleteStep={(stepId) => deleteStep(stepId)}
+                    projectPath={projectPath}
                   />
                 ))}
               </Fragment>
@@ -372,17 +391,18 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
   const [autoExec, setAutoExec] = useState<boolean | null>(null);
   const isTopLevel = depth === 0;
 
-  // Load auto_execute setting for top-level epics
+  // Load auto_execute setting (top-level AND child epics — the Runner gates
+  // on the package's own epic, so child epics need their own switch)
   useEffect(() => {
-    if (isTopLevel && projectPath) {
+    if (projectPath) {
       getEpicAutoExecute(epic.id, projectPath).then(setAutoExec);
     }
-  }, [epic.id, projectPath, isTopLevel]);
+  }, [epic.id, projectPath]);
 
   const toggleAutoExec = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!projectPath) return;
-    // Cycle: null(inherit) → true → false → null
+    // Cycle: null(fail-closed, 未授权) → true → false → null
     const next = autoExec === null ? true : autoExec === true ? false : null;
     await setEpicAutoExecute(epic.id, projectPath, next);
     setAutoExec(next);
@@ -429,7 +449,7 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
           <span className={`text-[11px] font-mono px-1.5 py-px rounded shrink-0 ${priorityBadge(epic.priority)}`}>
             {epic.priority}
           </span>
-          {isTopLevel && projectPath && (
+          {projectPath && (
             <button
               onClick={toggleAutoExec}
               title={

@@ -285,6 +285,13 @@ const ACCEPTANCE_REGISTRY: Record<string, TrustedCommand> = {
     cwd: ".",
     description: "Verify the exact candidate commit has a clean patch",
   },
+  "verify:readonly": {
+    id: "verify:readonly",
+    command: "git diff --quiet HEAD",
+    cwd: ".",
+    description:
+      "Read-only artifact contract: worktree unchanged vs base (pair with a non-empty stdout report)",
+  },
   // ── TypeScript (MCP server) ──
   "test:mcp": {
     id: "test:mcp",

@@ -169,14 +169,26 @@ impl Executor for ZCodeExecutor {
             "yolo"
         };
 
-        let mut command = self.build_command();
+        // Execution-time capability isolation: seatbelt write-scope +
+        // credential read-deny, git network-op shim, env scrub. The package's
+        // declared scope is still verified post-hoc — this is the runtime half.
+        let (program, args, seatbelt_active) = crate::executor_sandbox::wrap_with_seatbelt(
+            &self.binary,
+            &self.binary_args,
+            worktree_path,
+            sandbox,
+        );
+        let mut command = Command::new(&program);
+        command.args(&args);
         command
             .arg("--prompt")
             .arg(task)
             .arg("--cwd")
             .arg(worktree_path)
             .arg("--mode")
-            .arg(mode)
+            .arg(mode);
+        crate::executor_sandbox::apply_isolation(&mut command, seatbelt_active)?;
+        command
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file));
         #[cfg(unix)]
@@ -220,9 +232,21 @@ impl Executor for ZCodeExecutor {
         let stderr_file =
             std::fs::File::create(&stderr_path).map_err(|e| format!("create stderr: {e}"))?;
 
-        let mode = if sandbox == "read-only" { "plan" } else { "yolo" };
+        let mode = if sandbox == "read-only" {
+            "plan"
+        } else {
+            "yolo"
+        };
 
-        let mut command = self.build_command();
+        // Same isolation as start(): seatbelt + git shim + env scrub.
+        let (program, args, seatbelt_active) = crate::executor_sandbox::wrap_with_seatbelt(
+            &self.binary,
+            &self.binary_args,
+            worktree_path,
+            sandbox,
+        );
+        let mut command = Command::new(&program);
+        command.args(&args);
         command
             .arg("--prompt")
             .arg(task)
@@ -231,7 +255,9 @@ impl Executor for ZCodeExecutor {
             .arg("--cwd")
             .arg(worktree_path)
             .arg("--mode")
-            .arg(mode)
+            .arg(mode);
+        crate::executor_sandbox::apply_isolation(&mut command, seatbelt_active)?;
+        command
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file));
         #[cfg(unix)]

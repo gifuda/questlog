@@ -215,7 +215,12 @@
     "thinkingLevel": "{{level}}",
     "thinkingIsDefault": "默认",
     "thinkingFollowDefault": "跟随默认（不注入）",
-    "thinkingSelectorHint": "思考程度与模型独立选择；档位列表自动跟随 ZCode 配置（reasoning.variants/levels）。选择后注入 worktree：所选档参数归一化应用到全部档位，不受 CLI 全局思考设置影响。"
+    "thinkingSelectorHint": "思考程度与模型独立选择；档位列表自动跟随 ZCode 配置（reasoning.variants/levels）。选择后注入 worktree：所选档参数归一化应用到全部档位，不受 CLI 全局思考设置影响。",
+    "globalOn": "总闸 开",
+    "globalOff": "总闸 关",
+    "globalOnTitle": "Runner 总闸已开（点击急停：停止一切自动领取）",
+    "globalOffTitle": "Runner 总闸已关（急停中：项目开关不生效，点击恢复）",
+    "projectBlockedByGlobal": "项目开关已开，但总闸（⏻）关闭中——不会自动执行"
   },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",

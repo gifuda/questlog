@@ -111,6 +111,24 @@ export async function prepareTaskPackage(
     return { error: "cannot read git HEAD SHA — is the repository initialized with at least one commit?" };
   }
 
+  // The step must exist in the target project's .epics.json — a package for
+  // a phantom step can never write back its summary at seal time and would
+  // be cancelled late (after validation work). Fail early with a clear fix.
+  const epicsResult = await readEpicsSafe(projectPath);
+  if (!("ok" in epicsResult)) {
+    return {
+      error: `cannot verify step '${input.step_id}': .epics.json ${"notFound" in epicsResult ? "missing" : "unreadable"} in ${projectPath} — create the epic/step first (push_epic/push_step)`,
+    };
+  }
+  const targetStep = epicsResult.data.steps.find(
+    (s) => s.id === input.step_id && s.epic_id === input.epic_id,
+  );
+  if (!targetStep) {
+    return {
+      error: `step '${input.step_id}' not found in epic '${input.epic_id}' (${projectPath}) — create the step first (push_step)`,
+    };
+  }
+
   // Build draft package
   const packageId = `pkg_${crypto.randomUUID()}`;
   const draftPkg: TaskPackage = {
@@ -362,7 +380,20 @@ export async function sealTaskPackage(
   cwd: string,
   packageId: string,
 ): Promise<SealResult | { error: string }> {
-  // First validate
+  // Immutability gate FIRST: only a draft (or a blocked/failed package being
+  // deliberately revised) may be sealed. Re-sealing a sealed/ready package
+  // would silently overwrite sealed_at/hash/revision — breaking the
+  // "sealed = frozen" invariant the Runner's hash verification relies on.
+  // To change content, prepare a new revision instead.
+  const existing = await getPackage(packageId);
+  if ("error" in existing) return { error: existing.error };
+  if (!["draft", "blocked", "failed"].includes(existing.pkg.status)) {
+    return {
+      error: `package ${packageId} is '${existing.pkg.status}' — sealed packages are immutable; prepare a new revision (prepare_task_package) instead of re-sealing`,
+    };
+  }
+
+  // Then validate
   const valResult = await validateTaskPackage(cwd, packageId);
   if ("error" in valResult) return { error: valResult.error };
   if (!valResult.valid) {
@@ -374,9 +405,7 @@ export async function sealTaskPackage(
   }
 
   // Get package and seal it
-  const pkgResult = await getPackage(packageId);
-  if ("error" in pkgResult) return { error: pkgResult.error };
-  const pkg = pkgResult.pkg;
+  const pkg = existing.pkg;
 
   // sealed_at is part of the immutable content, so set it before hashing.
   pkg.sealed_at = new Date().toISOString();
@@ -632,6 +661,7 @@ export interface ReadinessResult {
   will_be_picked_up: boolean;
   blockers: ReadinessBlocker[];
   runner_side_checks: {
+    global_enabled: boolean;
     project_enabled: boolean;
     epic_auto_execute_allows: boolean;
     runner_thread_alive: boolean;
@@ -648,13 +678,17 @@ interface RunnerConfigFile {
   revision?: number;
 }
 
-/** Execution status values considered "in-flight" by the Runner. */
-const IN_FLIGHT_STATUSES = new Set([
-  "Queued",
-  "Running",
-  "Candidate",
-  "Verifying",
-  "PauseRequested",
+/** Execution status values considered "in-flight" by the Runner.
+ * Rust ExecutionStatus serializes snake_case (`#[serde(rename_all =
+ * "snake_case")]`) — an earlier PascalCase version of this set never matched
+ * any real execution. Keep these exact. */
+export const IN_FLIGHT_STATUSES = new Set([
+  "queued",
+  "running",
+  "candidate",
+  "verifying",
+  "cancel_requested",
+  "pause_requested",
 ]);
 
 /** Execution record shape (subset of Rust Execution struct). */
@@ -728,8 +762,19 @@ export async function verifyPickupReadiness(
 
   const blockers: ReadinessBlocker[] = [];
 
-  // Check 1: project enabled
+  // Check 0: the master kill switch. Mirrors poll_once's first gate —
+  // without it, MCP would report "eligible" while the Runner never polls.
   const config = await readRunnerConfig();
+  const globalEnabled = config?.global_enabled === true;
+  if (!globalEnabled) {
+    blockers.push({
+      check: "global_enabled",
+      reason:
+        "runner-config.json global_enabled is not true — the master kill switch is OFF, no package will be claimed regardless of project/epic switches",
+    });
+  }
+
+  // Check 1: project enabled
   const projectEnabled = config?.projects?.[pkg.project_path]?.enabled === true;
   if (!projectEnabled) {
     blockers.push({
@@ -738,14 +783,23 @@ export async function verifyPickupReadiness(
     });
   }
 
-  // Check 2: epic auto_execute (read .epics.json). Mirrors Rust
-  // is_epic_auto_execute: only an explicit `auto_execute: true` authorizes —
-  // null is fail-closed (no implicit inheritance from the project switch).
+  // Check 2: epic auto_execute (read .epics.json). Fail-closed on BOTH
+  // ends: only an explicit `auto_execute: true` authorizes — null is
+  // fail-closed (no implicit inheritance from the project switch), and a
+  // missing/unreadable epic file or unknown epic is a BLOCKER (a package
+  // whose epic can't be verified must not report "will be picked up" and
+  // then burn an attempt into PreflightBlocked).
   let epicAutoExecuteAllows = true;
   const epicsResult = await readEpicsSafe(pkg.project_path);
   if ("ok" in epicsResult) {
     const epic = epicsResult.data.epics.find((e) => e.id === pkg.epic_id);
-    if (epic && epic.auto_execute !== true) {
+    if (!epic) {
+      epicAutoExecuteAllows = false;
+      blockers.push({
+        check: "epic_auto_execute_allows",
+        reason: `epic '${pkg.epic_id}' not found in ${pkg.project_path}/.epics.json`,
+      });
+    } else if (epic.auto_execute !== true) {
       epicAutoExecuteAllows = false;
       blockers.push({
         check: "epic_auto_execute_allows",
@@ -755,8 +809,13 @@ export async function verifyPickupReadiness(
             : `epic '${pkg.epic_id}' has no explicit auto_execute=true (switch not opened)`,
       });
     }
+  } else {
+    epicAutoExecuteAllows = false;
+    blockers.push({
+      check: "epic_auto_execute_allows",
+      reason: `.epics.json ${"notFound" in epicsResult ? "missing" : "unreadable"} in ${pkg.project_path} — cannot verify epic authorization`,
+    });
   }
-  // If epic file missing/epic not found → permissive (matches Rust is_epic_auto_execute)
 
   // Check 3: already in-flight
   const executions = await readExecutions();
@@ -785,11 +844,12 @@ export async function verifyPickupReadiness(
     }
   }
 
-  // Runner thread is alive iff at least one project is enabled (the Rust
-  // Runner auto-starts on first enable, auto-stops when none enabled).
+  // Runner thread is alive iff the master kill switch is ON and at least
+  // one project is enabled (the Rust Runner's exact thread-management rule).
   const anyProjectEnabled = config
     ? Object.values(config.projects).some((p) => p.enabled)
     : false;
+  const runnerThreadAlive = globalEnabled && anyProjectEnabled;
 
   const willBePickedUp =
     blockers.length === 0 &&
@@ -801,9 +861,10 @@ export async function verifyPickupReadiness(
     will_be_picked_up: willBePickedUp,
     blockers,
     runner_side_checks: {
+      global_enabled: globalEnabled,
       project_enabled: projectEnabled,
       epic_auto_execute_allows: epicAutoExecuteAllows,
-      runner_thread_alive: anyProjectEnabled,
+      runner_thread_alive: runnerThreadAlive,
       already_in_flight: alreadyInFlight,
     },
     acceptance_commands_available: commandsAvailable,

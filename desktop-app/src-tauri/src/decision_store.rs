@@ -152,6 +152,20 @@ pub fn resolve_request(
                 request_id
             ));
         }
+        // Options validation (both ends enforce this — MCP resolveDecision
+        // does the same): when the request declares options, the resolution
+        // must be one of them (case-insensitive).
+        if !request.options.is_empty()
+            && !request
+                .options
+                .iter()
+                .any(|option| option.eq_ignore_ascii_case(resolution.trim()))
+        {
+            return Err(format!(
+                "resolution '{}' is not one of the declared options: {:?}",
+                resolution, request.options
+            ));
+        }
         request.resolved = true;
         request.resolution = Some(resolution.trim().to_string());
         request.resolved_by = Some(resolved_by.to_string());
@@ -191,5 +205,38 @@ mod tests {
         resolve_request(&first.request_id, "retry", "ui-user").unwrap();
         assert!(list_requests(false).unwrap().is_empty());
         assert_eq!(list_requests(true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resolution_must_match_declared_options() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("QUESTLOG_RUNTIME", dir.path());
+        let request = create_request(NewDecisionRequest {
+            epic_id: "e1",
+            step_id: "s1",
+            execution_id: "x2",
+            kind: "blocked",
+            question: "Pick one",
+            options: vec!["retry".to_string(), "cancel".to_string()],
+            evidence_refs: vec![],
+            package_revision: 1,
+        })
+        .unwrap();
+
+        let bad = resolve_request(&request.request_id, "do something else", "ui-user");
+        assert!(
+            bad.is_err(),
+            "free text must be rejected when options exist"
+        );
+        assert!(bad.unwrap_err().contains("not one of the declared options"));
+        // Still unresolved after the rejection.
+        assert_eq!(list_requests(false).unwrap().len(), 1);
+
+        // Case-insensitive match on a declared option works.
+        resolve_request(&request.request_id, "Retry", "ui-user").unwrap();
+        assert!(list_requests(false).unwrap().is_empty());
     }
 }

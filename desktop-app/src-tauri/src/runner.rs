@@ -92,6 +92,14 @@ pub enum RunResult {
         execution_id: String,
         error: String,
     },
+    /// The work finished but the AttemptBundle could not be sealed (disk
+    /// full, read-only FS, rename failure). A success without sealed,
+    /// integrity-hashed evidence is NOT a success — this converts Passed/
+    /// NoDiff into a blocked outcome with a DecisionRequest.
+    EvidenceSealFailed {
+        execution_id: String,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +108,26 @@ enum SupervisionOutcome {
     Cancelled,
     Paused,
     TimedOut,
+}
+
+/// The base a package's worktree must start from.
+#[derive(Debug)]
+enum EffectiveBase {
+    /// Current main HEAD — all predecessor work is merged (or there are no
+    /// predecessors).
+    Head(String),
+    /// A predecessor step's passed-but-unmerged candidate commit: the
+    /// successor chains onto it so multi-step work sees earlier steps'
+    /// changes before anything merges to main.
+    PredecessorCandidate(String),
+}
+
+impl EffectiveBase {
+    fn sha(&self) -> &str {
+        match self {
+            Self::Head(sha) | Self::PredecessorCandidate(sha) => sha,
+        }
+    }
 }
 
 /// The Runner — bridges packages.json → executions.json → CLI execution.
@@ -120,6 +148,11 @@ impl Runner {
     /// Returns the number of packages processed.
     pub fn poll_once(&mut self) -> Result<usize, String> {
         if !self.config.enabled {
+            return Ok(0);
+        }
+        // Master kill switch — checked on every poll so a global OFF takes
+        // effect at the next cycle without waiting for an app restart.
+        if !crate::runner_config::is_globally_enabled() {
             return Ok(0);
         }
 
@@ -171,123 +204,78 @@ impl Runner {
 
             let executions = execution_store::list_executions()?;
 
-            // Auto re-anchor: a sealed package whose base SHA drifted (the
-            // project moved after sealing — normal for an actively-developed
-            // repo) is re-based onto the current HEAD instead of being
-            // claimed and blocked. Content fields are untouched. Eligible
-            // unless this package already SUCCEEDED once (a passed execution
-            // is the trust anchor; failed/timeout attempts don't block —
-            // their retry re-anchors fresh, which also disables resume via
-            // the base-mismatch check).
+            // Auto re-anchor onto the EFFECTIVE base: the current HEAD when
+            // all predecessor work is merged, or the single unmerged
+            // predecessor candidate (commit lineage) when the chain has not
+            // merged yet — successors must see predecessor changes. Content
+            // fields are untouched. Eligible unless this package already
+            // SUCCEEDED once (a passed execution is the trust anchor;
+            // failed/timeout attempts don't block — their retry re-anchors
+            // fresh, which also disables resume via the base-mismatch check).
+            // A resolution failure (e.g. multiple unmerged predecessor
+            // candidates) is NOT decided here — the claim path's preflight
+            // surfaces it as PreflightBlocked with a DecisionRequest.
             let pkg = {
-                let drifted = match runner_git::read_head_sha(&PathBuf::from(&pkg.repo_root)) {
-                    Ok(head) => head != pkg.base_sha,
-                    Err(_) => false, // unreachable repo fails preflight anyway
-                };
-                if drifted
-                    && !executions.iter().any(|e| {
-                        e.package_id == pkg.package_id && e.status == ExecutionStatus::Passed
-                    })
-                {
-                    match runner_git::read_head_sha(&PathBuf::from(&pkg.repo_root)) {
-                        Ok(head) => {
-                            match execution_store::reanchor_package(
-                                &pkg.package_id,
-                                &head,
-                                &pkg.project_path,
-                                &pkg.step_id,
-                            ) {
-                                Ok(reshored) => {
-                                    log::info!(
-                                        "Runner: re-anchored {} to HEAD {} (rev {})",
-                                        pkg.package_id,
-                                        &head[..8.min(head.len())],
-                                        reshored.plan_revision
-                                    );
-                                    reshored
-                                }
-                                Err(e) => {
-                                    log::warn!(
-                                        "Runner: re-anchor failed for {}: {} (claiming as-is)",
-                                        pkg.package_id, e
-                                    );
-                                    pkg
-                                }
+                let effective = Self::resolve_effective_base(&pkg).ok();
+                match effective {
+                    Some(base)
+                        if base.sha() != pkg.base_sha
+                            && !executions.iter().any(|e| {
+                                e.package_id == pkg.package_id
+                                    && e.status == ExecutionStatus::Passed
+                            }) =>
+                    {
+                        match execution_store::reanchor_package(
+                            &pkg.package_id,
+                            base.sha(),
+                            &pkg.project_path,
+                            &pkg.step_id,
+                        ) {
+                            Ok(reshored) => {
+                                log::info!(
+                                    "Runner: re-anchored {} to effective base {} (rev {})",
+                                    pkg.package_id,
+                                    &base.sha()[..8.min(base.sha().len())],
+                                    reshored.plan_revision
+                                );
+                                reshored
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Runner: re-anchor failed for {}: {} (claiming as-is)",
+                                    pkg.package_id,
+                                    e
+                                );
+                                pkg
                             }
                         }
-                        Err(_) => pkg,
                     }
-                } else {
-                    pkg
+                    _ => pkg,
                 }
             };
 
-            if executions.iter().any(|execution| {
-                execution.package_id == pkg.package_id
-                    && matches!(
-                        execution.status,
-                        ExecutionStatus::Running
-                            | ExecutionStatus::Candidate
-                            | ExecutionStatus::Verifying
-                            | ExecutionStatus::CancelRequested
-                            | ExecutionStatus::PauseRequested
-                    )
-            }) {
-                continue;
-            }
-
-            // A retry command pre-creates a queued child so its parent linkage is
-            // preserved. First attempts are created here.
-            let exec_id = executions
-                .iter()
-                .rev()
-                .find(|execution| {
-                    execution.package_id == pkg.package_id
-                        && execution.status == ExecutionStatus::Queued
-                })
-                .map(|execution| execution.id.clone())
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    execution_store::enqueue_execution(
-                        &pkg.package_id,
-                        &pkg.epic_id,
-                        &pkg.step_id,
-                        &pkg.project_path,
-                        &pkg.base_sha,
-                    )
-                })?;
+            // Atomic claim: the uniqueness check, execution creation, and
+            // lease acquisition happen under ONE lock — two pollers can
+            // never both claim the same package. A pre-created retry child
+            // (Queued, carrying parent linkage) is adopted, not duplicated.
+            let claimed = match execution_store::claim_package(
+                &pkg.package_id,
+                &pkg.epic_id,
+                &pkg.step_id,
+                &pkg.project_path,
+                &pkg.base_sha,
+                &self.config.runner_id,
+            ) {
+                Ok(exec) => exec,
+                Err(e) => {
+                    log::debug!("Runner: claim skipped for {}: {}", pkg.package_id, e);
+                    continue;
+                }
+            };
+            let exec_id = claimed.id.clone();
 
             // Process the execution
             let result = self.process_execution(&exec_id, &pkg);
-
-            // Worktree cleanup: removed on every terminal outcome EXCEPT a
-            // timeout that scheduled an auto-retry — the retry resumes the
-            // same session in the same worktree, so the scene must survive.
-            let mut keep_worktree = false;
-            if let Ok(final_exec) = execution_store::get_execution(&exec_id) {
-                if final_exec.status == ExecutionStatus::TimedOut {
-                    // Auto-retry child (queued/running) exists for this package?
-                    if let Ok(all) = execution_store::list_executions() {
-                        keep_worktree = all.iter().any(|e| {
-                            e.parent_attempt_id.as_deref() == Some(final_exec.id.as_str())
-                                && matches!(
-                                    e.status,
-                                    ExecutionStatus::Queued | ExecutionStatus::Running
-                                )
-                        });
-                    }
-                }
-            }
-            if !keep_worktree {
-                if let Ok(final_exec) = execution_store::get_execution(&exec_id) {
-                    if let Some(worktree_path) = &final_exec.worktree_path {
-                        let _ = runner_git::remove_worktree(
-                            &PathBuf::from(&pkg.repo_root),
-                            Path::new(worktree_path),
-                        );
-                    }
-                }
-            }
 
             // Update statuses based on result
             match &result {
@@ -484,9 +472,51 @@ impl Runner {
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
+                Ok(RunResult::EvidenceSealFailed {
+                    execution_id,
+                    error,
+                }) => {
+                    execution_store::finish_execution(
+                        execution_id,
+                        ExecutionStatus::Blocked,
+                        Some(&format!("evidence seal failed: {error}")),
+                    )?;
+                    execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                }
                 Err(e) => {
                     execution_store::finish_execution(&exec_id, ExecutionStatus::Failed, Some(e))?;
                     execution_store::mark_package_status(&pkg.package_id, "failed")?;
+                }
+            }
+
+            // Worktree cleanup: removed on every terminal outcome EXCEPT a
+            // timeout that scheduled an auto-retry — the retry resumes the
+            // same session in the same worktree, so the scene must survive.
+            // This check runs AFTER the result match above: the Timeout arm
+            // creates the retry child there, and only then can we see it.
+            let mut keep_worktree = false;
+            if let Ok(final_exec) = execution_store::get_execution(&exec_id) {
+                if final_exec.status == ExecutionStatus::TimedOut {
+                    // Auto-retry child (queued/running) exists for this package?
+                    if let Ok(all) = execution_store::list_executions() {
+                        keep_worktree = all.iter().any(|e| {
+                            e.parent_attempt_id.as_deref() == Some(final_exec.id.as_str())
+                                && matches!(
+                                    e.status,
+                                    ExecutionStatus::Queued | ExecutionStatus::Running
+                                )
+                        });
+                    }
+                }
+            }
+            if !keep_worktree {
+                if let Ok(final_exec) = execution_store::get_execution(&exec_id) {
+                    if let Some(worktree_path) = &final_exec.worktree_path {
+                        let _ = runner_git::remove_worktree(
+                            &PathBuf::from(&pkg.repo_root),
+                            Path::new(worktree_path),
+                        );
+                    }
                 }
             }
 
@@ -596,7 +626,9 @@ impl Runner {
     /// up there, excluding subagent sessions. Best-effort: any failure means
     /// "no resume", never a hard error.
     fn resolve_cli_session(worktree_path: &Path) -> Option<String> {
-        let dir = worktree_path.canonicalize().unwrap_or_else(|_| worktree_path.to_path_buf());
+        let dir = worktree_path
+            .canonicalize()
+            .unwrap_or_else(|_| worktree_path.to_path_buf());
         let dir = dir.to_string_lossy().replace('\'', "''");
         let home = dirs::home_dir()?;
         let db = home.join(".zcode").join("cli").join("db").join("db.sqlite");
@@ -694,19 +726,31 @@ impl Runner {
                 execution_id: exec.id.clone(),
                 error,
             };
-            self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
             return Ok(result);
         }
 
-        // 1. Verify base SHA hasn't drifted
-        let current_sha = runner_git::read_head_sha(&repo_root)?;
-        if current_sha != pkg.base_sha {
+        // 1. Verify the package still matches its effective base (HEAD, or
+        // the unmerged predecessor candidate it chains onto). A lineage
+        // conflict must not guess — surface it for a human decision.
+        let effective_base = match Self::resolve_effective_base(pkg) {
+            Ok(base) => base,
+            Err(error) => {
+                let result = RunResult::PreflightBlocked {
+                    execution_id: exec.id.clone(),
+                    error,
+                };
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                return Ok(result);
+            }
+        };
+        if effective_base.sha() != pkg.base_sha {
             let result = RunResult::BaseShaDrift {
                 execution_id: exec.id.clone(),
                 expected: pkg.base_sha.clone(),
-                actual: current_sha,
+                actual: effective_base.sha().to_string(),
             };
-            self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
             return Ok(result);
         }
 
@@ -718,7 +762,8 @@ impl Runner {
         // mismatch (no session, worktree gone, base re-anchored) falls back
         // to a fresh worktree — resume is best-effort, never blocking.
         let mut resume: Option<String> = None;
-        let (worktree_path, _branch_name) = if let Some(parent_id) = exec.parent_attempt_id.clone() {
+        let (worktree_path, _branch_name) = if let Some(parent_id) = exec.parent_attempt_id.clone()
+        {
             let parent = execution_store::get_execution(&parent_id)?;
             let eligible = parent.package_id == pkg.package_id
                 && parent.base_sha == pkg.base_sha
@@ -782,7 +827,7 @@ impl Runner {
                     pkg.executor_preferred
                 ),
             };
-            self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
             return Ok(result);
         }
 
@@ -793,7 +838,7 @@ impl Runner {
                 execution_id: exec.id.clone(),
                 error: "ZCode CLI not available".to_string(),
             };
-            self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
             return Ok(result);
         }
         // Budget governance: each retry attempt gets an exponentially larger
@@ -885,21 +930,21 @@ impl Runner {
                 let result = RunResult::Cancelled {
                     execution_id: exec.id.clone(),
                 };
-                self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
                 return Ok(result);
             }
             SupervisionOutcome::Paused => {
                 let result = RunResult::Paused {
                     execution_id: exec.id.clone(),
                 };
-                self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
                 return Ok(result);
             }
             SupervisionOutcome::TimedOut => {
                 let result = RunResult::Timeout {
                     execution_id: exec.id.clone(),
                 };
-                self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
                 return Ok(result);
             }
             SupervisionOutcome::Completed => {}
@@ -910,17 +955,82 @@ impl Runner {
                 execution_id: exec.id.clone(),
                 error: "CLI exited with non-zero status".to_string(),
             };
-            self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
             return Ok(result);
         }
 
         // 5. Check for changes
         let changed = runner_git::get_changed_paths(&worktree_path, &pkg.base_sha)?;
         if changed.is_empty() {
+            // Read-only artifact contract: "no diff" only means "no code
+            // change" — it is NOT acceptance. A read-only task must pass its
+            // declared acceptance commands (run against the worktree as-is)
+            // AND produce a non-empty stdout report before it may complete.
+            if pkg.sandbox == "read-only" {
+                if pkg.acceptance_command_ids.is_empty() {
+                    let result = RunResult::AcceptanceFailed {
+                        execution_id: exec.id.clone(),
+                        reason: "read-only task declared no acceptance commands — cannot verify the report"
+                            .to_string(),
+                    };
+                    let result =
+                        self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                    return Ok(result);
+                }
+                let stdout_nonempty = stdout_path
+                    .as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false);
+                if !stdout_nonempty {
+                    let result = RunResult::AcceptanceFailed {
+                        execution_id: exec.id.clone(),
+                        reason:
+                            "read-only task produced an empty report (stdout) — nothing to accept"
+                                .to_string(),
+                    };
+                    let result =
+                        self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                    return Ok(result);
+                }
+                let mut verifier_results: Vec<VerifierResult> = Vec::new();
+                for cmd_id in &pkg.acceptance_command_ids {
+                    let vr = resolve_and_run_acceptance_verbose(cmd_id, &worktree_path, None);
+                    let passed = vr.passed;
+                    verifier_results.push(vr);
+                    if !passed {
+                        let result = RunResult::AcceptanceFailed {
+                            execution_id: exec.id.clone(),
+                            reason: format!("read-only acceptance command '{cmd_id}' failed"),
+                        };
+                        let result = self.seal_bundle(
+                            &bundle_dir,
+                            &mut manifest,
+                            pkg,
+                            result,
+                            None,
+                            &verifier_results,
+                        );
+                        return Ok(result);
+                    }
+                }
+                let result = RunResult::NoDiff {
+                    execution_id: exec.id.clone(),
+                };
+                let result = self.seal_bundle(
+                    &bundle_dir,
+                    &mut manifest,
+                    pkg,
+                    result,
+                    None,
+                    &verifier_results,
+                );
+                return Ok(result);
+            }
             let result = RunResult::NoDiff {
                 execution_id: exec.id.clone(),
             };
-            self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
             return Ok(result);
         }
 
@@ -935,7 +1045,7 @@ impl Runner {
                 execution_id: exec.id.clone(),
                 violation,
             };
-            self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
             return Ok(result);
         }
 
@@ -944,14 +1054,14 @@ impl Runner {
                 let result = RunResult::Cancelled {
                     execution_id: exec.id.clone(),
                 };
-                self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
                 return Ok(result);
             }
             ExecutionStatus::PauseRequested => {
                 let result = RunResult::Paused {
                     execution_id: exec.id.clone(),
                 };
-                self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
                 return Ok(result);
             }
             _ => {}
@@ -975,7 +1085,7 @@ impl Runner {
                 let result = RunResult::NoDiff {
                     execution_id: exec.id.clone(),
                 };
-                self.seal_bundle(&bundle_dir, &mut manifest, pkg, &result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
                 return Ok(result);
             }
         };
@@ -1019,11 +1129,11 @@ impl Runner {
                 reason: "no acceptance commands declared — cannot verify candidate commit"
                     .to_string(),
             };
-            self.seal_bundle(
+            let result = self.seal_bundle(
                 &bundle_dir,
                 &mut manifest,
                 pkg,
-                &result,
+                result,
                 Some(&candidate_sha),
                 &[],
             );
@@ -1058,11 +1168,11 @@ impl Runner {
                         )
                     },
                 };
-                self.seal_bundle(
+                let result = self.seal_bundle(
                     &bundle_dir,
                     &mut manifest,
                     pkg,
-                    &result,
+                    result,
                     Some(&candidate_sha),
                     &verifier_results,
                 );
@@ -1075,27 +1185,32 @@ impl Runner {
             execution_id: exec.id.clone(),
             candidate_sha: candidate_sha.clone(),
         };
-        self.seal_bundle(
+        let result = self.seal_bundle(
             &bundle_dir,
             &mut manifest,
             pkg,
-            &result,
+            result,
             Some(&candidate_sha),
             &verifier_results,
         );
         Ok(result)
     }
 
-    /// Seal the AttemptBundle: write verifier results, outcome, and compute integrity hash.
+    /// Seal the AttemptBundle: write verifier results, outcome, and compute
+    /// integrity hash. Takes the outcome by value and returns the EFFECTIVE
+    /// outcome: if sealing fails, a success-class result (Passed/NoDiff) is
+    /// converted to EvidenceSealFailed — evidence fail-closed, a success
+    /// without a sealed bundle is not a success. Failure-class results pass
+    /// through unchanged (their DecisionRequest is already created below).
     fn seal_bundle(
         &self,
         bundle_dir: &Path,
         manifest: &mut AttemptManifest,
         pkg: &TaskPackageSummary,
-        result: &RunResult,
+        result: RunResult,
         candidate_sha: Option<&str>,
         verifier_results: &[VerifierResult],
-    ) {
+    ) -> RunResult {
         // Write verifier results if any
         if !verifier_results.is_empty() {
             if let Ok(Some(ref_ref)) =
@@ -1106,7 +1221,7 @@ impl Runner {
         }
 
         // Map RunResult to outcome
-        let (outcome_str, reason) = match result {
+        let (outcome_str, reason) = match &result {
             RunResult::Passed { .. } => ("passed", None),
             RunResult::NoDiff { .. } => ("no_diff", None),
             RunResult::AcceptanceFailed { reason, .. } => {
@@ -1127,9 +1242,42 @@ impl Runner {
             RunResult::Paused { .. } => ("paused", None),
             RunResult::PolicyViolation { error, .. } => ("policy_violation", Some(error.clone())),
             RunResult::PreflightBlocked { error, .. } => ("preflight_blocked", Some(error.clone())),
+            RunResult::EvidenceSealFailed { error, .. } => {
+                ("evidence_seal_failed", Some(error.clone()))
+            }
         };
 
-        let decision = match result {
+        let outcome = AttemptOutcome {
+            outcome: outcome_str.to_string(),
+            reason,
+            candidate_sha: candidate_sha.map(|s| s.to_string()),
+            finished_at: chrono::Utc::now().timestamp() as u64,
+        };
+
+        // Evidence fail-closed: a seal failure converts success-class
+        // outcomes. Without the integrity hash the bundle is unverifiable,
+        // so "passed" must never rest on unsealed evidence.
+        let result = match attempt_bundle::write_outcome_and_seal(bundle_dir, manifest, &outcome) {
+            Ok(()) => result,
+            Err(e) => {
+                log::error!(
+                    "Failed to seal attempt bundle for {}: {} — evidence incomplete",
+                    manifest.execution_id,
+                    e
+                );
+                match result {
+                    RunResult::Passed { execution_id, .. } | RunResult::NoDiff { execution_id } => {
+                        RunResult::EvidenceSealFailed {
+                            execution_id,
+                            error: e,
+                        }
+                    }
+                    other => other,
+                }
+            }
+        };
+
+        let decision = match &result {
             RunResult::BaseShaDrift { .. } => Some((
                 "git_drift",
                 "Git base changed after the package was sealed. Revise and reseal the package?",
@@ -1145,10 +1293,16 @@ impl Runner {
                 "The exact candidate failed acceptance. Inspect evidence and choose retry, revise, or cancel.",
                 vec!["retry".to_string(), "revise_package".to_string(), "cancel".to_string()],
             )),
+            RunResult::EvidenceSealFailed { .. } => Some((
+                "blocked",
+                "The attempt's evidence bundle could not be sealed (disk/FS failure) — the outcome cannot be trusted. Inspect the environment, then retry or revise.",
+                vec!["retry".to_string(), "revise_package".to_string(), "cancel".to_string()],
+            )),
             RunResult::NoDiff { .. } => {
                 if pkg.sandbox == "read-only" {
-                    // read-only NoDiff is a legitimate success (report = output,
-                    // no candidate expected) — no human decision needed.
+                    // read-only NoDiff reaches here only after its artifact
+                    // contract (acceptance + non-empty report) already ran in
+                    // the executor phase — no human decision needed.
                     None
                 } else {
                     let exhausted = manifest.attempt_no >= pkg.max_attempts.max(1);
@@ -1247,25 +1401,7 @@ impl Runner {
             }
         }
 
-        let outcome = AttemptOutcome {
-            outcome: outcome_str.to_string(),
-            reason,
-            candidate_sha: candidate_sha.map(|s| s.to_string()),
-            finished_at: chrono::Utc::now().timestamp() as u64,
-        };
-
-        if let Err(e) = attempt_bundle::write_outcome_and_seal(bundle_dir, manifest, &outcome) {
-            // F4 audit fix: seal failure is an error, not a silent warning.
-            // The bundle is left unsealed — its evidence is incomplete.
-            // Log at error level so the user can detect it; the execution
-            // result is still recorded (the outcome happened), but the
-            // bundle's integrity_hash remains None, signaling "unverified".
-            log::error!(
-                "Failed to seal attempt bundle for {}: {} — evidence may be incomplete",
-                manifest.execution_id,
-                e
-            );
-        }
+        result
     }
 
     /// Shadow mode: report what would be picked up without starting any CLI.
@@ -1330,11 +1466,16 @@ impl Runner {
         if !project.starts_with(&repo) {
             return Err("project path escapes repo root".to_string());
         }
-        let current_sha = runner_git::read_head_sha(&repo)?;
-        if current_sha != pkg.base_sha {
+        // Drift check against the EFFECTIVE base: HEAD, or the unmerged
+        // predecessor candidate this package chains onto. A lineage conflict
+        // (multiple unmerged predecessor candidates) fails here too — the
+        // Runner must not auto-guess a merge.
+        let effective_base = Self::resolve_effective_base(pkg)?;
+        if effective_base.sha() != pkg.base_sha {
             return Err(format!(
                 "base SHA drift: expected {}, got {}",
-                pkg.base_sha, current_sha
+                pkg.base_sha,
+                effective_base.sha()
             ));
         }
 
@@ -1440,22 +1581,79 @@ impl Runner {
                 .iter()
                 .find(|candidate| candidate.id == dependency_id)
                 .map(|candidate| &candidate.stage);
-            // Order-predecessors must be at least coded (candidate produced).
-            // Explicit depends_on must be observed (cross-session confirmed).
-            let is_explicit_dep = step.depends_on.iter().any(|d| d == dependency_id);
-            let required_stage = if is_explicit_dep {
-                StepStage::Observed
-            } else {
-                StepStage::Coded
-            };
+            // Unified with MCP actionableSteps: EVERY predecessor — order or
+            // explicit depends_on — must be observed. Passing acceptance
+            // auto-advances a step to observed (B mode), so healthy serial
+            // chains flow without human hops; but a step whose predecessor
+            // FAILED (stuck at coded or below) never releases its successor.
             let sufficient = dep_stage
-                .map(|stage| stage_rank(stage) >= stage_rank(&required_stage))
+                .map(|stage| stage_rank(stage) >= stage_rank(&StepStage::Observed))
                 .unwrap_or(false);
             if !sufficient {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    /// Resolve the effective base SHA for a package — the commit its worktree
+    /// must start from so it sees all predecessor steps' work.
+    ///
+    /// For each predecessor step (lower `order` in the same epic, plus
+    /// explicit `depends_on`), take its LATEST passed execution's candidate
+    /// commit. A candidate already merged into HEAD needs no chaining.
+    /// Exactly one unmerged candidate becomes the base; two or more distinct
+    /// unmerged candidates are a conflict the Runner must not auto-guess —
+    /// surfaced as an error, which the claim path turns into PreflightBlocked
+    /// with a DecisionRequest for a human to combine or merge first.
+    fn resolve_effective_base(pkg: &TaskPackageSummary) -> Result<EffectiveBase, String> {
+        let repo = PathBuf::from(&pkg.repo_root);
+        let head = runner_git::read_head_sha(&repo)?;
+        let project = PathBuf::from(&pkg.project_path)
+            .canonicalize()
+            .map_err(|e| format!("canonicalize project path: {e}"))?;
+        let epics = crate::epic_store::read_epics(&project)?;
+        let step = epics
+            .steps
+            .iter()
+            .find(|s| s.id == pkg.step_id && s.epic_id == pkg.epic_id)
+            .ok_or_else(|| format!("step '{}' not found in epic", pkg.step_id))?;
+        let predecessor_ids: std::collections::HashSet<&str> = epics
+            .steps
+            .iter()
+            .filter(|candidate| candidate.epic_id == pkg.epic_id && candidate.order < step.order)
+            .map(|candidate| candidate.id.as_str())
+            .chain(step.depends_on.iter().map(String::as_str))
+            .collect();
+        if predecessor_ids.is_empty() {
+            return Ok(EffectiveBase::Head(head));
+        }
+
+        let executions = execution_store::list_executions()?;
+        let mut unmerged: Vec<String> = Vec::new();
+        for predecessor_id in predecessor_ids {
+            let candidate = executions
+                .iter()
+                .filter(|e| e.step_id == predecessor_id && e.status == ExecutionStatus::Passed)
+                .filter_map(|e| e.candidate_sha.clone().map(|sha| (e.created_at, sha)))
+                .max_by_key(|(created, _)| *created)
+                .map(|(_, sha)| sha);
+            if let Some(sha) = candidate {
+                if !runner_git::is_ancestor_of_head(&repo, &sha) && !unmerged.contains(&sha) {
+                    unmerged.push(sha);
+                }
+            }
+        }
+        match unmerged.len() {
+            0 => Ok(EffectiveBase::Head(head)),
+            1 => Ok(EffectiveBase::PredecessorCandidate(
+                unmerged.pop().expect("len checked"),
+            )),
+            _ => Err(format!(
+                "multiple unmerged predecessor candidates ({}) — combine them into one candidate or merge to main before continuing",
+                unmerged.len()
+            )),
+        }
     }
 
     /// Advance the Step stage in .epics.json based on execution result.
@@ -1686,6 +1884,10 @@ pub fn set_enabled(enabled: bool) -> bool {
 /// The Runner resolves command_ids here — it never accepts raw shell strings.
 const ACCEPTANCE_REGISTRY: &[(&str, &str, &str)] = &[
     ("verify:candidate", "git diff --check HEAD^ HEAD", "."),
+    // Read-only artifact contract: confirms the worktree is unchanged vs
+    // base (tracked files). Untracked coverage comes from the Runner's own
+    // changed-paths check; the real weight is the non-empty report.
+    ("verify:readonly", "git diff --quiet HEAD", "."),
     // TypeScript (MCP server)
     ("test:mcp", "npm test", "mcp-server"),
     ("build:mcp", "npm run build", "mcp-server"),
@@ -1882,6 +2084,34 @@ mod tests {
     }
 
     #[test]
+    fn poll_blocked_by_global_kill_switch() {
+        let (_dir, _guard) = setup();
+        let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_string_lossy().to_string();
+        write_lineage_epics(project.path(), &[("s1", 0, "pending")]);
+        write_package_fixture(
+            std::path::Path::new(&runtime),
+            &project_path,
+            "sealed",
+            "zcode",
+            "s1",
+        );
+        crate::runner_config::set_project_enabled(&project_path, true).unwrap();
+        // Migrate to v2 (project enabled → global auto-ON once), then
+        // deliberately kill the switch: v2 + global OFF must hold.
+        crate::runner_config::set_globally_enabled(false).unwrap();
+
+        let mut runner = new_runner();
+        let count = runner.poll_once().unwrap();
+        assert_eq!(count, 0, "global kill switch blocks every claim");
+        assert!(execution_store::list_executions().unwrap().is_empty());
+        let (_ready, sealed) = execution_store::count_claimable_by_status().unwrap();
+        assert_eq!(sealed, 1, "package must stay sealed under the kill switch");
+    }
+
+    #[test]
     fn runtime_status_reports_heartbeat_state() {
         let (_dir, _guard) = setup();
         // Other tests in this process may have started a real polling thread
@@ -2012,8 +2242,13 @@ mod tests {
         let (_dir, _guard) = setup();
         let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
         std::fs::create_dir_all(&runtime).unwrap();
-        // Enable the project in runner-config so poll_once picks it up
-        crate::runner_config::set_project_enabled("/nonexistent", true).unwrap();
+        // Epic authorization is fail-closed: the project must exist on disk
+        // with .epics.json carrying auto_execute=true. The repo_root stays
+        // bogus so preflight still rejects after the claim.
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_string_lossy().to_string();
+        write_lineage_epics(project.path(), &[("s1", 0, "pending")]);
+        crate::runner_config::set_project_enabled(&project_path, true).unwrap();
         // Write a fake packages.json with one ready package (nested format matching Node)
         let packages = serde_json::json!({
             "version": 1,
@@ -2023,7 +2258,7 @@ mod tests {
                 "epic_id": "e1",
                 "step_id": "s1",
                 "plan_revision": 1,
-                "project_path": "/nonexistent",
+                "project_path": project_path,
                 "repo_root": "/nonexistent",
                 "base_sha": "abc",
                 "objective": "test task",
@@ -2175,17 +2410,32 @@ mod tests {
         let (_dir, _guard) = setup();
         let runtime = std::env::var("QUESTLOG_RUNTIME").unwrap();
         std::fs::create_dir_all(&runtime).unwrap();
-        crate::runner_config::set_project_enabled("/nonexistent", true).unwrap();
+        // Fail-closed epic authorization needs a real .epics.json with
+        // auto_execute=true; the dir is still not a git repo, so preflight
+        // rejects after the claim.
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_string_lossy().to_string();
+        crate::runner_config::set_project_enabled(&project_path, true).unwrap();
+        write_epics_fixture(
+            project.path(),
+            Some(true),
+            serde_json::json!([{
+                "id": "s1", "epic_id": "epic_gate", "title": "first", "order": 0,
+                "depends_on": [], "stage": "pending",
+                "created_at": "2026-08-11T00:00:00Z",
+                "updated_at": "2026-08-11T00:00:00Z"
+            }]),
+        );
         write_package_fixture(
             std::path::Path::new(&runtime),
-            "/nonexistent",
+            &project_path,
             "sealed",
             "zcode",
             "s1",
         );
 
         // A sealed package must flow through the same claim path as ready.
-        // (Preflight then fails because /nonexistent is not a repo — but the
+        // (Preflight then fails because the project is not a repo — but the
         // package must be CLAIMED, not filtered.)
         let mut runner = new_runner();
         let count = runner.poll_once().unwrap();
@@ -2241,10 +2491,8 @@ mod tests {
         assert_eq!(summary.package_hash, summary.computed_hash);
 
         // Old row superseded, exactly one claimable row remains
-        let raw = std::fs::read_to_string(
-            std::path::Path::new(&runtime).join("packages.json"),
-        )
-        .unwrap();
+        let raw =
+            std::fs::read_to_string(std::path::Path::new(&runtime).join("packages.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let rows: Vec<&serde_json::Value> = json["packages"]
             .as_array()
@@ -2284,13 +2532,9 @@ mod tests {
             "zcode",
             "s1",
         );
-        let err = execution_store::reanchor_package(
-            "pkg_gate",
-            "x",
-            project.to_str().unwrap(),
-            "s1",
-        )
-        .unwrap_err();
+        let err =
+            execution_store::reanchor_package("pkg_gate", "x", project.to_str().unwrap(), "s1")
+                .unwrap_err();
         assert!(err.contains("only sealed/ready"), "got: {err}");
     }
 
@@ -2373,9 +2617,12 @@ mod tests {
         );
         assert!(execution_store::list_executions().unwrap().is_empty());
 
-        // Advance s1 to coded → the next poll claims s2 (consumed via
+        // Advance s1 to observed → the next poll claims s2 (consumed via
         // preflight-block because the fixture project is not a real repo).
-        write_epics_fixture(project.path(), Some(true), steps_with("coded"));
+        // (Unified semantics: order-predecessors must be OBSERVED — coded is
+        // no longer enough, a failed-acceptance step must not release its
+        // successor.)
+        write_epics_fixture(project.path(), Some(true), steps_with("observed"));
         let count = runner.poll_once().unwrap();
         assert_eq!(count, 1, "satisfied dependency must release the package");
         assert!(execution_store::read_ready_packages().unwrap().is_empty());
@@ -2456,6 +2703,357 @@ mod tests {
         assert!(error.contains("hash mismatch"));
     }
 
+    fn seal_test_pkg() -> TaskPackageSummary {
+        TaskPackageSummary {
+            package_id: "pkg_seal".to_string(),
+            epic_id: "e1".to_string(),
+            step_id: "s1".to_string(),
+            plan_revision: 1,
+            project_path: "/tmp/proj".to_string(),
+            repo_root: "/tmp/proj".to_string(),
+            base_sha: "abc".to_string(),
+            objective: "test".to_string(),
+            allowed_paths: vec!["src/**".to_string()],
+            forbidden_paths: vec![],
+            max_changed_files: 1,
+            executor_preferred: "zcode".to_string(),
+            executor_fallbacks: vec![],
+            sandbox: "workspace-write".to_string(),
+            timeout_seconds: 60,
+            max_attempts: 2,
+            acceptance_command_ids: vec!["verify:candidate".to_string()],
+            preconditions: vec![],
+            auto_edit_worktree: true,
+            auto_commit_candidate: true,
+            auto_merge: false,
+            auto_push: false,
+            auto_deploy: false,
+            sealed_at: "2026-08-11T00:00:00Z".to_string(),
+            status: "ready".to_string(),
+            package_hash: "h".to_string(),
+            computed_hash: "h".to_string(),
+        }
+    }
+
+    #[test]
+    fn seal_failure_converts_success_to_evidence_seal_failed() {
+        let (dir, _guard) = setup();
+        std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
+        let runner = Runner::new(RunnerConfig::default());
+        let pkg = seal_test_pkg();
+        let mut manifest = AttemptManifest::new("exec_sealfail", 1, None, &pkg);
+        let bundle_dir = tempfile::tempdir().unwrap();
+
+        // Read-only bundle dir → write_outcome_and_seal must fail.
+        let mut perms = std::fs::metadata(bundle_dir.path()).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(bundle_dir.path(), perms).unwrap();
+
+        let result = runner.seal_bundle(
+            bundle_dir.path(),
+            &mut manifest,
+            &pkg,
+            RunResult::Passed {
+                execution_id: "exec_sealfail".to_string(),
+                candidate_sha: "abc".to_string(),
+            },
+            Some("abc"),
+            &[],
+        );
+
+        // Restore writability so the tempdir can be cleaned up.
+        let mut perms = std::fs::metadata(bundle_dir.path()).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(bundle_dir.path(), perms).unwrap();
+
+        assert!(
+            matches!(result, RunResult::EvidenceSealFailed { .. }),
+            "unsealed success must convert to EvidenceSealFailed"
+        );
+        // Fail-closed also means: a human is paged via DecisionRequest.
+        let reqs = crate::decision_store::list_requests(false).unwrap();
+        assert!(
+            reqs.iter().any(|r| r.execution_id == "exec_sealfail"),
+            "seal failure must create a DecisionRequest"
+        );
+    }
+
+    #[test]
+    fn seal_failure_keeps_failure_outcomes_unchanged() {
+        let (_dir, _guard) = setup();
+        let runner = Runner::new(RunnerConfig::default());
+        let pkg = seal_test_pkg();
+        let mut manifest = AttemptManifest::new("exec_sealfail2", 1, None, &pkg);
+        let bundle_dir = tempfile::tempdir().unwrap();
+
+        let mut perms = std::fs::metadata(bundle_dir.path()).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(bundle_dir.path(), perms).unwrap();
+
+        let result = runner.seal_bundle(
+            bundle_dir.path(),
+            &mut manifest,
+            &pkg,
+            RunResult::Timeout {
+                execution_id: "exec_sealfail2".to_string(),
+            },
+            None,
+            &[],
+        );
+
+        let mut perms = std::fs::metadata(bundle_dir.path()).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(bundle_dir.path(), perms).unwrap();
+
+        // Already a deviation — passes through (its own DR logic applies).
+        assert!(matches!(result, RunResult::Timeout { .. }));
+    }
+
+    #[test]
+    fn successful_seal_passes_result_through() {
+        let (_dir, _guard) = setup();
+        let runner = Runner::new(RunnerConfig::default());
+        let pkg = seal_test_pkg();
+        let mut manifest = AttemptManifest::new("exec_sealok", 1, None, &pkg);
+        let bundle_dir = tempfile::tempdir().unwrap();
+
+        let result = runner.seal_bundle(
+            bundle_dir.path(),
+            &mut manifest,
+            &pkg,
+            RunResult::Passed {
+                execution_id: "exec_sealok".to_string(),
+                candidate_sha: "abc".to_string(),
+            },
+            Some("abc"),
+            &[],
+        );
+        assert!(matches!(result, RunResult::Passed { .. }));
+        // Sealed bundle carries an integrity hash.
+        assert!(manifest.integrity_hash.is_some());
+    }
+
+    /// Minimal .epics.json with one active epic and the given steps
+    /// (id, order, stage). Step ids double as predecessor references.
+    fn write_lineage_epics(repo: &std::path::Path, steps: &[(&str, u32, &str)]) {
+        let steps_json: Vec<serde_json::Value> = steps
+            .iter()
+            .map(|(id, order, stage)| {
+                serde_json::json!({
+                    "id": id,
+                    "epic_id": "e1",
+                    "title": id,
+                    "order": order,
+                    "depends_on": [],
+                    "stage": stage,
+                    "created_at": "2026-08-11T00:00:00Z",
+                    "updated_at": "2026-08-11T00:00:00Z"
+                })
+            })
+            .collect();
+        let epics = serde_json::json!({
+            "version": 1,
+            "project": "lineage-test",
+            "epics": [{
+                "id": "e1",
+                "title": "lineage test",
+                "status": "active",
+                "priority": "P1",
+                // Poll-gate tests reuse this fixture: explicit authorization.
+                "auto_execute": true,
+                "created_at": "2026-08-11T00:00:00Z",
+                "updated_at": "2026-08-11T00:00:00Z"
+            }],
+            "steps": steps_json
+        });
+        std::fs::write(
+            repo.join(".epics.json"),
+            serde_json::to_string_pretty(&epics).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A passed-execution row: step `step_id` produced candidate `sha`.
+    fn write_passed_execution(step_id: &str, sha: &str, created_at: u64) {
+        let exec = serde_json::json!({
+            "id": format!("exec_{}_{}", step_id, created_at),
+            "package_id": format!("pkg_{}", step_id),
+            "epic_id": "e1",
+            "step_id": step_id,
+            "project_path": "/tmp/unused",
+            "status": "passed",
+            "lease": null,
+            "cli_session": null,
+            "worktree_path": null,
+            "branch": null,
+            "base_sha": "whatever",
+            "candidate_sha": sha,
+            "attempts": 1,
+            "last_error": null,
+            "created_at": created_at,
+            "updated_at": created_at
+        });
+        let data = serde_json::json!({
+            "version": 1,
+            "revision": 1,
+            "executions": [exec]
+        });
+        std::fs::write(
+            crate::execution_store::runtime_dir().join("executions.json"),
+            serde_json::to_string_pretty(&data).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn lineage_pkg(repo: &std::path::Path, step_id: &str, base_sha: &str) -> TaskPackageSummary {
+        let repo_path = repo.to_string_lossy().to_string();
+        TaskPackageSummary {
+            package_id: format!("pkg_{step_id}"),
+            epic_id: "e1".to_string(),
+            step_id: step_id.to_string(),
+            plan_revision: 1,
+            project_path: repo_path.clone(),
+            repo_root: repo_path,
+            base_sha: base_sha.to_string(),
+            objective: "test".to_string(),
+            allowed_paths: vec!["src/**".to_string()],
+            forbidden_paths: vec![],
+            max_changed_files: 5,
+            executor_preferred: "zcode".to_string(),
+            executor_fallbacks: vec![],
+            sandbox: "workspace-write".to_string(),
+            timeout_seconds: 60,
+            max_attempts: 2,
+            acceptance_command_ids: vec!["verify:candidate".to_string()],
+            preconditions: vec![],
+            auto_edit_worktree: true,
+            auto_commit_candidate: true,
+            auto_merge: false,
+            auto_push: false,
+            auto_deploy: false,
+            sealed_at: "2026-08-11T00:00:00Z".to_string(),
+            status: "ready".to_string(),
+            package_hash: "h".to_string(),
+            computed_hash: "h".to_string(),
+        }
+    }
+
+    /// Create an unmerged side commit on top of the repo's current HEAD and
+    /// return its SHA (HEAD stays on the original branch).
+    fn make_unmerged_candidate(repo: &std::path::Path, name: &str) -> String {
+        let current = git(repo, &["branch", "--show-current"]);
+        git(repo, &["checkout", "-q", "-b", name]);
+        std::fs::write(repo.join(format!("{name}.txt")), name).unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", name]);
+        let sha = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", &current]);
+        sha
+    }
+
+    #[test]
+    fn effective_base_chains_to_unmerged_predecessor_candidate() {
+        let (dir, _guard) = setup();
+        std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path();
+        let head = init_repo(repo);
+        let candidate = make_unmerged_candidate(repo, "s1cand");
+        write_lineage_epics(repo, &[("s1", 0, "observed"), ("s2", 1, "pending")]);
+        write_passed_execution("s1", &candidate, 100);
+
+        let pkg = lineage_pkg(repo, "s2", &head);
+        let base = Runner::resolve_effective_base(&pkg).unwrap();
+        assert!(
+            matches!(base, EffectiveBase::PredecessorCandidate(_)),
+            "unmerged predecessor candidate must become the successor's base"
+        );
+        assert_eq!(base.sha(), candidate);
+    }
+
+    #[test]
+    fn effective_base_returns_head_once_predecessor_merged() {
+        let (dir, _guard) = setup();
+        std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path();
+        let head = init_repo(repo);
+        let candidate = make_unmerged_candidate(repo, "s1cand");
+        // Merge the candidate into the original branch — it becomes an
+        // ancestor of HEAD, so no chaining is needed.
+        git(repo, &["merge", "-q", "--no-ff", "s1cand", "-m", "merge"]);
+        let head_after = git(repo, &["rev-parse", "HEAD"]);
+        assert_ne!(head, head_after);
+        write_lineage_epics(repo, &[("s1", 0, "observed"), ("s2", 1, "pending")]);
+        write_passed_execution("s1", &candidate, 100);
+
+        let pkg = lineage_pkg(repo, "s2", &head_after);
+        let base = Runner::resolve_effective_base(&pkg).unwrap();
+        assert!(matches!(base, EffectiveBase::Head(_)));
+        assert_eq!(base.sha(), head_after);
+    }
+
+    #[test]
+    fn effective_base_conflict_on_multiple_unmerged_candidates() {
+        let (dir, _guard) = setup();
+        std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path();
+        let head = init_repo(repo);
+        let cand1 = make_unmerged_candidate(repo, "c1");
+        let cand2 = make_unmerged_candidate(repo, "c2");
+        write_lineage_epics(
+            repo,
+            &[
+                ("s1", 0, "observed"),
+                ("s2", 1, "observed"),
+                ("s3", 2, "pending"),
+            ],
+        );
+        write_passed_execution("s1", &cand1, 100);
+        // A second passed execution for the other predecessor step.
+        let exec2 = serde_json::json!({
+            "id": "exec_s2_200", "package_id": "pkg_s2", "epic_id": "e1",
+            "step_id": "s2", "project_path": "/tmp/unused", "status": "passed",
+            "lease": null, "cli_session": null, "worktree_path": null, "branch": null,
+            "base_sha": "whatever", "candidate_sha": cand2, "attempts": 1,
+            "last_error": null, "created_at": 200, "updated_at": 200
+        });
+        let path = crate::execution_store::runtime_dir().join("executions.json");
+        let mut data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        data["executions"].as_array_mut().unwrap().push(exec2);
+        std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap()).unwrap();
+
+        let pkg = lineage_pkg(repo, "s3", &head);
+        let error = Runner::resolve_effective_base(&pkg).unwrap_err();
+        assert!(
+            error.contains("multiple unmerged predecessor candidates"),
+            "conflict must refuse auto-guessing, got: {error}"
+        );
+    }
+
+    #[test]
+    fn dependencies_require_observed_not_just_coded() {
+        let (dir, _guard) = setup();
+        std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path();
+        let head = init_repo(repo);
+        // Predecessor whose acceptance FAILED mid-chain → stuck at coded.
+        write_lineage_epics(repo, &[("s1", 0, "coded"), ("s2", 1, "pending")]);
+        let pkg = lineage_pkg(repo, "s2", &head);
+        assert!(
+            !Runner::dependencies_ready(&pkg).unwrap(),
+            "a coded (failed-acceptance) predecessor must not release the successor"
+        );
+        // Acceptance auto-advance / human confirmation to observed → released.
+        write_lineage_epics(repo, &[("s1", 0, "observed"), ("s2", 1, "pending")]);
+        assert!(Runner::dependencies_ready(&pkg).unwrap());
+    }
+
     /// Run a git command inside `dir`, asserting success and returning stdout.
     fn git(dir: &std::path::Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
@@ -2495,6 +3093,10 @@ mod tests {
         git(repo, &["commit", "-q", "-m", "second"]);
         let head_sha = git(repo, &["rev-parse", "HEAD"]);
         assert_ne!(head_sha, stale_sha, "second commit must move HEAD");
+
+        // Lineage resolution reads the epics store: single step, no
+        // predecessors → effective base is HEAD → the drift check fires.
+        write_lineage_epics(repo, &[("s1", 0, "pending")]);
 
         let repo_path = repo.to_string_lossy().to_string();
         let package = TaskPackageSummary {
@@ -2664,7 +3266,10 @@ mod tests {
 
         let first = execution_store::create_retry_attempt(&parent.id).unwrap();
         let second = execution_store::create_retry_attempt(&parent.id).unwrap();
-        assert_eq!(first, second, "duplicate retry must return the existing child");
+        assert_eq!(
+            first, second,
+            "duplicate retry must return the existing child"
+        );
 
         // And the queue holds exactly one queued child for this parent.
         let execs = execution_store::list_executions().unwrap();

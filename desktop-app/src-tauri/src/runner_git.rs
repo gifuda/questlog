@@ -41,10 +41,19 @@ fn is_runner_internal_path(path: &str) -> bool {
         || path.starts_with("node_modules/")
         || path.ends_with("/node_modules")
         || path.contains("/node_modules/")
-        // .zcode/config.json is executor model provisioning written by the
-        // Runner (project-level ZCode config), not candidate source
+        // .zcode surfaces that future sessions AUTO-LOAD must never be
+        // committable by the executor: config.json (Runner-provisioned
+        // model/thinking), hooks/agents/skills (executable surfaces — a
+        // poisoned one would outlive the sandbox and run unsandboxed later).
+        // Other .zcode content (plans, notes) stays normal candidate source.
         || path == ".zcode/config.json"
         || path.ends_with("/.zcode/config.json")
+        || path.starts_with(".zcode/hooks/")
+        || path.contains("/.zcode/hooks/")
+        || path.starts_with(".zcode/agents/")
+        || path.contains("/.zcode/agents/")
+        || path.starts_with(".zcode/skills/")
+        || path.contains("/.zcode/skills/")
 }
 
 /// Result of creating a worktree.
@@ -174,7 +183,11 @@ fn native_budget_tokens(model_name: &str, level: &str) -> u64 {
 /// kind. Priority: user-declared `providerOptionsByLevel[level]` (CLI-native
 /// schema, copied verbatim — user's ZCode config wins) → off-like level →
 /// generic native table (effort + budgetTokens).
-fn native_thinking_options(model_name: &str, model_def: &serde_json::Value, level: &str) -> serde_json::Value {
+fn native_thinking_options(
+    model_name: &str,
+    model_def: &serde_json::Value,
+    level: &str,
+) -> serde_json::Value {
     if let Some(user) = model_def
         .get("reasoning")
         .and_then(|r| r.get("providerOptionsByLevel"))
@@ -271,7 +284,11 @@ fn provision_zcode_config_from(
 
     let provider_def = match resolve_provider_def(zcode_home, provider_name) {
         Some((def, tag)) => {
-            log::debug!("executor provider '{}' resolved from {} config", provider_name, tag);
+            log::debug!(
+                "executor provider '{}' resolved from {} config",
+                provider_name,
+                tag
+            );
             def
         }
         None => {
@@ -289,7 +306,9 @@ fn provision_zcode_config_from(
         // Normalize: every declared level maps to the CHOSEN level's params,
         // so whichever level the runtime resolves to, the request carries the
         // user's selection.
-        let models = provider_def.get_mut("models").and_then(|m| m.as_object_mut());
+        let models = provider_def
+            .get_mut("models")
+            .and_then(|m| m.as_object_mut());
         let model_entry = models
             .and_then(|m| m.get_mut(model_name))
             .filter(|e| e.is_object());
@@ -298,7 +317,10 @@ fn provision_zcode_config_from(
                 let levels = thinking_levels_for(model_name, entry);
                 let mut povl = serde_json::Map::new();
                 for lv in &levels {
-                    povl.insert(lv.clone(), native_thinking_options(model_name, entry, level));
+                    povl.insert(
+                        lv.clone(),
+                        native_thinking_options(model_name, entry, level),
+                    );
                 }
                 let reasoning = serde_json::json!({
                     "enabled": true,
@@ -343,7 +365,8 @@ fn provision_zcode_config_from(
             } else {
                 log::info!(
                     "executor model '{}' (thinking {:?}) provisioned into worktree",
-                    model, thinking
+                    model,
+                    thinking
                 );
             }
         }
@@ -572,28 +595,70 @@ impl std::fmt::Display for ScopeViolation {
     }
 }
 
-/// Simple glob matcher supporting * and ** patterns.
-/// `src/**` matches any file under src/.
-/// `*.ts` matches any .ts file.
-/// Exact paths match exactly.
+/// Gitignore-style glob matcher (component-wise, directory-boundary safe).
+///
+/// Semantics:
+/// - A pattern WITHOUT `/` matches the path's final segment at any depth
+///   (gitignore convention): `*.ts` matches `src/a.ts` but not `src/a.tsx`.
+/// - A pattern WITH `/` is matched segment-by-segment from the repo root:
+///   `*` matches within one segment only, `**` spans zero or more segments.
+///   `src/**` matches `src/x` and `src/a/b` but NOT `src_evil/x`.
+/// - No wildcards → exact string equality.
 pub fn glob_match(pattern: &str, path: &str) -> bool {
-    // Normalize: if pattern ends with /**, it matches everything under that dir
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path.starts_with(prefix);
+    /// Wildcard match within a single path segment (`*` = any byte run).
+    fn match_segment(pattern: &str, segment: &str) -> bool {
+        let (p, s) = (pattern.as_bytes(), segment.as_bytes());
+        let (mut pi, mut si) = (0usize, 0usize);
+        let (mut star_p, mut star_s) = (usize::MAX, 0usize);
+        while si < s.len() {
+            if pi < p.len() && p[pi] == s[si] {
+                pi += 1;
+                si += 1;
+            } else if pi < p.len() && p[pi] == b'*' {
+                star_p = pi;
+                star_s = si;
+                pi += 1;
+            } else if star_p != usize::MAX {
+                pi = star_p + 1;
+                star_s += 1;
+                si = star_s;
+            } else {
+                return false;
+            }
+        }
+        while pi < p.len() && p[pi] == b'*' {
+            pi += 1;
+        }
+        pi == p.len()
     }
 
-    // If pattern ends with *, it's a prefix + suffix match
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return path.starts_with(prefix);
+    /// Segment-wise match; `**` consumes zero or more leading segments.
+    fn match_segments(patterns: &[&str], segments: &[&str]) -> bool {
+        if patterns.is_empty() {
+            return segments.is_empty();
+        }
+        if patterns[0] == "**" {
+            return (0..=segments.len())
+                .any(|skip| match_segments(&patterns[1..], &segments[skip..]));
+        }
+        if segments.is_empty() || !match_segment(patterns[0], segments[0]) {
+            return false;
+        }
+        match_segments(&patterns[1..], &segments[1..])
     }
 
-    // If pattern starts with *, suffix match
-    if let Some(suffix) = pattern.strip_prefix('*') {
-        return path.ends_with(suffix);
+    let pattern = pattern.trim_matches('/');
+    let path = path.trim_matches('/');
+    if pattern.is_empty() {
+        return false;
     }
-
-    // Exact match
-    pattern == path
+    if !pattern.contains('/') {
+        let base = path.rsplit('/').next().unwrap_or(path);
+        return match_segment(pattern, base);
+    }
+    let pattern_segments: Vec<&str> = pattern.split('/').collect();
+    let path_segments: Vec<&str> = path.split('/').collect();
+    match_segments(&pattern_segments, &path_segments)
 }
 
 /// Create a candidate commit in the worktree with QuestLog trailers.
@@ -739,6 +804,18 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Str
     Ok(())
 }
 
+/// Is `sha` an ancestor of the repo's current HEAD (i.e. already merged)?
+/// False for anything else: not an ancestor, unknown/garbage-collected object,
+/// or git error — callers treat "can't prove merged" as "not merged".
+pub fn is_ancestor_of_head(repo_root: &Path, sha: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,9 +828,36 @@ mod tests {
     }
 
     #[test]
+    fn glob_double_star_respects_directory_boundary() {
+        // The audit case: `src/**` must NOT match `src_evil/file`.
+        assert!(!glob_match("src/**", "src_evil/file.ts"));
+        assert!(!glob_match("src/**", "src2/foo.ts"));
+        assert!(glob_match("src/**", "src/foo.ts"));
+        // `**` alone matches everything (old prefix matcher matched NOTHING).
+        assert!(glob_match("**", "any/deep/path.rs"));
+        assert!(glob_match("**", "toplevel.txt"));
+        // `**` mid-pattern spans segments.
+        assert!(glob_match("**/*.plist", "a/b/c.plist"));
+        assert!(glob_match("**/*secret*", "x/y/mysecretkey.pem"));
+        assert!(!glob_match("**/*.plist", "a/b/c.txt"));
+    }
+
+    #[test]
+    fn glob_single_star_stays_within_segment() {
+        // `dir/*.py` = direct children only (standard glob), not deep files.
+        assert!(glob_match("automation/*.py", "automation/run.py"));
+        assert!(!glob_match("automation/*.py", "automation/tests/run.py"));
+        assert!(!glob_match("automation/*.py", "automation2/run.py"));
+    }
+
+    #[test]
     fn glob_matches_wildcard_suffix() {
         assert!(glob_match("*.ts", "foo.ts"));
         assert!(glob_match("*.ts", "bar.ts"));
+        // Slash-less patterns match the basename at any depth (gitignore
+        // convention) — but never bleed across the extension boundary.
+        assert!(glob_match("*.ts", "src/deep/foo.ts"));
+        assert!(!glob_match("*.ts", "src/deep/foo.tsx"));
         assert!(!glob_match("*.ts", "foo.js"));
     }
 
@@ -761,6 +865,10 @@ mod tests {
     fn glob_matches_exact() {
         assert!(glob_match("README.md", "README.md"));
         assert!(!glob_match("README.md", "CHANGELOG.md"));
+        // Slash-less exact names also follow the basename convention.
+        assert!(glob_match(".gitignore", "sub/.gitignore"));
+        // Slashed exact paths are anchored at the repo root.
+        assert!(!glob_match("docs/README.md", "README.md"));
     }
 
     #[test]
@@ -1129,6 +1237,12 @@ fn runner_internal_paths_exclude_zcode_config() {
     // executor model — it must never count as a candidate source change.
     assert!(is_runner_internal_path(".zcode/config.json"));
     assert!(is_runner_internal_path("sub/dir/.zcode/config.json"));
+    // Auto-loaded executable surfaces are equally off-limits (a poisoned
+    // hook/skill/agent would run unsandboxed in a future session).
+    assert!(is_runner_internal_path(".zcode/hooks/pre.sh"));
+    assert!(is_runner_internal_path(".zcode/skills/evil/SKILL.md"));
+    assert!(is_runner_internal_path("sub/.zcode/agents/x.md"));
+    // Ordinary .zcode content (plans/notes) stays normal candidate source.
     assert!(!is_runner_internal_path(".zcode/other.json"));
     assert!(!is_runner_internal_path("src/main.rs"));
 }
@@ -1254,12 +1368,20 @@ fn provision_prefers_v2_config_over_v1() {
 
     // v1-only provider (legacy key): still resolved from v1 fallback
     let worktree2 = tempfile::tempdir().unwrap();
-    provision_zcode_config_from(home.path(), worktree2.path(), "deepseek/deepseek-v4-flash", None);
+    provision_zcode_config_from(
+        home.path(),
+        worktree2.path(),
+        "deepseek/deepseek-v4-flash",
+        None,
+    );
     let written2: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(worktree2.path().join(".zcode").join("config.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(written2["provider"]["deepseek"]["options"]["apiKey"], "v1-key");
+    assert_eq!(
+        written2["provider"]["deepseek"]["options"]["apiKey"],
+        "v1-key"
+    );
 }
 
 #[test]
@@ -1322,8 +1444,7 @@ fn provision_zcode_config_normalizes_thinking_levels() {
     assert_eq!(reasoning["defaultLevel"].as_str(), Some("off"));
     for level in ["off", "high", "max"] {
         assert_eq!(
-            reasoning["providerOptionsByLevel"][level]["anthropic"]["thinking"]["type"],
-            "disabled",
+            reasoning["providerOptionsByLevel"][level]["anthropic"]["thinking"]["type"], "disabled",
             "level {level} must normalize to disabled"
         );
     }
@@ -1343,9 +1464,18 @@ fn provision_zcode_config_normalizes_thinking_levels() {
     .unwrap();
     let r2 = &written2["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["reasoning"];
     for level in ["off", "high", "max"] {
-        assert_eq!(r2["providerOptionsByLevel"][level]["anthropic"]["thinking"]["budgetTokens"], 1024);
-        assert_eq!(r2["providerOptionsByLevel"][level]["anthropic"]["thinking"]["type"], "enabled");
-        assert_eq!(r2["providerOptionsByLevel"][level]["anthropic"]["effort"], "max");
+        assert_eq!(
+            r2["providerOptionsByLevel"][level]["anthropic"]["thinking"]["budgetTokens"],
+            1024
+        );
+        assert_eq!(
+            r2["providerOptionsByLevel"][level]["anthropic"]["thinking"]["type"],
+            "enabled"
+        );
+        assert_eq!(
+            r2["providerOptionsByLevel"][level]["anthropic"]["effort"],
+            "max"
+        );
     }
 }
 
@@ -1378,7 +1508,12 @@ fn provision_zcode_config_user_provider_options_win() {
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(config_dir.join("config.json"), main_config.to_string()).unwrap();
 
-    provision_zcode_config_from(home.path(), worktree.path(), "bigmodel/GLM-5.2", Some("high"));
+    provision_zcode_config_from(
+        home.path(),
+        worktree.path(),
+        "bigmodel/GLM-5.2",
+        Some("high"),
+    );
     let written: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(worktree.path().join(".zcode").join("config.json")).unwrap(),
     )

@@ -4,6 +4,7 @@ pub mod decision_store;
 mod discovery;
 pub mod epic_store;
 pub mod execution_store;
+pub mod executor_sandbox;
 pub mod executors;
 pub mod file_lock;
 mod models;
@@ -65,6 +66,7 @@ pub fn run() {
             commands::set_executor_thinking,
             commands::get_runner_project_status,
             commands::set_runner_project_enabled,
+            commands::set_runner_global_enabled,
             commands::get_epic_auto_execute,
             commands::set_epic_auto_execute,
             commands::get_decision_requests,
@@ -79,15 +81,16 @@ pub fn run() {
             let handle = app.handle().clone();
             watcher::start_watching(&handle);
 
-            // Runner auto-start: if any project is enabled in runner-config.json,
-            // start the Runner thread (matches the per-project control model).
-            // If no projects are enabled, the Runner stays off until the user
-            // enables a project from the UI.
-            if crate::runner_config::any_project_enabled() {
+            // Runner auto-start: gated by BOTH the master kill switch and at
+            // least one enabled project. Global OFF keeps the thread down
+            // even with projects enabled.
+            if crate::runner_config::is_globally_enabled()
+                && crate::runner_config::any_project_enabled()
+            {
                 log::info!("Runner: auto-starting on app launch (project(s) enabled)");
                 crate::runner::ensure_running();
             } else {
-                log::info!("Runner: staying off (no projects enabled)");
+                log::info!("Runner: staying off (global switch off or no projects enabled)");
             }
 
             // Hide main window on close instead of quitting (tray keeps app alive)

@@ -1098,10 +1098,7 @@ pub struct ExecutorOptions {
 /// NAME (e.g. "e7a18242…/deepseek-v4-flash" from the v2 config), return the
 /// new id so the selector can resolve the current model — and its thinking
 /// levels — instead of showing a detached selection.
-fn migrate_executor_model(
-    current: &str,
-    providers: &[ExecutorProviderOption],
-) -> Option<String> {
+fn migrate_executor_model(current: &str, providers: &[ExecutorProviderOption]) -> Option<String> {
     if providers
         .iter()
         .any(|p| p.models.iter().any(|m| m.id == current))
@@ -1118,21 +1115,21 @@ fn migrate_executor_model(
 
 /// Parse one provider's models into ExecutorModelOption entries. Shared by
 /// the v2 and v1 config readers.
-fn executor_models_from_provider(provider_key: &str, def: &serde_json::Value) -> Vec<ExecutorModelOption> {
+fn executor_models_from_provider(
+    provider_key: &str,
+    def: &serde_json::Value,
+) -> Vec<ExecutorModelOption> {
     let mut models = Vec::new();
     if let Some(model_map) = def.get("models").and_then(|m| m.as_object()) {
         for (model_name, model_def) in model_map {
             let reasoning = model_def.get("reasoning");
-            let thinking_default = ["defaultLevel", "defaultVariant"]
-                .iter()
-                .find_map(|key| {
-                    reasoning
-                        .and_then(|r| r.get(key))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                });
-            let thinking_levels =
-                crate::runner_git::thinking_levels_for(model_name, model_def);
+            let thinking_default = ["defaultLevel", "defaultVariant"].iter().find_map(|key| {
+                reasoning
+                    .and_then(|r| r.get(key))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
+            let thinking_levels = crate::runner_git::thinking_levels_for(model_name, model_def);
             models.push(ExecutorModelOption {
                 id: format!("{}/{}", provider_key, model_name),
                 name: model_name.clone(),
@@ -1300,6 +1297,14 @@ pub fn set_runner_project_enabled(
     Ok(crate::runner_config::get_project_status(&project_path))
 }
 
+/// Set the master kill switch. OFF stops the Runner thread and blocks every
+/// poll cycle, regardless of per-project switches.
+#[tauri::command]
+pub fn set_runner_global_enabled(enabled: bool) -> Result<bool, String> {
+    crate::runner_config::set_globally_enabled(enabled)?;
+    Ok(crate::runner_config::is_globally_enabled())
+}
+
 /// Get the auto_execute setting for a specific epic.
 #[tauri::command]
 pub fn get_epic_auto_execute(
@@ -1369,21 +1374,35 @@ pub fn resolve_decision_request(
             }
         }
         "cancel" => {
-            // Mark the execution as cancelled.
-            let _ = crate::execution_store::release_lease(
+            // Mark the execution as cancelled. Terminal-evidence guard:
+            // an already-terminal execution is left untouched (and logged).
+            if let Err(e) = crate::execution_store::release_lease(
                 &request.execution_id,
                 crate::execution_store::ExecutionStatus::Cancelled,
                 Some("cancelled via decision request"),
-            );
+            ) {
+                log::warn!(
+                    "resolve_decision(cancel): execution {} not cancelled: {}",
+                    request.execution_id,
+                    e
+                );
+            }
         }
         "revise_package" | "transfer_manual" | "reject" => {
             // These require human action outside the Runner — mark blocked execution
             // as cancelled so it doesn't linger in the queue.
-            let _ = crate::execution_store::release_lease(
+            if let Err(e) = crate::execution_store::release_lease(
                 &request.execution_id,
                 crate::execution_store::ExecutionStatus::Cancelled,
                 Some(&format!("resolved as '{}'", action)),
-            );
+            ) {
+                log::warn!(
+                    "resolve_decision({}): execution {} not cancelled: {}",
+                    action,
+                    request.execution_id,
+                    e
+                );
+            }
         }
         _ => {
             // Custom resolution text — no automatic action.

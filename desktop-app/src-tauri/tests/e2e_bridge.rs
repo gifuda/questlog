@@ -350,8 +350,9 @@ fn bridge_ready_package_to_zcode_execution() {
 }
 
 /// Read-only NoDiff e2e: a read-only package legitimately produces no diff.
-/// The Runner must treat NoDiff for `read-only` sandbox as SUCCESS (package
-/// passed, step Verified) — not as a failed attempt (blocked + decision).
+/// Under the read-only artifact contract, NoDiff counts as SUCCESS only when
+/// the declared acceptance commands pass against the unchanged worktree AND
+/// the run produced a non-empty stdout report.
 #[test]
 fn bridge_readonly_package_no_diff_counts_as_passed() {
     let _runtime_guard = RUNTIME_LOCK.lock().unwrap();
@@ -392,7 +393,7 @@ fn bridge_readonly_package_no_diff_counts_as_passed() {
                 "timeout_seconds": 3600,
                 "max_attempts": 2
             },
-            "acceptance": [{"type": "command", "command_id": "verify:candidate"}],
+            "acceptance": [{"type": "command", "command_id": "verify:readonly"}],
             "authority": {
                 "auto_edit_worktree": true,
                 "auto_commit_candidate": true,

@@ -210,6 +210,8 @@ export function useRunnerStatus() {
 
 export interface ProjectRunnerStatus {
   project_enabled: boolean;
+  /** Master kill switch — when false, nothing runs even with project ON. */
+  global_enabled: boolean;
 }
 
 // ─── Executor model selection ───
@@ -316,12 +318,28 @@ export function useProjectRunner(projectPath: string | null) {
     }
   }, [projectPath, status]);
 
-  return { status, loading, toggle, refresh };
+  const toggleGlobal = useCallback(async () => {
+    if (!status) return;
+    try {
+      setLoading(true);
+      const next = !status.global_enabled;
+      const globalEnabled = await invoke<boolean>("set_runner_global_enabled", { enabled: next });
+      setStatus({ ...status, global_enabled: globalEnabled });
+    } catch (err) {
+      console.warn("Failed to toggle global runner:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [status]);
+
+  return { status, loading, toggle, toggleGlobal, refresh };
 }
 
 /**
  * Get the auto_execute setting for a specific epic.
- * Returns null = inherit project, true/false = explicit override.
+ * Returns null = NOT authorized (fail-closed: an explicit ▶ is required —
+ * the project switch alone never authorizes a sealed package),
+ * true/false = explicit setting.
  */
 export async function getEpicAutoExecute(
   epicId: string,

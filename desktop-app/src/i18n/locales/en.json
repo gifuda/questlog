@@ -215,7 +215,12 @@
     "thinkingLevel": "{{level}}",
     "thinkingIsDefault": "default",
     "thinkingFollowDefault": "Follow default (no injection)",
-    "thinkingSelectorHint": "Thinking is selected independently of the model; the level list follows your ZCode config (reasoning.variants/levels) automatically. When set, the chosen level's params are normalized across all levels in the worktree, unaffected by the CLI's global thinking setting."
+    "thinkingSelectorHint": "Thinking is selected independently of the model; the level list follows your ZCode config (reasoning.variants/levels) automatically. When set, the chosen level's params are normalized across all levels in the worktree, unaffected by the CLI's global thinking setting.",
+    "globalOn": "Master ON",
+    "globalOff": "Master OFF",
+    "globalOnTitle": "Runner master switch is ON (click to emergency-stop all auto-claiming)",
+    "globalOffTitle": "Runner master switch is OFF (emergency stop active: project switches have no effect)",
+    "projectBlockedByGlobal": "Project is ON, but the master switch (⏻) is OFF — nothing will run"
   },
   "timeline": {
     "undoRemove": "Removed \"{{name}}\"",

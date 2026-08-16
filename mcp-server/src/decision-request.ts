@@ -169,21 +169,23 @@ export async function listDecisionRequests(options?: {
 }
 
 /**
- * Resolve a DecisionRequest by recording the human's answer.
+ * Resolve a DecisionRequest: record the human's answer, then execute the
+ * mapped action (record-then-act — the same mapping as the QuestLog UI's
+ * Rust side; see decision-actions.ts for the shared contract).
  *
- * Resolution is deliberately non-executing: it never mutates an old attempt,
- * releases a package, or starts the Runner. The user must explicitly retry or
- * revise/reseal the package after the decision has been recorded.
+ * The resolution must be one of the request's declared options (when the
+ * request declares any) — free text would silently bypass the choices the
+ * Runner offered.
  */
 export async function resolveDecision(
   requestId: string,
   resolution: string,
   resolvedBy?: string,
-): Promise<{ ok: true } | { error: string }> {
+): Promise<{ ok: true; action?: string } | { error: string }> {
   await ensureDir();
-  return withFileLock(
+  const recordResult = await withFileLock(
     decisionsPath(),
-    async () => {
+    async (): Promise<{ ok: true; execution_id: string } | { error: string }> => {
       const result = await readDecisionsSafe();
       let file: DecisionsFile;
       if ("ok" in result) {
@@ -196,13 +198,34 @@ export async function resolveDecision(
       const req = file.requests.find((r) => r.request_id === requestId);
       if (!req) return { error: `decision request '${requestId}' not found` };
       if (req.resolved) return { error: `already resolved at ${req.resolved_at}` };
+      // Options validation (both ends enforce this — Rust decision_store
+      // does the same): a resolution outside the declared options is rejected.
+      if (
+        req.options.length > 0 &&
+        !req.options.some((o) => o.toLowerCase() === resolution.trim().toLowerCase())
+      ) {
+        return {
+          error: `resolution '${resolution}' is not one of the declared options: ${req.options.join(", ")}`,
+        };
+      }
       req.resolved = true;
       req.resolution = resolution;
       req.resolved_by = resolvedBy ?? "mcp-user";
       req.resolved_at = new Date().toISOString();
       await writeDecisions(file);
-      return { ok: true as const };
+      return { ok: true as const, execution_id: req.execution_id };
     },
     10_000,
-  ).catch((err: Error) => ({ error: err.message }));
+  ).catch((err: Error) => ({ error: err.message }) as { error: string });
+
+  if ("error" in recordResult) return recordResult;
+
+  // Record-then-act. Action failure does NOT un-record the decision (the
+  // human's answer stands); it surfaces as a warning string instead.
+  const { executeDecisionAction } = await import("./decision-actions.js");
+  const actionResult = await executeDecisionAction(recordResult.execution_id, resolution);
+  return {
+    ok: true as const,
+    action: "error" in actionResult ? `action failed: ${actionResult.error}` : actionResult.detail,
+  };
 }

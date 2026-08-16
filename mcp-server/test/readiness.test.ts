@@ -226,7 +226,7 @@ describe("verifyPickupReadiness", () => {
     await writeRunnerConfig({ [projectDir]: { enabled: true } });
     const pkgId = await buildSealedPackage();
     await writeExecutions([
-      { id: "exec_1", package_id: pkgId, status: "Running" },
+      { id: "exec_1", package_id: pkgId, status: "running" }, // Rust serializes snake_case
     ]);
 
     const result = await verifyPickupReadiness(pkgId);

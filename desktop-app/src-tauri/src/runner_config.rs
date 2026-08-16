@@ -76,21 +76,62 @@ fn ensure_runtime_dir() -> Result<(), String> {
 
 /// Read the runner config. Returns default (all OFF) if file doesn't exist.
 /// Fail-closed on corrupt JSON: returns default rather than crashing.
+///
+/// v1→v2 migration: v1 never enforced `global_enabled` (it was a dead field
+/// and defaulted to false while projects were toggled directly). On first
+/// read of a v1 config, if any project is enabled the global switch is
+/// flipped ON (preserving the operator's evident intent) and the result is
+/// persisted as v2. From then on `global_enabled = false` is a REAL kill
+/// switch: nothing runs, regardless of project switches.
 pub fn read_config() -> RunnerRuntimeConfig {
     let path = config_path();
     if !path.exists() {
         return RunnerRuntimeConfig::default();
     }
-    match std::fs::read_to_string(&path) {
+    let parsed = match std::fs::read_to_string(&path) {
         Ok(raw) => match serde_json::from_str::<RunnerRuntimeConfig>(&raw) {
-            Ok(config) => config,
+            Ok(config) => Some(config),
             Err(e) => {
                 log::warn!("runner-config.json corrupt, using safe defaults: {}", e);
-                RunnerRuntimeConfig::default()
+                None
             }
         },
-        Err(_) => RunnerRuntimeConfig::default(),
+        Err(_) => None,
+    };
+    let mut config = match parsed {
+        Some(config) => config,
+        // Corrupt/unreadable: safe default view, and crucially NO migration
+        // write — never overwrite a file we couldn't parse.
+        None => return RunnerRuntimeConfig::default(),
+    };
+    if config.version < 2 {
+        if config.projects.values().any(|e| e.enabled) && !config.global_enabled {
+            config.global_enabled = true;
+        }
+        config.version = 2;
+        // Persist at most once per process per path: read_config runs on
+        // every poll cycle, and without this guard a persistently-failing
+        // write (disk full, permissions) would be retried — and
+        // lock-contended — on every single read.
+        static MIGRATION_ATTEMPTED: std::sync::Mutex<
+            Option<std::collections::HashSet<std::path::PathBuf>>,
+        > = std::sync::Mutex::new(None);
+        let first_attempt_for_path = {
+            let mut guard = MIGRATION_ATTEMPTED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard
+                .get_or_insert_with(Default::default)
+                .insert(path.clone())
+        };
+        if first_attempt_for_path {
+            let mut persisted = config.clone();
+            // Best-effort: if the write fails the in-memory migration still
+            // applies, and the next setter persists it anyway.
+            let _ = write_config(&mut persisted);
+        }
     }
+    config
 }
 
 fn write_config(config: &mut RunnerRuntimeConfig) -> Result<(), String> {
@@ -117,7 +158,18 @@ pub fn is_globally_enabled() -> bool {
 pub fn set_globally_enabled(enabled: bool) -> Result<(), String> {
     let mut config = read_config();
     config.global_enabled = enabled;
-    write_config(&mut config)
+    write_config(&mut config)?;
+
+    // The kill switch controls the Runner thread directly: OFF stops it
+    // immediately (in-flight executions are still supervised to their
+    // terminal state by their own poll iteration ending — no new claims
+    // happen because poll_once gates on the global switch first).
+    if enabled && config.projects.values().any(|e| e.enabled) {
+        crate::runner::ensure_running();
+    } else if !enabled {
+        crate::runner::stop_runner();
+    }
+    Ok(())
 }
 
 // ─── Per-project toggle ───
@@ -150,9 +202,10 @@ pub fn set_project_enabled(project_path: &str, enabled: bool) -> Result<(), Stri
         .insert(project_path.to_string(), ProjectRunnerEntry { enabled });
     write_config(&mut config)?;
 
-    // Manage the Runner thread based on whether any project is enabled
+    // Manage the Runner thread: it runs only when the global kill switch is
+    // ON and at least one project is enabled.
     let any_enabled = config.projects.values().any(|e| e.enabled);
-    if any_enabled {
+    if any_enabled && config.global_enabled {
         crate::runner::ensure_running();
     } else {
         crate::runner::stop_runner();
@@ -169,12 +222,19 @@ pub fn get_project_status(project_path: &str) -> ProjectRunnerStatus {
         .get(project_path)
         .map(|e| e.enabled)
         .unwrap_or(false);
-    ProjectRunnerStatus { project_enabled }
+    ProjectRunnerStatus {
+        project_enabled,
+        global_enabled: config.global_enabled,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRunnerStatus {
     pub project_enabled: bool,
+    /// The master kill switch — surfaced so the UI can show "项目开关已开，
+    /// 但总闸关闭" instead of letting the operator wonder why nothing runs.
+    #[serde(default)]
+    pub global_enabled: bool,
 }
 
 // ─── Executor model selection ───
@@ -212,32 +272,27 @@ pub fn set_executor_thinking(thinking: Option<String>) -> Result<(), String> {
 /// Reads `auto_execute` from `.epics.json`:
 /// - `Some(true)` → explicitly authorized
 /// - `Some(false)` → explicitly paused
-/// - `None` → fail-closed. With the "switch = authorization" model a sealed
-///   package becomes claimable the moment its switches open, so an epic
-///   without an explicit `▶` must NOT inherit execution authority from the
-///   project switch — otherwise flipping the project switch would batch-run
-///   every sealed package in the project.
+/// - `None` → fail-closed (explicit ▶ required; the project switch alone
+///   must not batch-release every sealed package)
 ///
-/// If `.epics.json` doesn't exist or the epic isn't found, returns Ok(true)
-/// (no epic-level restriction) — such orphaned packages then surface as
-/// PreflightBlocked in `validate_before_claim` instead of waiting silently.
+/// Fail-closed on missing data too: if `.epics.json` is unreadable or the
+/// epic is unknown, returns Err — the poll loop quietly skips (no claim, no
+/// burned attempt), and `verify_pickup_readiness` reports the matching
+/// blocker so the gap is visible instead of silent.
 pub fn is_epic_auto_execute(project_path: &str, epic_id: &str) -> Result<bool, String> {
     let project_enabled = is_project_enabled(project_path);
     if !project_enabled {
         return Ok(false);
     }
 
-    // Read .epics.json to check epic's auto_execute field.
-    // If the file doesn't exist or epic isn't found, treat as no restriction.
     let dir = PathBuf::from(project_path);
-    let data = match crate::epic_store::read_epics(&dir) {
-        Ok(d) => d,
-        Err(_) => return Ok(true), // no .epics.json → no epic restriction
-    };
-    let epic = match data.epics.iter().find(|e| e.id == epic_id) {
-        Some(e) => e,
-        None => return Ok(true), // epic not found → no restriction
-    };
+    let data = crate::epic_store::read_epics(&dir)
+        .map_err(|e| format!("cannot verify epic authorization (.epics.json): {e}"))?;
+    let epic = data
+        .epics
+        .iter()
+        .find(|e| e.id == epic_id)
+        .ok_or_else(|| format!("epic '{epic_id}' not found in .epics.json"))?;
 
     match epic.auto_execute {
         None => Ok(false),        // fail-closed: explicit ▶ required
@@ -308,6 +363,80 @@ mod tests {
 
         set_globally_enabled(false).unwrap();
         assert!(!is_globally_enabled());
+    }
+
+    #[test]
+    fn v1_config_with_enabled_projects_migrates_global_on() {
+        let (_dir, _guard) = setup_temp_runtime();
+        ensure_runtime_dir().unwrap();
+        std::fs::write(
+            config_path(),
+            serde_json::json!({
+                "version": 1,
+                "global_enabled": false,
+                "projects": {"/tmp/p": {"enabled": true}},
+                "revision": 3
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = read_config();
+        assert!(
+            config.global_enabled,
+            "v1 config with enabled projects must migrate the kill switch ON (legacy behavior had no global gate)"
+        );
+        assert_eq!(config.version, 2);
+        // Migration is persisted — a later v2 read does not re-migrate.
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(config_path()).unwrap()).unwrap();
+        assert_eq!(raw["version"], 2);
+        assert_eq!(raw["global_enabled"], true);
+    }
+
+    #[test]
+    fn v1_config_without_enabled_projects_stays_off() {
+        let (_dir, _guard) = setup_temp_runtime();
+        ensure_runtime_dir().unwrap();
+        std::fs::write(
+            config_path(),
+            serde_json::json!({
+                "version": 1,
+                "global_enabled": false,
+                "projects": {"/tmp/p": {"enabled": false}},
+                "revision": 1
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = read_config();
+        assert!(!config.global_enabled);
+        assert_eq!(config.version, 2);
+    }
+
+    #[test]
+    fn v2_kill_switch_is_not_re_migrated() {
+        let (_dir, _guard) = setup_temp_runtime();
+        ensure_runtime_dir().unwrap();
+        // v2: operator deliberately killed the switch while a project is on.
+        std::fs::write(
+            config_path(),
+            serde_json::json!({
+                "version": 2,
+                "global_enabled": false,
+                "projects": {"/tmp/p": {"enabled": true}},
+                "revision": 9
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = read_config();
+        assert!(
+            !config.global_enabled,
+            "a deliberate v2 kill-switch OFF must survive reads"
+        );
     }
 
     #[test]

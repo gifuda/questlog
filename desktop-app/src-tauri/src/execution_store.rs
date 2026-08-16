@@ -197,13 +197,23 @@ fn mutate_executions<F>(f: F) -> Result<ExecutionsFile, String>
 where
     F: FnOnce(&mut ExecutionsFile) -> Result<(), String>,
 {
+    mutate_executions_with(|data| f(data).map(|_| ())).map(|(data, ())| data)
+}
+
+/// Lock-protected read-modify-write that also returns a caller value
+/// computed inside the same lock (needed by atomic claim/retry, where the
+/// check and the mutation must not be separable).
+fn mutate_executions_with<F, T>(f: F) -> Result<(ExecutionsFile, T), String>
+where
+    F: FnOnce(&mut ExecutionsFile) -> Result<T, String>,
+{
     ensure_runtime_dir()?;
     let path = executions_path();
     file_lock::with_file_lock(&path, || {
         let mut data = read_executions()?;
-        f(&mut data)?;
+        let value = f(&mut data)?;
         write_executions(&mut data)?;
-        Ok(data)
+        Ok((data, value))
     })
 }
 
@@ -297,6 +307,122 @@ pub fn enqueue_execution_with_parent(
     Ok(exec_id)
 }
 
+/// Atomically claim a package for execution — the single entry point that
+/// turns a claimable package into a Running execution.
+///
+/// Under ONE lock this:
+///   1. rejects the claim if any execution for this package is already
+///      in-flight (Running/Candidate/Verifying/Cancel/PauseRequested) — the
+///      package-level uniqueness constraint that makes double-poller races
+///      impossible instead of merely unlikely;
+///   2. adopts an existing Queued/Stale execution (a retry child pre-created
+///      by `create_retry_attempt`, or a crashed runner's leftover) by leasing
+///      it, preserving its attempt lineage;
+///   3. otherwise creates a fresh first attempt directly in Running with the
+///      lease already held.
+///
+/// Returns the leased execution. `Err` means "someone else holds it" — the
+/// caller (poll loop) quietly skips to the next package.
+pub fn claim_package(
+    package_id: &str,
+    epic_id: &str,
+    step_id: &str,
+    project_path: &str,
+    base_sha: &str,
+    runner_id: &str,
+) -> Result<Execution, String> {
+    let now = now_ts();
+    let pid = std::process::id();
+    let lease = ExecutionLease {
+        execution_id: String::new(), // patched below
+        acquired_at: now,
+        last_heartbeat: now,
+        pid,
+        runner_id: runner_id.to_string(),
+    };
+
+    let (_data, (exec, event_type, message)) = mutate_executions_with(|data| {
+        // 1. Uniqueness: refuse while any attempt is in-flight.
+        if data.executions.iter().any(|e| {
+            e.package_id == package_id
+                && matches!(
+                    e.status,
+                    ExecutionStatus::Running
+                        | ExecutionStatus::Candidate
+                        | ExecutionStatus::Verifying
+                        | ExecutionStatus::CancelRequested
+                        | ExecutionStatus::PauseRequested
+                )
+        }) {
+            return Err(format!("package '{package_id}' is already claimed"));
+        }
+
+        // 2. Adopt a pre-created Queued/Stale attempt (retry child or stale
+        //    leftover) — newest first so a fresh retry child wins over an
+        //    ancient stale row.
+        if let Some(existing) = data.executions.iter_mut().rev().find(|e| {
+            e.package_id == package_id
+                && matches!(e.status, ExecutionStatus::Queued | ExecutionStatus::Stale)
+        }) {
+            let mut lease = lease.clone();
+            lease.execution_id = existing.id.clone();
+            existing.status = ExecutionStatus::Running;
+            existing.lease = Some(lease);
+            existing.attempts += 1;
+            existing.updated_at = now;
+            let adopted = existing.clone();
+            return Ok((
+                adopted,
+                "claimed_adopted",
+                "Claim adopted an existing queued/stale attempt",
+            ));
+        }
+
+        // 3. Fresh first attempt, born Running with the lease held.
+        let exec_id = format!("exec_{}", uuid::Uuid::new_v4());
+        let mut lease = lease;
+        lease.execution_id = exec_id.clone();
+        let exec = Execution {
+            id: exec_id.clone(),
+            package_id: package_id.to_string(),
+            epic_id: epic_id.to_string(),
+            step_id: step_id.to_string(),
+            project_path: project_path.to_string(),
+            status: ExecutionStatus::Running,
+            lease: Some(lease),
+            cli_session: None,
+            worktree_path: None,
+            branch: None,
+            base_sha: base_sha.to_string(),
+            candidate_sha: None,
+            attempts: 1,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+            attempt_no: 1,
+            parent_attempt_id: None,
+            bundle_path: None,
+            executor: None,
+        };
+        data.executions.push(exec.clone());
+        Ok((
+            exec,
+            "claimed",
+            "Package claimed atomically (fresh attempt)",
+        ))
+    })?;
+
+    log_event(&ExecutionEvent {
+        execution_id: exec.id.clone(),
+        timestamp: now,
+        event_type: event_type.to_string(),
+        message: format!("{message} for package {package_id}"),
+        data: None,
+    })?;
+
+    Ok(exec)
+}
+
 /// Find the next queued execution that a Runner can pick up.
 /// Checks: status=Queued, no stale lease on same project, dependencies met.
 /// Returns None if no work is available.
@@ -355,11 +481,21 @@ pub fn acquire_lease(execution_id: &str, runner_id: &str) -> Result<Execution, S
 
         // Check for existing non-stale lease
         if let Some(lease) = &exec.lease {
-            if !is_lease_stale(lease) && lease.runner_id != runner_id {
-                return Err(format!(
-                    "execution '{}' is already leased by runner '{}'",
-                    execution_id, lease.runner_id
-                ));
+            if !is_lease_stale(lease) {
+                if lease.runner_id != runner_id {
+                    return Err(format!(
+                        "execution '{}' is already leased by runner '{}'",
+                        execution_id, lease.runner_id
+                    ));
+                }
+                // Same-runner re-entry on a live lease (claim_package already
+                // leased it before process_execution runs): renew the
+                // heartbeat, keep status/attempts untouched.
+                if let Some(lease) = exec.lease.as_mut() {
+                    lease.last_heartbeat = now;
+                }
+                exec.updated_at = now;
+                return Ok(());
             }
         }
 
@@ -422,6 +558,12 @@ pub fn heartbeat(execution_id: &str) -> Result<(), String> {
 }
 
 /// Release the lease and set the final status.
+///
+/// Evidence-preserving guard: a truly terminal, evidence-bearing state
+/// (Passed/Failed/Cancelled/TimedOut) is NEVER overwritten — a late cancel
+/// via a DecisionRequest must not erase why the attempt actually ended.
+/// Blocked stays overwritable: the DR "cancel" flow legitimately moves a
+/// blocked execution to Cancelled.
 pub fn release_lease(
     execution_id: &str,
     final_status: ExecutionStatus,
@@ -434,6 +576,18 @@ pub fn release_lease(
             .iter_mut()
             .find(|e| e.id == execution_id)
             .ok_or_else(|| format!("execution '{}' not found", execution_id))?;
+        if matches!(
+            exec.status,
+            ExecutionStatus::Passed
+                | ExecutionStatus::Failed
+                | ExecutionStatus::Cancelled
+                | ExecutionStatus::TimedOut
+        ) {
+            return Err(format!(
+                "execution '{}' is already terminal ({:?}) — refusing to overwrite with {:?}",
+                execution_id, exec.status, final_status
+            ));
+        }
         exec.status = final_status.clone();
         exec.lease = None;
         exec.last_error = error.map(|s| s.to_string());
@@ -702,73 +856,96 @@ pub fn get_execution(id: &str) -> Result<Execution, String> {
 /// a new Execution with `attempt_no = parent.attempt_no + 1` and
 /// `parent_attempt_id = parent.id`. The new execution starts at Queued.
 /// The parent is NOT changed — its evidence stays sealed.
+///
+/// Atomic: the retryability check, the idempotency check (an already-queued
+/// child of this parent), and the child creation happen under ONE lock, so
+/// a Runner timeout auto-retry racing a human resolve("retry") yields exactly
+/// one child, never two.
 pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
-    let parent = get_execution(parent_exec_id)?;
-    if !matches!(
-        parent.status,
-        ExecutionStatus::Failed
-            | ExecutionStatus::Blocked
-            | ExecutionStatus::TimedOut
-            | ExecutionStatus::Cancelled
-            | ExecutionStatus::Stale
-    ) {
-        return Err(format!(
-            "execution '{}' is not in a retryable terminal state",
-            parent_exec_id
-        ));
-    }
-    // Idempotency (adversarial review G4): the Runner's timeout auto-retry
-    // and a human resolve("retry")/retry_execution can race. If a queued
-    // child of this parent already exists, return it instead of creating a
-    // duplicate — otherwise parallel retries multiply queued executions.
-    {
-        let executions = list_executions()?;
-        if let Some(existing) = executions.iter().find(|e| {
-            e.parent_attempt_id.as_deref() == Some(parent.id.as_str())
-                && matches!(
-                    e.status,
-                    ExecutionStatus::Queued | ExecutionStatus::Running
-                )
-        }) {
-            return Ok(existing.id.clone());
-        }
-    }
-    let package = read_package(&parent.package_id)?;
-    if parent.attempt_no >= package.max_attempts.max(1) {
+    // Package policy read (separate store): the attempt budget cap.
+    let parent_snapshot = get_execution(parent_exec_id)?;
+    let package = read_package(&parent_snapshot.package_id)?;
+    if parent_snapshot.attempt_no >= package.max_attempts.max(1) {
         return Err(format!(
             "maximum attempts reached ({}) — revise the package before retrying",
             package.max_attempts.max(1)
         ));
     }
 
-    let new_id = enqueue_execution_with_parent(
-        &parent.package_id,
-        &parent.epic_id,
-        &parent.step_id,
-        &parent.project_path,
-        &parent.base_sha,
-        Some(&parent.id),
-        parent.attempt_no + 1,
-    )?;
-
-    log_event(&ExecutionEvent {
-        execution_id: new_id.clone(),
-        timestamp: now_ts(),
-        event_type: "retry_created".to_string(),
-        message: format!(
-            "Retry attempt {} created, parent={}",
-            parent.attempt_no + 1,
-            parent.id
-        ),
-        data: Some(serde_json::json!({
-            "parent_attempt_id": parent.id,
-            "attempt_no": parent.attempt_no + 1,
-        })),
+    let now = now_ts();
+    let (_data, (child_id, created)) = mutate_executions_with(|data| {
+        let parent = data
+            .executions
+            .iter()
+            .find(|e| e.id == parent_exec_id)
+            .ok_or_else(|| format!("execution '{parent_exec_id}' not found"))?;
+        if !matches!(
+            parent.status,
+            ExecutionStatus::Failed
+                | ExecutionStatus::Blocked
+                | ExecutionStatus::TimedOut
+                | ExecutionStatus::Cancelled
+                | ExecutionStatus::Stale
+        ) {
+            return Err(format!(
+                "execution '{}' is not in a retryable terminal state",
+                parent_exec_id
+            ));
+        }
+        // Idempotency under the same lock: a queued/running child of this
+        // parent already exists → return it instead of multiplying attempts.
+        if let Some(existing) = data.executions.iter().find(|e| {
+            e.parent_attempt_id.as_deref() == Some(parent_exec_id)
+                && matches!(e.status, ExecutionStatus::Queued | ExecutionStatus::Running)
+        }) {
+            return Ok((existing.id.clone(), false));
+        }
+        let child_id = format!("exec_{}", uuid::Uuid::new_v4());
+        data.executions.push(Execution {
+            id: child_id.clone(),
+            package_id: parent.package_id.clone(),
+            epic_id: parent.epic_id.clone(),
+            step_id: parent.step_id.clone(),
+            project_path: parent.project_path.clone(),
+            status: ExecutionStatus::Queued,
+            lease: None,
+            cli_session: None,
+            worktree_path: None,
+            branch: None,
+            base_sha: parent.base_sha.clone(),
+            candidate_sha: None,
+            attempts: 0,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+            attempt_no: parent.attempt_no + 1,
+            parent_attempt_id: Some(parent.id.clone()),
+            bundle_path: None,
+            executor: None,
+        });
+        Ok((child_id, true))
     })?;
 
-    mark_package_status(&parent.package_id, "ready")?;
+    if created {
+        log_event(&ExecutionEvent {
+            execution_id: child_id.clone(),
+            timestamp: now_ts(),
+            event_type: "retry_created".to_string(),
+            message: format!(
+                "Retry attempt {} created, parent={}",
+                parent_snapshot.attempt_no + 1,
+                parent_exec_id
+            ),
+            data: Some(serde_json::json!({
+                "parent_attempt_id": parent_exec_id,
+                "attempt_no": parent_snapshot.attempt_no + 1,
+            })),
+        })?;
 
-    Ok(new_id)
+        mark_package_status(&parent_snapshot.package_id, "ready")?;
+    }
+
+    Ok(child_id)
 }
 
 /// Get the output directory for an execution.
@@ -1133,7 +1310,11 @@ pub fn reanchor_package(
         }
 
         // New revision: update base, bump revision, recompute hash.
-        let revision = row.get("plan_revision").and_then(|v| v.as_u64()).unwrap_or(1) + 1;
+        let revision = row
+            .get("plan_revision")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            + 1;
         row["base_sha"] = serde_json::Value::String(new_base_sha.to_string());
         row["plan_revision"] = serde_json::Value::from(revision);
         let hash = compute_package_hash(&row)?;
@@ -1157,21 +1338,18 @@ pub fn reanchor_package(
 
         // Keep the step's package summary in .epics.json in sync — the
         // claim-time preflight rejects packages whose summary drifted.
-        crate::epic_store::mutate_epics(
-            &std::path::PathBuf::from(project_path),
-            |data| {
-                let step = data
-                    .steps
-                    .iter_mut()
-                    .find(|s| s.id == step_id)
-                    .ok_or_else(|| format!("step '{step_id}' not found"))?;
-                if let Some(summary) = step.package.as_mut() {
-                    summary.plan_revision = revision as u32;
-                    summary.package_hash = hash.clone();
-                }
-                Ok(())
-            },
-        )?;
+        crate::epic_store::mutate_epics(&std::path::PathBuf::from(project_path), |data| {
+            let step = data
+                .steps
+                .iter_mut()
+                .find(|s| s.id == step_id)
+                .ok_or_else(|| format!("step '{step_id}' not found"))?;
+            if let Some(summary) = step.package.as_mut() {
+                summary.plan_revision = revision as u32;
+                summary.package_hash = hash.clone();
+            }
+            Ok(())
+        })?;
 
         Ok(summary)
     })
@@ -1191,6 +1369,13 @@ pub fn mark_package_status(package_id: &str, status: &str) -> Result<(), String>
         if let Some(packages) = json.get_mut("packages").and_then(|p| p.as_array_mut()) {
             for pkg in packages.iter_mut() {
                 if pkg.get("package_id").and_then(|v| v.as_str()) == Some(package_id) {
+                    // Historical rows keep their tombstone — only the live
+                    // row(s) transition. Flipping a superseded row would
+                    // rewrite history and could resurrect an old revision
+                    // into a claimable-looking state.
+                    if pkg.get("status").and_then(|v| v.as_str()) == Some("superseded") {
+                        continue;
+                    }
                     pkg["status"] = serde_json::Value::String(status.to_string());
                 }
             }
@@ -1486,6 +1671,138 @@ mod tests {
         let package_after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(packages_path()).unwrap()).unwrap();
         assert_eq!(package_after["packages"][0]["status"], "ready");
+    }
+
+    #[test]
+    fn claim_is_atomic_and_unique() {
+        let (_dir, _guard) = setup_temp_runtime();
+        let first = claim_package("pkg1", "e1", "s1", "/tmp/proj", "abc123", "runner-1").unwrap();
+        assert_eq!(first.status, ExecutionStatus::Running);
+        assert!(first.lease.is_some());
+        assert_eq!(first.attempt_no, 1);
+
+        // A concurrent poller claiming the same package must be refused.
+        let second = claim_package("pkg1", "e1", "s1", "/tmp/proj", "abc123", "runner-2");
+        assert!(second.is_err(), "double claim must be rejected");
+        assert_eq!(
+            list_executions()
+                .unwrap()
+                .iter()
+                .filter(|e| e.package_id == "pkg1")
+                .count(),
+            1,
+            "rejected claim must not create a second execution row"
+        );
+    }
+
+    #[test]
+    fn claim_adopts_precreated_retry_child() {
+        let (_dir, _guard) = setup_temp_runtime();
+        // A retry child is pre-created in Queued state carrying lineage.
+        let child_id = enqueue_execution_with_parent(
+            "pkg1",
+            "e1",
+            "s1",
+            "/tmp/proj",
+            "abc123",
+            Some("exec_parent"),
+            2,
+        )
+        .unwrap();
+
+        let claimed = claim_package("pkg1", "e1", "s1", "/tmp/proj", "abc123", "runner-1").unwrap();
+        assert_eq!(claimed.id, child_id, "claim must adopt the queued child");
+        assert_eq!(claimed.status, ExecutionStatus::Running);
+        assert_eq!(claimed.attempt_no, 2, "lineage preserved");
+        assert_eq!(claimed.parent_attempt_id.as_deref(), Some("exec_parent"));
+    }
+
+    #[test]
+    fn mark_package_status_preserves_superseded_rows() {
+        let (_dir, _guard) = setup_temp_runtime();
+        let packages = serde_json::json!({
+            "version": 1,
+            "packages": [
+                {"package_id": "pkg1", "status": "superseded"},
+                {"package_id": "pkg1", "status": "sealed"}
+            ]
+        });
+        std::fs::write(
+            packages_path(),
+            serde_json::to_string_pretty(&packages).unwrap(),
+        )
+        .unwrap();
+
+        mark_package_status("pkg1", "blocked").unwrap();
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(packages_path()).unwrap()).unwrap();
+        assert_eq!(after["packages"][0]["status"], "superseded");
+        assert_eq!(after["packages"][1]["status"], "blocked");
+    }
+
+    #[test]
+    fn release_lease_refuses_to_overwrite_terminal_evidence() {
+        let (_dir, _guard) = setup_temp_runtime();
+        let id = enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc123").unwrap();
+        acquire_lease(&id, "runner-1").unwrap();
+        finish_execution(&id, ExecutionStatus::TimedOut, Some("timeout")).unwrap();
+
+        // A late cancel must NOT rewrite the terminal state.
+        let result = release_lease(&id, ExecutionStatus::Cancelled, Some("late cancel"));
+        assert!(result.is_err(), "terminal overwrite must be refused");
+        let exec = get_execution(&id).unwrap();
+        assert_eq!(exec.status, ExecutionStatus::TimedOut);
+        assert_eq!(exec.last_error.as_deref(), Some("timeout"));
+
+        // A blocked execution CAN still be cancelled (the DR cancel flow).
+        let id2 = enqueue_execution("pkg2", "e1", "s2", "/tmp/proj", "abc123").unwrap();
+        acquire_lease(&id2, "runner-1").unwrap();
+        finish_execution(&id2, ExecutionStatus::Blocked, Some("scope")).unwrap();
+        release_lease(&id2, ExecutionStatus::Cancelled, Some("DR cancel")).unwrap();
+        assert_eq!(
+            get_execution(&id2).unwrap().status,
+            ExecutionStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn retry_idempotency_returns_existing_child() {
+        let (_dir, _guard) = setup_temp_runtime();
+        let package = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "package_id": "pkg1", "epic_id": "e1", "step_id": "s1",
+                "plan_revision": 1, "project_path": "/tmp/proj", "repo_root": "/tmp/proj",
+                "base_sha": "abc123", "objective": "t",
+                "scope": {"allowed_paths": ["**"], "forbidden_paths": [], "max_changed_files": 10},
+                "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write",
+                             "timeout_seconds": 3600, "max_attempts": 3},
+                "acceptance": [], "status": "blocked",
+                "sealed_at": "2026-08-11T00:00:00Z", "package_hash": "fixture"
+            }]
+        });
+        std::fs::write(
+            packages_path(),
+            serde_json::to_string_pretty(&package).unwrap(),
+        )
+        .unwrap();
+
+        let parent_id = enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc123").unwrap();
+        acquire_lease(&parent_id, "runner-1").unwrap();
+        release_lease(&parent_id, ExecutionStatus::TimedOut, Some("t")).unwrap();
+
+        let first = create_retry_attempt(&parent_id).unwrap();
+        let second = create_retry_attempt(&parent_id).unwrap();
+        assert_eq!(first, second, "racing retries must collapse to one child");
+        assert_eq!(
+            list_executions()
+                .unwrap()
+                .iter()
+                .filter(|e| e.parent_attempt_id.as_deref() == Some(parent_id.as_str()))
+                .count(),
+            1
+        );
     }
 
     #[test]

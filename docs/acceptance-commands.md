@@ -9,11 +9,12 @@ Runner 验收阶段在隔离 worktree 中执行**受信命令**（command_id →
 
 ---
 
-## 命令清单（11 个）
+## 命令清单（12 个）
 
 | id | 命令 | 工作目录 | 用途 |
 |---|---|---|---|
 | `verify:candidate` | `git diff --check HEAD^ HEAD` | `.` | 验证候选 commit 的 patch 干净（无空白错误） |
+| `verify:readonly` | `git diff --quiet HEAD` | `.` | 只读任务产物契约：worktree 相对 base 无改动（需配合非空 stdout 报告） |
 | **TypeScript（MCP server）** | | | |
 | `test:mcp` | `npm test` | `mcp-server` | MCP server 单元测试（vitest） |
 | `build:mcp` | `npm run build` | `mcp-server` | MCP server TypeScript 编译 |
