@@ -11,6 +11,7 @@ import {
 import {
   listDecisionRequests, resolveDecision,
 } from "./decision-request.js";
+import { registerPublishPlanTool } from "./publish-plan-tool.js";
 
 const server = new McpServer({
   name: "todo-board",
@@ -663,6 +664,9 @@ server.tool(
 const EXECUTION_PACKAGES_ENABLED = process.env.QUESTLOG_EXECUTION_PACKAGES !== "0";
 
 if (EXECUTION_PACKAGES_ENABLED) {
+
+// ─── publish_plan (single external publishing entry; reuses the S1 core) ───
+registerPublishPlanTool(server);
 
 // ─── prepare_task_package ───
 server.tool(
