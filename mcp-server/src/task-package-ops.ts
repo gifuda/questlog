@@ -38,6 +38,8 @@ import {
   defaultExecutor,
   defaultStopConditions,
   defaultRollback,
+  Authority,
+  Rollback,
   SCHEMA_VERSION,
 } from "./task-package.js";
 import {
@@ -66,6 +68,15 @@ export interface PrepareInput {
    * worktree scope; read-only forbids any file change (report tasks). */
   executor_sandbox?: "workspace-write" | "read-only";
   acceptance_command_ids?: string[];
+  /**
+   * Conservative authority override, merged over the default. The server
+   * clamps auto_merge/auto_push/auto_deploy to false REGARDLESS of input —
+   * those powers are never grantable through prepare (defense in depth on
+   * top of validatePackageContent, which rejects them at seal time).
+   */
+  authority?: Partial<Authority>;
+  /** Rollback strategy override — must be a known strategy or prepare fails. */
+  rollback?: Rollback;
   /** Working directory override — resolved by server if omitted. */
   project_dir?: string;
 }
@@ -132,6 +143,25 @@ export async function prepareTaskPackage(
     };
   }
 
+  // Rollback strategy: an unknown strategy is an explicit error, not a silent
+  // fallback — a plan that asked for the wrong strategy must be told, not
+  // quietly downgraded to the default.
+  const VALID_ROLLBACK_STRATEGIES: Rollback["strategy"][] = [
+    "preserve_worktree_and_stop",
+    "abort_and_clean",
+  ];
+  if (input.rollback && !VALID_ROLLBACK_STRATEGIES.includes(input.rollback.strategy)) {
+    return { error: `invalid rollback strategy '${input.rollback.strategy}' — must be one of: ${VALID_ROLLBACK_STRATEGIES.join(", ")}` };
+  }
+  const rollback: Rollback = input.rollback ?? defaultRollback();
+
+  // Authority: merge the requested fields over the conservative default, then
+  // clamp the escalation powers to false. The clamp is unconditional — merge/
+  // push/deploy are human-granted, never prepare-granted.
+  const authority: Authority = input.authority
+    ? { ...defaultAuthority(), ...input.authority, auto_merge: false, auto_push: false, auto_deploy: false }
+    : defaultAuthority();
+
   // Build draft package
   const packageId = `pkg_${crypto.randomUUID()}`;
   const draftPkg: TaskPackage = {
@@ -164,9 +194,9 @@ export async function prepareTaskPackage(
       type: "command" as const,
       command_id: id,
     })),
-    authority: defaultAuthority(),
+    authority,
     stop_conditions: defaultStopConditions(),
-    rollback: defaultRollback(),
+    rollback,
     status: "draft",
     sealed_at: "",
     package_hash: "",

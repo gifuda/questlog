@@ -481,4 +481,27 @@ export async function deleteStep(cwd: string, stepId: string): Promise<{ ok: tru
   return res.result;
 }
 
+/**
+ * Delete an epic AND cascade-delete all of its steps in one locked mutation.
+ * Rollback-oriented: publishPlan uses this to remove a half-published epic
+ * whose packages were already cancelled. It deliberately has no status guard
+ * (the caller is responsible for making packages unclaimable FIRST), so it is
+ * not exposed as a general-purpose user action.
+ */
+export async function deleteEpic(
+  cwd: string,
+  epicId: string,
+): Promise<{ ok: true; deletedSteps: number } | { error: string }> {
+  const res = await mutateEpics(cwd, (data) => {
+    const idx = data.epics.findIndex((e) => e.id === epicId);
+    if (idx === -1) return { error: `epic '${epicId}' not found` };
+    data.epics.splice(idx, 1);
+    const before = data.steps.length;
+    data.steps = data.steps.filter((s) => s.epic_id !== epicId);
+    return { ok: true as const, deletedSteps: before - data.steps.length };
+  });
+  if ("error" in res) return { error: res.error };
+  return res.result;
+}
+
 export { VALID_STATUSES, VALID_STAGES };

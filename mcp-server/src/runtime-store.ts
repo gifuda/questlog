@@ -171,6 +171,42 @@ export async function getPackagesForStep(stepId: string): Promise<TaskPackage[]>
 }
 
 /**
+ * List all non-superseded packages belonging to an epic (any status).
+ *
+ * FAIL-CLOSED, unlike getPackagesForStep/getReadyPackages: a corrupt or
+ * unreadable store returns `{ error }`, NEVER an empty list. Callers use this
+ * for rollback (cancel everything this epic created) — treating a corrupt
+ * store as "nothing to cancel" would delete the epic while sealed packages
+ * still sit in the store.
+ */
+export async function getPackagesForEpic(
+  epicId: string,
+): Promise<{ pkgs: TaskPackage[] } | { error: string }> {
+  const result = await readPackagesSafe();
+  if ("error" in result) return { error: result.error };
+  if ("notFound" in result) return { pkgs: [] };
+  return {
+    pkgs: result.data.packages.filter(
+      (p) => p.epic_id === epicId && p.status !== "superseded",
+    ),
+  };
+}
+
+/**
+ * Fail-closed readability probe. publishPlan calls this BEFORE creating
+ * anything, so a store it could not read (and therefore could not roll back
+ * over) is rejected up front instead of failing half-created.
+ *
+ * Note: readPackagesSafe rotates a corrupt file to a .bak backup, so probing
+ * once at the start also guarantees a clean store for the rest of the run.
+ */
+export async function checkRuntimeStore(): Promise<{ ok: true } | { error: string }> {
+  const result = await readPackagesSafe();
+  if ("error" in result) return { error: result.error };
+  return { ok: true };
+}
+
+/**
  * Get packages ready for execution (status = "sealed" or "ready").
  */
 export async function getReadyPackages(): Promise<TaskPackage[]> {
