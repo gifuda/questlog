@@ -405,7 +405,14 @@ export function useDecisionRequests() {
   }, [refresh]);
 
   const resolve = useCallback(async (requestId: string, resolution: string) => {
-    await invoke("resolve_decision_request", { requestId, resolution });
+    try {
+      await invoke("resolve_decision_request", { requestId, resolution });
+      setError(null);
+    } catch (err) {
+      // The decision is recorded server-side, but the mapped action failed
+      // (e.g. attempt budget exhausted) — surface it instead of a silent log.
+      setError(String(err));
+    }
     await refresh();
   }, [refresh]);
 

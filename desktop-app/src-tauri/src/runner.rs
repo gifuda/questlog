@@ -1211,16 +1211,36 @@ impl Runner {
         candidate_sha: Option<&str>,
         verifier_results: &[VerifierResult],
     ) -> RunResult {
-        // Write verifier results if any
+        // 1. Write verifier results FIRST — fail-closed for success-class
+        //    outcomes: a pass without its verifier evidence is not a pass.
+        let mut evidence_error: Option<String> = None;
         if !verifier_results.is_empty() {
-            if let Ok(Some(ref_ref)) =
-                attempt_bundle::write_verifier_results(bundle_dir, verifier_results)
-            {
-                manifest.verifier_ref = Some(ref_ref);
+            match attempt_bundle::write_verifier_results(bundle_dir, verifier_results) {
+                Ok(Some(ref_ref)) => manifest.verifier_ref = Some(ref_ref),
+                Ok(None) => {}
+                Err(e) => {
+                    log::error!(
+                        "Failed to write verifier results for {}: {}",
+                        manifest.execution_id,
+                        e
+                    );
+                    evidence_error = Some(e);
+                }
             }
         }
 
-        // Map RunResult to outcome
+        // Success-class outcome with incomplete evidence converts BEFORE the
+        // DecisionRequest mapping, so the DR reflects the effective result.
+        let result = match (evidence_error, result) {
+            (Some(e), RunResult::Passed { execution_id, .. })
+            | (Some(e), RunResult::NoDiff { execution_id }) => RunResult::EvidenceSealFailed {
+                execution_id,
+                error: format!("verifier evidence write failed: {e}"),
+            },
+            (_, other) => other,
+        };
+
+        // 2. Map RunResult to outcome
         let (outcome_str, reason) = match &result {
             RunResult::Passed { .. } => ("passed", None),
             RunResult::NoDiff { .. } => ("no_diff", None),
@@ -1254,29 +1274,11 @@ impl Runner {
             finished_at: chrono::Utc::now().timestamp() as u64,
         };
 
-        // Evidence fail-closed: a seal failure converts success-class
-        // outcomes. Without the integrity hash the bundle is unverifiable,
-        // so "passed" must never rest on unsealed evidence.
-        let result = match attempt_bundle::write_outcome_and_seal(bundle_dir, manifest, &outcome) {
-            Ok(()) => result,
-            Err(e) => {
-                log::error!(
-                    "Failed to seal attempt bundle for {}: {} — evidence incomplete",
-                    manifest.execution_id,
-                    e
-                );
-                match result {
-                    RunResult::Passed { execution_id, .. } | RunResult::NoDiff { execution_id } => {
-                        RunResult::EvidenceSealFailed {
-                            execution_id,
-                            error: e,
-                        }
-                    }
-                    other => other,
-                }
-            }
-        };
-
+        // 3. DecisionRequest from the EFFECTIVE outcome — created and written
+        //    into the bundle BEFORE sealing, so decisions.json is covered by
+        //    the integrity hash and manifest.decisions_ref actually persists
+        //    (writing it after the seal silently invalidated every sealed
+        //    bundle that carried a decision).
         let decision = match &result {
             RunResult::BaseShaDrift { .. } => Some((
                 "git_drift",
@@ -1379,27 +1381,48 @@ impl Runner {
         };
 
         if let Some((kind, question, options)) = decision {
-            let evidence_refs = vec![bundle_dir.to_string_lossy().to_string()];
-            match crate::decision_store::create_request(crate::decision_store::NewDecisionRequest {
-                epic_id: &pkg.epic_id,
-                step_id: &pkg.step_id,
-                execution_id: &manifest.execution_id,
-                kind,
-                question,
-                options,
-                evidence_refs,
-                package_revision: pkg.plan_revision,
-            }) {
-                Ok(request) => {
-                    if let Ok(reference) =
-                        attempt_bundle::write_decision_request(bundle_dir, &request)
-                    {
-                        manifest.decisions_ref = reference;
-                    }
-                }
-                Err(error) => log::warn!("Failed to create DecisionRequest: {}", error),
-            }
+            create_bundle_decision(bundle_dir, manifest, pkg, kind, question, options);
         }
+
+        // 4. Seal LAST: outcome + manifest + integrity hash over every file
+        //    written above (verifier results, decisions, …). A seal failure
+        //    still converts a success-class outcome — a pass must never rest
+        //    on unsealed evidence.
+        let result = match attempt_bundle::write_outcome_and_seal(bundle_dir, manifest, &outcome) {
+            Ok(()) => result,
+            Err(e) => {
+                log::error!(
+                    "Failed to seal attempt bundle for {}: {} — evidence incomplete",
+                    manifest.execution_id,
+                    e
+                );
+                match result {
+                    RunResult::Passed { execution_id, .. } | RunResult::NoDiff { execution_id } => {
+                        // The converted outcome needs its own DecisionRequest
+                        // (the pre-seal decision for a success was None). The
+                        // bundle write is best-effort — the directory may be
+                        // unwritable; the runtime DR store is the authority.
+                        create_bundle_decision(
+                            bundle_dir,
+                            manifest,
+                            pkg,
+                            "blocked",
+                            "The attempt's evidence bundle could not be sealed (disk/FS failure) — the outcome cannot be trusted. Inspect the environment, then retry or revise.",
+                            vec![
+                                "retry".to_string(),
+                                "revise_package".to_string(),
+                                "cancel".to_string(),
+                            ],
+                        );
+                        RunResult::EvidenceSealFailed {
+                            execution_id,
+                            error: e,
+                        }
+                    }
+                    other => other,
+                }
+            }
+        };
 
         result
     }
@@ -1644,14 +1667,34 @@ impl Runner {
                 }
             }
         }
-        match unmerged.len() {
+        // Reduce to MAXIMAL candidates by pairwise ancestry. In a linear
+        // chain A→B→C, B's candidate descends from A's — only the tip is a
+        // valid base (it already contains A's work). Candidates that can
+        // reach neither from the other are a true parallel-branch conflict.
+        let mut maximal: Vec<String> = Vec::new();
+        for sha in unmerged {
+            if maximal
+                .iter()
+                .any(|m| runner_git::is_ancestor(&repo, &sha, m))
+            {
+                continue; // subsumed by an existing maximal candidate
+            }
+            maximal.retain(|m| !runner_git::is_ancestor(&repo, m, &sha));
+            maximal.push(sha);
+        }
+        match maximal.len() {
             0 => Ok(EffectiveBase::Head(head)),
             1 => Ok(EffectiveBase::PredecessorCandidate(
-                unmerged.pop().expect("len checked"),
+                maximal.pop().expect("len checked"),
             )),
             _ => Err(format!(
-                "multiple unmerged predecessor candidates ({}) — combine them into one candidate or merge to main before continuing",
-                unmerged.len()
+                "multiple unmerged predecessor candidates ({} parallel branches: {}) — combine them into one candidate or merge to main before continuing",
+                maximal.len(),
+                maximal
+                    .iter()
+                    .map(|sha| &sha[..8.min(sha.len())])
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     }
@@ -1909,6 +1952,37 @@ const ACCEPTANCE_REGISTRY: &[(&str, &str, &str)] = &[
 
 /// Resolve and run an acceptance command, returning a full VerifierResult
 /// with exit code, output excerpts, and timing for the AttemptBundle.
+/// Create a DecisionRequest in the runtime store and mirror it into the
+/// attempt bundle (manifest.decisions_ref). Shared by seal_bundle's pre-seal
+/// decision path and the post-seal-failure conversion path.
+fn create_bundle_decision(
+    bundle_dir: &Path,
+    manifest: &mut AttemptManifest,
+    pkg: &TaskPackageSummary,
+    kind: &str,
+    question: &str,
+    options: Vec<String>,
+) {
+    let evidence_refs = vec![bundle_dir.to_string_lossy().to_string()];
+    match crate::decision_store::create_request(crate::decision_store::NewDecisionRequest {
+        epic_id: &pkg.epic_id,
+        step_id: &pkg.step_id,
+        execution_id: &manifest.execution_id,
+        kind,
+        question,
+        options,
+        evidence_refs,
+        package_revision: pkg.plan_revision,
+    }) {
+        Ok(request) => {
+            if let Ok(reference) = attempt_bundle::write_decision_request(bundle_dir, &request) {
+                manifest.decisions_ref = reference;
+            }
+        }
+        Err(error) => log::warn!("Failed to create DecisionRequest: {}", error),
+    }
+}
+
 fn resolve_and_run_acceptance_verbose(
     command_id: &str,
     repo_root: &Path,
@@ -2951,6 +3025,77 @@ mod tests {
         let sha = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", &current]);
         sha
+    }
+
+    /// Create an unmerged side commit on top of an ARBITRARY base (e.g. a
+    /// predecessor's candidate — the linear-chain shape).
+    fn make_candidate_on(repo: &std::path::Path, name: &str, base: &str) -> String {
+        let current = git(repo, &["branch", "--show-current"]);
+        git(repo, &["checkout", "-q", "-b", name, base]);
+        std::fs::write(repo.join(format!("{name}.txt")), name).unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", name]);
+        let sha = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", &current]);
+        sha
+    }
+
+    /// Append a second passed-execution row to the executions fixture.
+    fn append_passed_execution(step_id: &str, sha: &str, created_at: u64) {
+        let exec = serde_json::json!({
+            "id": format!("exec_{}_{}", step_id, created_at),
+            "package_id": format!("pkg_{}", step_id),
+            "epic_id": "e1",
+            "step_id": step_id,
+            "project_path": "/tmp/unused",
+            "status": "passed",
+            "lease": null,
+            "cli_session": null,
+            "worktree_path": null,
+            "branch": null,
+            "base_sha": "whatever",
+            "candidate_sha": sha,
+            "attempts": 1,
+            "last_error": null,
+            "created_at": created_at,
+            "updated_at": created_at
+        });
+        let path = crate::execution_store::runtime_dir().join("executions.json");
+        let mut data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        data["executions"].as_array_mut().unwrap().push(exec);
+        std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn effective_base_linear_chain_uses_tip_candidate() {
+        // A→B→C, nothing merged: B's candidate descends from A's, so the
+        // only valid base for C is the TIP (C2) — not a conflict.
+        let (dir, _guard) = setup();
+        std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path();
+        let head = init_repo(repo);
+        let c1 = make_unmerged_candidate(repo, "c1");
+        let c2 = make_candidate_on(repo, "c2", &c1);
+        write_lineage_epics(
+            repo,
+            &[
+                ("s1", 0, "observed"),
+                ("s2", 1, "observed"),
+                ("s3", 2, "pending"),
+            ],
+        );
+        write_passed_execution("s1", &c1, 100);
+        append_passed_execution("s2", &c2, 200);
+
+        let pkg = lineage_pkg(repo, "s3", &head);
+        let base = Runner::resolve_effective_base(&pkg).unwrap();
+        assert!(
+            matches!(base, EffectiveBase::PredecessorCandidate(_)),
+            "linear chain must resolve to the tip candidate, not a conflict"
+        );
+        assert_eq!(base.sha(), c2, "tip candidate C2 already contains C1");
     }
 
     #[test]

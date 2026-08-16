@@ -90,6 +90,9 @@ export async function executeDecisionAction(
   const action = resolution.trim().toLowerCase();
   switch (action) {
     case "retry":
+    case "resume":
+      // resume == controlled retry: the Runner's attempt-chain resume logic
+      // (same base + intact worktree + CLI session) reuses the scene.
       return retryAttempt(executionId);
     case "cancel":
       return cancelExecution(executionId, "cancelled via decision request");

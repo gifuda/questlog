@@ -240,6 +240,49 @@ describe("DecisionRequest options validation + action mirror", () => {
     expect(stored.pkg.status).toBe("ready");
   });
 
+  it("resume resolution maps to a controlled retry child", async () => {
+    const pkg = await buildPackage({ status: "blocked" });
+    const now = Math.floor(Date.now() / 1000);
+    await writeExecutions([{
+      id: "exec_paused",
+      package_id: pkg.package_id,
+      epic_id: "e1",
+      step_id: "s1",
+      project_path: projectDir,
+      status: "blocked",
+      lease: null,
+      cli_session: "sess_paused1",
+      worktree_path: "/tmp/wt-paused",
+      branch: "questlog/exec_paused",
+      base_sha: pkg.base_sha,
+      candidate_sha: null,
+      attempts: 1,
+      last_error: "paused by user",
+      created_at: now,
+      updated_at: now,
+      attempt_no: 1,
+    }]);
+    const req = await createDecisionRequest({
+      epic_id: "e1",
+      step_id: "s1",
+      execution_id: "exec_paused",
+      kind: "approval",
+      question: "resume?",
+      options: ["resume", "revise_package", "cancel"],
+    });
+
+    const result = await resolveDecision(req.request_id, "resume");
+    if ("error" in result) throw new Error(result.error);
+    expect(result.action).toContain("retry scheduled");
+    const execs = JSON.parse(
+      await fs.readFile(path.join(process.env.QUESTLOG_RUNTIME!, "executions.json"), "utf-8"),
+    ).executions;
+    const child = execs.find((e: { parent_attempt_id?: string }) => e.parent_attempt_id === "exec_paused");
+    expect(child).toBeTruthy();
+    expect(child.status).toBe("queued");
+    expect(child.attempt_no).toBe(2);
+  });
+
   it("cancel resolution marks the execution cancelled", async () => {
     const pkg = await buildPackage({ status: "blocked" });
     const now = Math.floor(Date.now() / 1000);

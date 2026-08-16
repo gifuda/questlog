@@ -6,10 +6,11 @@
 //! line of defense:
 //!
 //! 1. **Seatbelt profile** (macOS `sandbox-exec`, when available):
-//!    - write access: the worktree + temp/cache dirs + `~/.zcode` (the CLI's
-//!      own session DB) — nothing else; the ZCode user config files and hook
-//!      dirs are explicitly carved out so an executor can't reprogram future
-//!      sessions;
+//!    - write access: the worktree + temp/cache dirs + a MINIMAL allowlist
+//!      under `~/.zcode` (cli/db, cli/log, cli/rollout, cli/exec, v2/logs —
+//!      verified against a real headless run). Everything else, including
+//!      `~/.zcode/agents|skills|hooks|plugins|memories` and both config
+//!      files, is denied — an executor must never reprogram future sessions;
 //!    - read access: everything EXCEPT credential dirs (`~/.ssh`, `~/.aws`,
 //!      `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.docker`);
 //!    - exec of `ssh`/`scp`/`sftp`/`security`/`ssh-agent` denied outright;
@@ -18,6 +19,15 @@
 //!      network; secrets are protected by the read denies above.
 //!    - `read-only` packages tighten further: the worktree itself is not
 //!      writable — the FS enforces what the CLI mode only promises.
+//!
+//!    Documented residuals (accepted, reviewed):
+//!    - network stays allowed (LLM API), so content visible to the executor
+//!      is exfiltratable; secrets are protected by the read denies above;
+//!    - `~/.zcode/cli/db` must stay writable (session DB), which means a
+//!      malicious executor could forge session rows and steer a future
+//!      `--resume <id>` — mitigated by resume requiring same package + same
+//!      base + intact worktree, and by the CLI only resuming sess_ ids it
+//!      created; a stricter CLI-side db check is future hardening.
 //! 2. **git shim** prepended to PATH: rejects `push/fetch/clone/remote/
 //!    submodule` — the sealed authority declares `auto_push=false`; this
 //!    enforces the network half at runtime.
@@ -59,15 +69,19 @@ fn seatbelt_profile(worktree: &Path, write_worktree: bool) -> Option<String> {
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
 
-    let mut write_allows = format!(
-        "(allow file-write*\n  (subpath \"/private/tmp\")\n  (subpath \"/var/folders\")\n  (subpath \"{home}/.zcode\")\n  (subpath \"{home}/.npm\")\n  (subpath \"{home}/.cache\")\n  (subpath \"{home}/Library/Caches\"))"
-    );
-    if write_worktree {
-        write_allows = format!(
-            "(allow file-write*\n  (subpath \"{worktree_str}\")\n  (subpath \"/private/tmp\")\n  (subpath \"/var/folders\")\n  (subpath \"{home}/.zcode\")\n  (subpath \"{home}/.npm\")\n  (subpath \"{home}/.cache\")\n  (subpath \"{home}/Library/Caches\"))"
-        );
-    }
+    let worktree_allow = if write_worktree {
+        format!("  (subpath \"{worktree_str}\")\n")
+    } else {
+        String::new()
+    };
 
+    // ~/.zcode writes use a MINIMAL ALLOWLIST — only what a headless CLI run
+    // verifiably needs (session db + runtime logs + exec/rollout artifacts).
+    // Persistent control surfaces (agents/skills/hooks/plugins/memories/
+    // configs, all of ~/.zcode/v2 except its log dir) are denied up front:
+    // an executor must never reprogram future sessions or the desktop app.
+    // SBPL is last-match-wins, so the narrow allows below override the broad
+    // denies exactly where they overlap (only v2/logs).
     Some(format!(
         r#"(version 1)
 (deny default)
@@ -92,12 +106,26 @@ fn seatbelt_profile(worktree: &Path, write_worktree: bool) -> Option<String> {
   (subpath "{home}/.config/gh")
   (subpath "{home}/.kube")
   (subpath "{home}/.docker"))
-{write_allows}
 (deny file-write*
-  (literal "{home}/.zcode/cli/config.json")
-  (literal "{home}/.zcode/v2/config.json")
+  (subpath "{home}/.zcode/agents")
+  (subpath "{home}/.zcode/skills")
+  (subpath "{home}/.zcode/cli/agents")
   (subpath "{home}/.zcode/cli/hooks")
-  (subpath "{home}/.zcode/v2/hooks"))
+  (subpath "{home}/.zcode/cli/plugins")
+  (subpath "{home}/.zcode/cli/memories")
+  (literal "{home}/.zcode/cli/config.json")
+  (subpath "{home}/.zcode/v2"))
+(allow file-write*
+{worktree_allow}  (subpath "/private/tmp")
+  (subpath "/var/folders")
+  (subpath "{home}/.zcode/cli/db")
+  (subpath "{home}/.zcode/cli/log")
+  (subpath "{home}/.zcode/cli/rollout")
+  (subpath "{home}/.zcode/cli/exec")
+  (subpath "{home}/.zcode/v2/logs")
+  (subpath "{home}/.npm")
+  (subpath "{home}/.cache")
+  (subpath "{home}/Library/Caches"))
 "#
     ))
 }
@@ -230,9 +258,44 @@ mod tests {
         assert!(profile.contains(".aws"));
         // Worktree writable in workspace-write mode
         assert!(profile.contains("/tmp/wt"));
-        // User zcode configs carved out of the write allows
-        assert!(profile.contains(".zcode/cli/config.json"));
-        assert!(profile.contains(".zcode/v2/config.json"));
+    }
+
+    #[test]
+    fn seatbelt_profile_zcode_writes_are_minimal_allowlist() {
+        let profile = seatbelt_profile(Path::new("/tmp/wt"), true).unwrap();
+        // Persistent control surfaces denied (executor must not reprogram
+        // future sessions or the desktop app).
+        for denied in [
+            ".zcode/agents",
+            ".zcode/skills",
+            ".zcode/cli/agents",
+            ".zcode/cli/hooks",
+            ".zcode/cli/plugins",
+            ".zcode/cli/memories",
+            ".zcode/cli/config.json",
+            ".zcode/v2\"",
+        ] {
+            assert!(profile.contains(denied), "profile must deny {denied}");
+        }
+        // Runtime-necessary writes allowed (empirically verified set).
+        let write_section = profile.split("(allow file-write*").nth(1).unwrap();
+        for allowed in [
+            ".zcode/cli/db",
+            ".zcode/cli/log",
+            ".zcode/cli/rollout",
+            ".zcode/cli/exec",
+            ".zcode/v2/logs",
+        ] {
+            assert!(
+                write_section.contains(allowed),
+                "profile must allow {allowed}"
+            );
+        }
+        // And the broad "~/.zcode" write allow must be GONE.
+        assert!(
+            !write_section.contains(".zcode\")"),
+            "broad ~/.zcode write allow must not remain: {write_section}"
+        );
     }
 
     #[test]

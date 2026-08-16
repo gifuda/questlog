@@ -808,8 +808,14 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Str
 /// False for anything else: not an ancestor, unknown/garbage-collected object,
 /// or git error — callers treat "can't prove merged" as "not merged".
 pub fn is_ancestor_of_head(repo_root: &Path, sha: &str) -> bool {
+    is_ancestor(repo_root, sha, "HEAD")
+}
+
+/// Is `ancestor` an ancestor of `descendant`? Both may be any rev (SHA, ref).
+/// False on git error / unknown objects — fail-closed for lineage decisions.
+pub fn is_ancestor(repo_root: &Path, ancestor: &str, descendant: &str) -> bool {
     Command::new("git")
-        .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(repo_root)
         .output()
         .map(|output| output.status.success())

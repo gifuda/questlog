@@ -1359,50 +1359,32 @@ pub fn resolve_decision_request(
     let request = crate::decision_store::resolve_request(&request_id, &resolution, "ui-user")?;
 
     // §5.1: resolve triggers a legal state transition, not a direct pass.
-    // The resolution determines what happens next.
+    // The resolution determines what happens next. Action failures are
+    // RETURNED (visible to the operator) — the decision itself is already
+    // recorded either way.
     let action = resolution.trim().to_lowercase();
     match action.as_str() {
-        "retry" => {
-            // Create a new attempt for the same execution's package.
-            // The Runner (if enabled) will pick it up on the next poll.
+        "retry" | "resume" => {
+            // resume == controlled retry: the attempt chain's resume logic
+            // (same base + intact worktree + CLI session) reuses the
+            // interrupted scene. The Runner picks the child up next poll.
             if let Err(e) = crate::execution_store::create_retry_attempt(&request.execution_id) {
-                log::warn!(
-                    "resolve_decision(retry): failed to create new attempt for {}: {}",
-                    request.execution_id,
-                    e
-                );
+                return Err(format!(
+                    "decision recorded, but failed to schedule the attempt for {}: {}",
+                    request.execution_id, e
+                ));
             }
         }
         "cancel" => {
-            // Mark the execution as cancelled. Terminal-evidence guard:
-            // an already-terminal execution is left untouched (and logged).
-            if let Err(e) = crate::execution_store::release_lease(
-                &request.execution_id,
-                crate::execution_store::ExecutionStatus::Cancelled,
-                Some("cancelled via decision request"),
-            ) {
-                log::warn!(
-                    "resolve_decision(cancel): execution {} not cancelled: {}",
-                    request.execution_id,
-                    e
-                );
-            }
+            cancel_execution_for_decision(&request.execution_id, "cancelled via decision request")?;
         }
         "revise_package" | "transfer_manual" | "reject" => {
             // These require human action outside the Runner — mark blocked execution
             // as cancelled so it doesn't linger in the queue.
-            if let Err(e) = crate::execution_store::release_lease(
+            cancel_execution_for_decision(
                 &request.execution_id,
-                crate::execution_store::ExecutionStatus::Cancelled,
-                Some(&format!("resolved as '{}'", action)),
-            ) {
-                log::warn!(
-                    "resolve_decision({}): execution {} not cancelled: {}",
-                    action,
-                    request.execution_id,
-                    e
-                );
-            }
+                &format!("resolved as '{action}'"),
+            )?;
         }
         _ => {
             // Custom resolution text — no automatic action.
@@ -1410,6 +1392,36 @@ pub fn resolve_decision_request(
     }
 
     Ok(request)
+}
+
+/// Cancel a DecisionRequest's execution with honest feedback: a terminal
+/// execution is a no-op (the evidence guard refuses the overwrite — nothing
+/// to cancel), while a REAL failure is surfaced to the operator.
+fn cancel_execution_for_decision(execution_id: &str, message: &str) -> Result<(), String> {
+    let terminal = crate::execution_store::get_execution(execution_id)
+        .map(|exec| {
+            matches!(
+                exec.status,
+                crate::execution_store::ExecutionStatus::Passed
+                    | crate::execution_store::ExecutionStatus::Failed
+                    | crate::execution_store::ExecutionStatus::Cancelled
+                    | crate::execution_store::ExecutionStatus::TimedOut
+            )
+        })
+        .unwrap_or(false);
+    if terminal {
+        log::info!(
+            "resolve_decision: execution {} already terminal — nothing to cancel",
+            execution_id
+        );
+        return Ok(());
+    }
+    crate::execution_store::release_lease(
+        execution_id,
+        crate::execution_store::ExecutionStatus::Cancelled,
+        Some(message),
+    )
+    .map_err(|e| format!("decision recorded, but the cancel action failed: {e}"))
 }
 
 #[cfg(test)]
@@ -1443,6 +1455,107 @@ mod tests {
     fn arr_len_zero_for_empty_object() {
         let v = serde_json::json!({});
         assert_eq!(arr_len(&v), 0);
+    }
+
+    fn seed_retryable_fixture() -> (String, String) {
+        let package = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "package_id": "pkg1", "epic_id": "e1", "step_id": "s1",
+                "plan_revision": 1, "project_path": "/tmp/proj", "repo_root": "/tmp/proj",
+                "base_sha": "abc123", "objective": "t",
+                "scope": {"allowed_paths": ["**"], "forbidden_paths": [], "max_changed_files": 10},
+                "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write",
+                             "timeout_seconds": 3600, "max_attempts": 3},
+                "acceptance": [], "status": "blocked",
+                "sealed_at": "2026-08-11T00:00:00Z", "package_hash": "fixture"
+            }]
+        });
+        std::fs::create_dir_all(crate::execution_store::runtime_dir()).unwrap();
+        std::fs::write(
+            crate::execution_store::runtime_dir().join("packages.json"),
+            serde_json::to_string_pretty(&package).unwrap(),
+        )
+        .unwrap();
+        let parent =
+            crate::execution_store::enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc123")
+                .unwrap();
+        crate::execution_store::acquire_lease(&parent, "runner-1").unwrap();
+        crate::execution_store::finish_execution(
+            &parent,
+            crate::execution_store::ExecutionStatus::Blocked,
+            Some("paused by user"),
+        )
+        .unwrap();
+        (parent, "pkg1".to_string())
+    }
+
+    #[test]
+    fn resolve_resume_creates_child_attempt() {
+        let _guard = crate::execution_store::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("QUESTLOG_RUNTIME", dir.path());
+        let (parent, _pkg) = seed_retryable_fixture();
+        let request =
+            crate::decision_store::create_request(crate::decision_store::NewDecisionRequest {
+                epic_id: "e1",
+                step_id: "s1",
+                execution_id: &parent,
+                kind: "approval",
+                question: "resume?",
+                options: vec!["resume".to_string(), "cancel".to_string()],
+                evidence_refs: vec![],
+                package_revision: 1,
+            })
+            .unwrap();
+
+        resolve_decision_request(request.request_id, "resume".to_string()).unwrap();
+
+        let execs = crate::execution_store::list_executions().unwrap();
+        let child = execs
+            .iter()
+            .find(|e| e.parent_attempt_id.as_deref() == Some(parent.as_str()))
+            .expect("resume must schedule a controlled retry child");
+        assert_eq!(
+            child.status,
+            crate::execution_store::ExecutionStatus::Queued
+        );
+        assert_eq!(child.attempt_no, 2);
+    }
+
+    #[test]
+    fn resolve_cancel_failure_is_visible_not_silent() {
+        let _guard = crate::execution_store::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("QUESTLOG_RUNTIME", dir.path());
+        std::fs::create_dir_all(crate::execution_store::runtime_dir()).unwrap();
+        // DR references a nonexistent execution → cancel genuinely fails.
+        let request =
+            crate::decision_store::create_request(crate::decision_store::NewDecisionRequest {
+                epic_id: "e1",
+                step_id: "s1",
+                execution_id: "exec_ghost",
+                kind: "blocked",
+                question: "cancel?",
+                options: vec!["cancel".to_string()],
+                evidence_refs: vec![],
+                package_revision: 1,
+            })
+            .unwrap();
+
+        let result = resolve_decision_request(request.request_id, "cancel".to_string());
+        let error = result.expect_err("a real action failure must surface");
+        assert!(
+            error.contains("decision recorded"),
+            "honest framing: {error}"
+        );
+        // The decision itself was still recorded.
+        let stored = crate::decision_store::list_requests(true).unwrap();
+        assert!(stored.iter().any(|r| r.resolved));
     }
 
     fn opt_model(id: &str, name: &str) -> ExecutorModelOption {

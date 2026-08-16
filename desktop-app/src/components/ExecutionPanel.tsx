@@ -157,10 +157,7 @@ export function DecisionInbox() {
   const [submitting, setSubmitting] = useState<string | null>(null);
 
   if (loading) return null;
-  if (error) {
-    return <div className="px-4 py-2 text-[10px] text-red-400 border-b border-line">{error}</div>;
-  }
-  if (requests.length === 0) return null;
+  if (requests.length === 0 && !error) return null;
 
   const answer = async (requestId: string, resolution: string) => {
     if (!resolution.trim()) return;
@@ -174,6 +171,12 @@ export function DecisionInbox() {
 
   return (
     <section className="px-4 py-2 border-b border-orange-500/30 bg-orange-500/5">
+      {/* 动作失败内联提示：不替换整个 inbox，其余待决项保持可见 */}
+      {error && (
+        <div className="mb-1.5 px-2 py-1 rounded text-[11px] text-red-300 bg-red-500/10 border border-red-500/30 break-words">
+          {error}
+        </div>
+      )}
       <div className="text-[11px] font-semibold text-orange-300 mb-1">
         🔔 {t("execution.attention", { count: requests.length })}
       </div>

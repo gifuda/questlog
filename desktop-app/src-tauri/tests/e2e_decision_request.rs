@@ -165,9 +165,28 @@ fn acceptance_failure_creates_decision_request() {
     assert_eq!(req["step_id"].as_str(), Some("step_test"));
 
     // Verify AttemptBundle was also sealed
-    let (manifest, _bundle_path) = app_lib::attempt_bundle::read_bundle(&exec.id).unwrap();
+    let (manifest, bundle_path) = app_lib::attempt_bundle::read_bundle(&exec.id).unwrap();
     assert_eq!(manifest.outcome, "acceptance_failed");
     eprintln!("✓ AttemptBundle outcome: {}", manifest.outcome);
+
+    // Evidence integrity: the DecisionRequest mirror must be part of the
+    // SEALED bundle — decisions_ref persisted, and the integrity hash valid
+    // AFTER the decision write (regression: decisions.json used to be
+    // written after sealing, silently invalidating the hash).
+    assert_eq!(
+        manifest.decisions_ref.as_deref(),
+        Some("decisions.json"),
+        "decisions_ref must persist in the sealed manifest"
+    );
+    assert!(
+        bundle_path.join("decisions.json").exists(),
+        "decisions.json must exist inside the sealed bundle"
+    );
+    assert!(
+        app_lib::attempt_bundle::verify_integrity(&bundle_path).unwrap(),
+        "sealed bundle integrity must hold with decisions.json included"
+    );
+    eprintln!("✓ Bundle integrity verified (decisions.json covered by hash)");
     eprintln!(
         "✓ DecisionRequest kind: {}",
         req["kind"].as_str().unwrap_or("?")
