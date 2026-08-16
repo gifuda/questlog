@@ -62,6 +62,9 @@ export interface PrepareInput {
   executor_preferred?: string;
   executor_timeout_seconds?: number;
   executor_max_attempts?: number;
+  /** Executor sandbox: workspace-write (default) allows edits inside the
+   * worktree scope; read-only forbids any file change (report tasks). */
+  executor_sandbox?: "workspace-write" | "read-only";
   acceptance_command_ids?: string[];
   /** Working directory override — resolved by server if omitted. */
   project_dir?: string;
@@ -153,7 +156,7 @@ export async function prepareTaskPackage(
     executor: {
       preferred: (input.executor_preferred as TaskPackage["executor"]["preferred"]) ?? "zcode",
       fallbacks: [],
-      sandbox: "workspace-write",
+      sandbox: input.executor_sandbox ?? "workspace-write",
       timeout_seconds: input.executor_timeout_seconds ?? 3600,
       max_attempts: input.executor_max_attempts ?? 2,
     },
