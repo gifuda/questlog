@@ -99,6 +99,13 @@ fn seatbelt_profile(worktree: &Path, write_worktree: bool) -> Option<String> {
 (allow pseudo-tty)
 (allow network*)
 (allow file-read*)
+;; Device essentials: shells and git routinely redirect to /dev/null —
+;; denying its WRITE side kills `git … 2>/dev/null` at startup (found by the
+;; first sandboxed field run). Read side is already covered by file-read*.
+(allow file-read-data file-write-data
+  (literal "/dev/null")
+  (literal "/dev/zero"))
+(allow file-ioctl)
 (deny file-read*
   (subpath "{home}/.ssh")
   (subpath "{home}/.aws")
@@ -258,6 +265,15 @@ mod tests {
         assert!(profile.contains(".aws"));
         // Worktree writable in workspace-write mode
         assert!(profile.contains("/tmp/wt"));
+    }
+
+    #[test]
+    fn seatbelt_profile_allows_dev_null_write() {
+        // Field-found: git/shell die at startup when /dev/null write is denied.
+        let profile = seatbelt_profile(Path::new("/tmp/wt"), true).unwrap();
+        assert!(profile.contains("file-read-data file-write-data"));
+        assert!(profile.contains("\"/dev/null\""));
+        assert!(profile.contains("(allow file-ioctl)"));
     }
 
     #[test]
