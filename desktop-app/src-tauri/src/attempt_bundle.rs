@@ -177,6 +177,16 @@ pub struct AttemptManifest {
     /// BEFORE any worktree-clearing terminal. Absent on pre-S1 bundles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene_ref: Option<String>,
+    /// S2: when this attempt recovered a previous ScopeViolation scene into
+    /// its fresh worktree, the source execution id. Inherited by retry
+    /// children (the worktree carries the recovered content along the chain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_recovered_from: Option<String>,
+    /// S2: the task string actually handed to the executor (objective plus
+    /// any QuestLog recovery preamble). Persisted so audits can see what the
+    /// executor was told, distinct from the sealed objective.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_prompt_ref: Option<String>,
 
     pub outcome: String,
     /// SHA-256 over all files in the bundle dir at seal time.
@@ -220,6 +230,8 @@ impl AttemptManifest {
             verifier_ref: None,
             decisions_ref: None,
             scene_ref: None,
+            scene_recovered_from: None,
+            task_prompt_ref: None,
             outcome: "running".to_string(),
             integrity_hash: None,
             created_at: now_ts(),
@@ -452,6 +464,101 @@ pub fn write_scene_snapshot(
             dir_ref: "scene".to_string(),
         })
     }
+}
+
+/// S2 outcome of a scene recovery.
+#[derive(Debug)]
+pub struct SceneRecovery {
+    /// Whether diff-full.patch existed and was applied.
+    pub patched: bool,
+    /// Number of untracked files copied back into the worktree.
+    pub untracked_restored: usize,
+}
+
+/// S2: recover a captured scene into a FRESH worktree — the "reuse the work
+/// instead of redoing it" half of the ScopeViolation loop. Only valid when
+/// the recovery source shares the same base_sha (caller-enforced); `git
+/// apply` fails loudly on drifted context lines and the caller degrades to
+/// a clean re-run.
+pub fn recover_scene_into_worktree(
+    worktree: &Path,
+    bundle_dir: &Path,
+) -> Result<SceneRecovery, String> {
+    let scene_dir = bundle_dir.join("scene");
+    if !scene_dir.is_dir() {
+        return Err(format!("scene dir missing under {}", bundle_dir.display()));
+    }
+    let has_diff = scene_dir.join("diff-full.patch").is_file();
+    let has_classification = scene_dir.join("changed-paths.json").is_file();
+    if !has_diff && !has_classification {
+        return Err(format!(
+            "scene dir incomplete under {} — neither diff nor classification present",
+            bundle_dir.display()
+        ));
+    }
+
+    let mut patched = false;
+    if has_diff {
+        let patch_abs = scene_dir.join("diff-full.patch");
+        let output = std::process::Command::new("git")
+            .args([
+                "apply",
+                "--whitespace=nowarn",
+                &patch_abs.to_string_lossy(),
+            ])
+            .current_dir(worktree)
+            .output()
+            .map_err(|e| format!("git apply spawn: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git apply failed (base drift or conflict): {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        patched = true;
+    }
+
+    // Copy untracked files back, preserving structure.
+    let untracked_root = scene_dir.join("untracked");
+    let mut untracked_restored = 0usize;
+    if untracked_root.is_dir() {
+        let mut stack = vec![untracked_root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .map_err(|e| format!("read untracked dir {}: {e}", dir.display()))?;
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&untracked_root)
+                    .map_err(|e| format!("rel path: {e}"))?;
+                let dst = worktree.join(rel);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+                }
+                std::fs::copy(&path, &dst)
+                    .map_err(|e| format!("copy untracked {}: {e}", rel.display()))?;
+                untracked_restored += 1;
+            }
+        }
+    }
+
+    Ok(SceneRecovery {
+        patched,
+        untracked_restored,
+    })
+}
+
+/// S2: persist the task string the executor actually received. The sealed
+/// objective stays untouched; this is the audit-side record of the delta.
+pub fn write_task_prompt(dir: &Path, task: &str) -> Result<Option<String>, String> {
+    let path = dir.join("task-prompt.txt");
+    std::fs::write(&path, task).map_err(|e| format!("write task prompt: {e}"))?;
+    Ok(Some("task-prompt.txt".to_string()))
 }
 
 /// Candidate commit info written after a successful commit.
@@ -1064,6 +1171,109 @@ mod tests {
             !verify_integrity(bundle.path()).unwrap(),
             "tampered scene must fail verification"
         );
+    }
+
+    /// S2: a captured scene round-trips into a fresh worktree sharing the
+    /// same base — tracked diff applied, untracked files restored byte-exact.
+    #[test]
+    fn scene_recovery_round_trips_into_fresh_worktree() {
+        let repo_a = tempfile::tempdir().unwrap();
+        let a = repo_a.path();
+        git(a, &["init", "-q"]);
+        std::fs::write(a.join("src.ts"), "base\n").unwrap();
+        git(a, &["add", "."]);
+        git(a, &["commit", "-qm", "base"]);
+        let base_sha = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(a)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // The "out-of-scope" work: modify tracked + add untracked.
+        std::fs::write(a.join("src.ts"), "reworked content\n").unwrap();
+        std::fs::create_dir_all(a.join("docs")).unwrap();
+        std::fs::write(a.join("docs/note.md"), "precious analysis\n").unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let changed = vec!["src.ts".to_string(), "docs/note.md".to_string()];
+        let capture = write_scene_snapshot(
+            bundle.path(),
+            a,
+            &base_sha,
+            &changed,
+            &["src.ts".to_string()],
+            &[],
+            5,
+        )
+        .unwrap();
+        assert!(matches!(capture, SceneCapture::Complete { .. }));
+
+        // Fresh worktree at the same base.
+        let repo_b = tempfile::tempdir().unwrap();
+        let b = repo_b.path();
+        std::fs::create_dir_all(b).unwrap();
+        git(b, &["init", "-q"]);
+        std::fs::write(b.join("src.ts"), "base\n").unwrap();
+        git(b, &["add", "."]);
+        git(b, &["commit", "-qm", "base"]);
+
+        let recovery = recover_scene_into_worktree(b, bundle.path()).unwrap();
+        assert!(recovery.patched);
+        assert_eq!(recovery.untracked_restored, 1);
+        assert_eq!(
+            std::fs::read_to_string(b.join("src.ts")).unwrap(),
+            "reworked content\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(b.join("docs/note.md")).unwrap(),
+            "precious analysis\n"
+        );
+    }
+
+    /// S2: a drifted base (context mismatch) must fail loudly so the caller
+    /// degrades to a clean re-run — never a silent partial recovery.
+    #[test]
+    fn scene_recovery_fails_on_drifted_base() {
+        let repo_a = tempfile::tempdir().unwrap();
+        let a = repo_a.path();
+        git(a, &["init", "-q"]);
+        std::fs::write(a.join("src.ts"), "line1\nline2\nline3\n").unwrap();
+        git(a, &["add", "."]);
+        git(a, &["commit", "-qm", "base"]);
+        let base_sha = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(a)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::write(a.join("src.ts"), "line1\nCHANGED\nline3\n").unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        write_scene_snapshot(
+            bundle.path(),
+            a,
+            &base_sha,
+            &["src.ts".to_string()],
+            &["src.ts".to_string()],
+            &[],
+            5,
+        )
+        .unwrap();
+
+        // Fresh worktree whose base already diverged on the same lines.
+        let repo_b = tempfile::tempdir().unwrap();
+        let b = repo_b.path();
+        git(b, &["init", "-q"]);
+        std::fs::write(b.join("src.ts"), "line1\nDIVERGED\nline3\n").unwrap();
+        git(b, &["add", "."]);
+        git(b, &["commit", "-qm", "diverged"]);
+
+        let result = recover_scene_into_worktree(b, bundle.path());
+        assert!(result.is_err(), "expected apply failure on drifted base");
     }
 
     fn mock_pkg() -> TaskPackageSummary {

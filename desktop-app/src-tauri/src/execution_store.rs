@@ -1250,6 +1250,36 @@ fn packages_path() -> PathBuf {
     runtime_dir().join("packages.json")
 }
 
+/// S2: find the freshest recoverable ScopeViolation scene for a NEW first
+/// attempt of the same package. The scene is only a valid recovery source
+/// when (a) it ended as a scope_violation, (b) it is terminal, (c) its base
+/// matches the new attempt's base (a drifted base cannot be git-applied
+/// cleanly), and (d) its scene was fully preserved. Safety is NOT decided
+/// here — the sealed scope of the new revision plus the post-run scope
+/// check remain the only gate; the source only saves work.
+pub fn find_recoverable_scene(
+    execs: &[Execution],
+    package_id: &str,
+    exclude_id: &str,
+    base_sha: &str,
+) -> Option<String> {
+    execs
+        .iter()
+        .filter(|e| {
+            e.id != exclude_id
+                && e.package_id == package_id
+                && e.outcome.as_deref() == Some("scope_violation")
+                && matches!(
+                    e.status,
+                    ExecutionStatus::Blocked | ExecutionStatus::Cancelled
+                )
+                && e.base_sha == base_sha
+                && e.scene_preserved == Some(true)
+        })
+        .max_by_key(|e| e.updated_at)
+        .map(|e| e.id.clone())
+}
+
 /// One-shot map package_id → max_attempts (highest plan_revision wins).
 /// Feeds the get_executions retries_remaining join without N+1 file reads.
 pub fn budget_caps_by_package() -> Result<std::collections::HashMap<String, u32>, String> {
@@ -1709,6 +1739,57 @@ mod tests {
         // Defaults should kick in for missing executor subfields
         assert_eq!(packages[0].timeout_seconds, 3600);
         assert_eq!(packages[0].max_attempts, 2);
+    }
+
+    /// S2: recoverable-scene selection — same package, scope_violation
+    /// outcome, terminal, matching base, fully preserved scene; newest wins;
+    /// everything else is filtered out.
+    #[test]
+    fn find_recoverable_scene_filters_and_selects_newest() {
+        let mk = |id: &str, pkg: &str, outcome: Option<&str>, base: &str, preserved: Option<bool>, updated: u64| Execution {
+            id: id.to_string(),
+            package_id: pkg.to_string(),
+            epic_id: "e1".into(),
+            step_id: "s1".into(),
+            project_path: "/tmp".into(),
+            status: if outcome == Some("scope_violation") {
+                ExecutionStatus::Cancelled
+            } else {
+                ExecutionStatus::TimedOut
+            },
+            lease: None,
+            cli_session: None,
+            worktree_path: None,
+            branch: None,
+            base_sha: base.to_string(),
+            candidate_sha: None,
+            attempts: 1,
+            last_error: None,
+            created_at: updated,
+            updated_at: updated,
+            attempt_no: 1,
+            outcome: outcome.map(str::to_string),
+            budget_used: 0,
+            budget_charged: false,
+            retries_remaining: None,
+            scene_preserved: preserved,
+            parent_attempt_id: None,
+            bundle_path: None,
+            executor: None,
+        };
+        let execs = vec![
+            mk("old_sv", "pkg1", Some("scope_violation"), "baseA", Some(true), 100),
+            mk("new_sv", "pkg1", Some("scope_violation"), "baseA", Some(true), 200),
+            mk("wrong_base", "pkg1", Some("scope_violation"), "baseB", Some(true), 300),
+            mk("not_preserved", "pkg1", Some("scope_violation"), "baseA", Some(false), 400),
+            mk("timeout", "pkg1", Some("timeout"), "baseA", Some(true), 500),
+            mk("other_pkg", "pkg2", Some("scope_violation"), "baseA", Some(true), 600),
+            mk("self", "pkg1", Some("scope_violation"), "baseA", Some(true), 700),
+        ];
+        let picked = find_recoverable_scene(&execs, "pkg1", "self", "baseA");
+        assert_eq!(picked.as_deref(), Some("new_sv"));
+        // No candidate at all when nothing matches.
+        assert_eq!(find_recoverable_scene(&execs, "pkg1", "self", "baseZ"), None);
     }
 
     /// S0-C: a human cancel does not consume the auto-retry budget — the

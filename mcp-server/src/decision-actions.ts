@@ -160,7 +160,7 @@ export async function executeDecisionAction(
       return {
         ok: true as const,
         detail:
-          "execution cancelled; package stays blocked — prepare → validate → seal a new package revision (its retry budget is independent)",
+          "execution cancelled; package stays blocked — prepare → validate → seal a new package revision (its retry budget is independent; its first attempt automatically recovers the captured scene, same base only)",
       };
     }
     default:

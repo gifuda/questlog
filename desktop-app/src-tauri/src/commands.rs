@@ -1406,7 +1406,9 @@ pub fn resolve_decision_request(
             // Safe closure for a ScopeViolation: cancel the lingering
             // execution and keep the package blocked until the operator
             // seals a new revision (prepare → validate → seal — its retry
-            // budget is independent of the old chain).
+            // budget is independent of the old chain). S2: the new
+            // revision's first attempt automatically recovers the captured
+            // scene (same base) — the work is reused, not redone.
             cancel_execution_for_decision(
                 &request.execution_id,
                 "resolved as revise_scope — awaiting a new package revision",

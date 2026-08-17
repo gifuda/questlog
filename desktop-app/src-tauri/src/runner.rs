@@ -736,6 +736,14 @@ impl Runner {
             exec.parent_attempt_id.as_deref(),
             pkg,
         );
+        // S2: retry/resume children inherit the recovery marker — the
+        // worktree they resume already carries the recovered scene, and the
+        // chain stays auditable back to the original ScopeViolation.
+        if let Some(parent_id) = exec.parent_attempt_id.as_deref() {
+            if let Ok(parent_manifest) = attempt_bundle::read_manifest(parent_id) {
+                manifest.scene_recovered_from = parent_manifest.scene_recovered_from;
+            }
+        }
 
         // Generate and write environment snapshot
         let git_clean = runner_git::is_worktree_clean(&repo_root).unwrap_or(false);
@@ -902,6 +910,72 @@ impl Runner {
             let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
             return Ok(result);
         }
+        // ─── S2: scene recovery for a NEW first attempt of this package ───
+        // A previous revision's ScopeViolation left a fully-captured scene;
+        // the operator approved accurate paths in the new revision — reuse
+        // that work instead of redoing it. Only first attempts (no parent)
+        // recover: retry/resume chains physically carry the worktree on.
+        let mut recovery_note = String::new();
+        if exec.parent_attempt_id.is_none() {
+            if let Ok(all) = execution_store::list_executions() {
+                if let Some(prev_id) = execution_store::find_recoverable_scene(
+                    &all,
+                    &pkg.package_id,
+                    &exec.id,
+                    &pkg.base_sha,
+                ) {
+                    let prev_bundle = attempt_bundle::create_bundle_dir(&prev_id)
+                        .unwrap_or_else(|_| {
+                            execution_store::runtime_dir()
+                                .join("attempts")
+                                .join(&prev_id)
+                        });
+                    match attempt_bundle::recover_scene_into_worktree(
+                        &worktree_path,
+                        &prev_bundle,
+                    ) {
+                        Ok(report) => {
+                            log::info!(
+                                "Runner: recovered scene from {prev_id} into {} (patched={}, untracked={})",
+                                worktree_path.display(),
+                                report.patched,
+                                report.untracked_restored
+                            );
+                            manifest.scene_recovered_from = Some(prev_id.clone());
+                            let _ = attempt_bundle::append_event(
+                                &bundle_dir,
+                                &serde_json::json!({
+                                    "event": "scene_recovered",
+                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                    "source_execution": prev_id,
+                                    "patched": report.patched,
+                                    "untracked_restored": report.untracked_restored,
+                                }),
+                            );
+                            recovery_note = format!(
+                                "\n\n[QuestLog 成果恢复] 前次尝试因范围封存被熔断，其改动已应用在当前工作区（patched={}，untracked 新文件 {} 个）。请在其基础上验证、调整并完成目标——不要从零重做。",
+                                report.patched, report.untracked_restored
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Runner: scene recovery from {prev_id} failed — degrading to a clean re-run: {e}"
+                            );
+                            let _ = attempt_bundle::append_event(
+                                &bundle_dir,
+                                &serde_json::json!({
+                                    "event": "scene_recovery_failed",
+                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                    "source_execution": prev_id,
+                                    "error": e,
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // Budget governance: each retry attempt gets an exponentially larger
         // budget (capped) — a timeout means the estimate was small, not that
         // the work is impossible.
@@ -922,7 +996,23 @@ impl Runner {
             );
             executor.start_with_resume(&task, sid, &worktree_path, sandbox, timeout)?
         } else {
-            executor.start(&pkg.objective, &worktree_path, sandbox, timeout)?
+            let task = if recovery_note.is_empty() {
+                pkg.objective.clone()
+            } else {
+                format!("{}{}", pkg.objective, recovery_note)
+            };
+            // S2: persist the actual prompt so audits can see what the
+            // executor was told, distinct from the sealed objective.
+            if !recovery_note.is_empty() {
+                match attempt_bundle::write_task_prompt(&bundle_dir, &task) {
+                    Ok(Some(ref_name)) => manifest.task_prompt_ref = Some(ref_name),
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::warn!("Failed to persist task prompt: {e}");
+                    }
+                }
+            }
+            executor.start(&task, &worktree_path, sandbox, timeout)?
         };
         let stdout_path = Some(handle.stdout_path.clone());
         let stderr_path = Some(handle.stderr_path.clone());
@@ -1427,7 +1517,7 @@ impl Runner {
             )),
             RunResult::ScopeViolation { .. } => Some((
                 "blocked",
-                "The candidate changed paths outside the sealed scope. The full scene (diff, untracked files, changed-path classification) is captured in the bundle's scene/ directory. Revise scope or cancel?",
+                "The candidate changed paths outside the sealed scope. The full scene (diff, untracked files, changed-path classification) is captured in the bundle's scene/ directory; a revised package's first attempt automatically restores it (same base only). Revise scope or cancel?",
                 vec!["revise_scope".to_string(), "cancel".to_string()],
             )),
             RunResult::AcceptanceFailed { .. } => Some((
