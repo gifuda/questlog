@@ -140,6 +140,10 @@ fn validate_id(id: &str) -> Result<(), String> {
 pub struct AttemptManifest {
     pub execution_id: String,
     pub attempt_no: u32,
+    /// Auto-retry budget consumed along the chain at seal time (S0-C).
+    /// Read-compatible with pre-S0 manifests (absent → 0).
+    #[serde(default)]
+    pub budget_used: u32,
     pub parent_attempt_id: Option<String>,
     pub package_id: String,
     pub plan_revision: u32,
@@ -184,12 +188,14 @@ impl AttemptManifest {
     pub fn new(
         execution_id: &str,
         attempt_no: u32,
+        budget_used: u32,
         parent_attempt_id: Option<&str>,
         pkg: &TaskPackageSummary,
     ) -> Self {
         Self {
             execution_id: execution_id.to_string(),
             attempt_no,
+            budget_used,
             parent_attempt_id: parent_attempt_id.map(|s| s.to_string()),
             package_id: pkg.package_id.clone(),
             plan_revision: pkg.plan_revision,
@@ -720,6 +726,10 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
             attempt_no: 1,
+            outcome: None,
+            budget_used: 0,
+            budget_charged: false,
+            retries_remaining: None,
             parent_attempt_id: None,
             bundle_path: None,
             executor: None,
@@ -735,7 +745,7 @@ mod tests {
         let bundle_path = create_bundle_dir(&exec.id).unwrap();
         assert!(bundle_path.exists());
 
-        let manifest = AttemptManifest::new(&exec.id, 1, None, &pkg);
+        let manifest = AttemptManifest::new(&exec.id, 1, 0, None, &pkg);
         write_manifest(&bundle_path, &manifest).unwrap();
 
         let snapshot = generate_environment_snapshot(&pkg, &exec, None, true);
@@ -755,7 +765,7 @@ mod tests {
         let exec = mock_exec(&pkg);
 
         let dir = create_bundle_dir(&exec.id).unwrap();
-        let mut manifest = AttemptManifest::new(&exec.id, 1, None, &pkg);
+        let mut manifest = AttemptManifest::new(&exec.id, 1, 0, None, &pkg);
         write_manifest(&dir, &manifest).unwrap();
         write_task_package_snapshot(&dir, &pkg).unwrap();
 
@@ -816,7 +826,7 @@ mod tests {
             } else {
                 Some("exec_1")
             };
-            let manifest = AttemptManifest::new(&exec_id, attempt_no, parent_id, &pkg);
+            let manifest = AttemptManifest::new(&exec_id, attempt_no, 0, parent_id, &pkg);
             write_manifest(&dir, &manifest).unwrap();
         }
 
@@ -824,7 +834,7 @@ mod tests {
         let mut pkg2 = mock_pkg();
         pkg2.step_id = "step_other".to_string();
         let dir3 = create_bundle_dir("exec_3").unwrap();
-        let manifest3 = AttemptManifest::new("exec_3", 1, None, &pkg2);
+        let manifest3 = AttemptManifest::new("exec_3", 1, 0, None, &pkg2);
         write_manifest(&dir3, &manifest3).unwrap();
 
         let bundles = list_bundles_for_step("step_1").unwrap();
@@ -910,7 +920,7 @@ mod tests {
         // Write a legitimate file whose name happens to contain "tmp-"
         std::fs::write(dir.join("data.tmp-notes.json"), "content").unwrap();
 
-        let mut manifest = AttemptManifest::new(&exec.id, 1, None, &pkg);
+        let mut manifest = AttemptManifest::new(&exec.id, 1, 0, None, &pkg);
         write_manifest(&dir, &manifest).unwrap();
 
         let outcome = AttemptOutcome {

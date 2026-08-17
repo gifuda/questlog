@@ -234,6 +234,9 @@ describe("DecisionRequest options validation + action mirror", () => {
     expect(child).toBeTruthy();
     expect(child.status).toBe("queued");
     expect(child.attempt_no).toBe(2);
+    // S0-C: the child inherits the parent's consumed budget (never attempt_no).
+    expect(child.budget_used).toBe(0);
+    expect(child.budget_charged).toBe(false);
 
     const stored = await getPackage(pkg.package_id);
     if ("error" in stored) throw new Error(stored.error);
@@ -281,6 +284,9 @@ describe("DecisionRequest options validation + action mirror", () => {
     expect(child).toBeTruthy();
     expect(child.status).toBe("queued");
     expect(child.attempt_no).toBe(2);
+    // S0-C: a paused (human) outcome never charged the budget — the resume
+    // child starts with the full budget intact.
+    expect(child.budget_used).toBe(0);
   });
 
   it("cancel resolution marks the execution cancelled", async () => {

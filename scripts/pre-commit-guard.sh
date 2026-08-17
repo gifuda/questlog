@@ -15,14 +15,16 @@ set -e
 WHITELIST='^scripts/pre-commit-guard\.sh$|\.md$|README|\.gitignore$|^LICENSE$|^docs/'
 
 # 只看暂存区里"新增"的行（+ 开头，排除 +++ 文件头）
-PATCH=$(git diff --cached --no-color --unified=0 --name-only)
+PATCH=$(git -c core.quotepath=false diff --cached --no-color --unified=0 --name-only)
 # 收集新增行内容（仅非白名单文件）
 ADDED=""
 for f in $PATCH; do
   # 文件名匹配白名单 → 跳过
   if printf '%s' "$f" | grep -qE "$WHITELIST"; then continue; fi
   # 取该文件的新增行
-  LINES=$(git diff --cached --no-color --unified=0 -- "$f" | grep -E '^\+' | grep -vE '^\+\+\+')
+  # "|| true": a brand-new or binary file can yield no added lines — an
+  # empty grep match must not kill the whole hook under `set -e`.
+  LINES=$(git -c core.quotepath=false diff --cached --no-color --unified=0 -- "$f" | grep -E '^\+' | grep -vE '^\+\+\+' || true)
   if [ -n "$LINES" ]; then
     ADDED="$ADDED
 $LINES"

@@ -45,6 +45,9 @@ export interface DecisionRequest {
   resolved_by?: string;
   resolved_at?: string;
   resolution?: string;
+  /** Audit trail of a resolution whose mapped action FAILED — the request
+   *  was rolled back to unresolved (S0-B fail-closed). */
+  last_failed_resolution?: string;
   created_at: string;
 }
 
@@ -220,12 +223,47 @@ export async function resolveDecision(
 
   if ("error" in recordResult) return recordResult;
 
-  // Record-then-act. Action failure does NOT un-record the decision (the
-  // human's answer stands); it surfaces as a warning string instead.
+  // Record-then-act, fail-closed (S0-B): when the mapped action FAILS the
+  // resolution is rolled back so the human can re-answer — a decision never
+  // stands resolved without its effect. The failed choice is preserved in
+  // last_failed_resolution for the next round.
   const { executeDecisionAction } = await import("./decision-actions.js");
   const actionResult = await executeDecisionAction(recordResult.execution_id, resolution);
-  return {
-    ok: true as const,
-    action: "error" in actionResult ? `action failed: ${actionResult.error}` : actionResult.detail,
-  };
+  if ("error" in actionResult) {
+    const rollback = await withFileLock(
+      decisionsPath(),
+      async (): Promise<{ ok: true } | { error: string }> => {
+        const result = await readDecisionsSafe();
+        if (!("ok" in result)) {
+          return {
+            error:
+              "error" in result
+                ? result.error
+                : "decisions file missing — cannot roll back",
+          };
+        }
+        const req = result.data.requests.find((r) => r.request_id === requestId);
+        if (!req) return { error: `decision request '${requestId}' not found during rollback` };
+        if (!req.resolved) return { error: "already unresolved — nothing to roll back" };
+        req.last_failed_resolution = `'${req.resolution ?? ""}' rejected: ${actionResult.error}`;
+        req.resolved = false;
+        req.resolution = undefined;
+        req.resolved_by = undefined;
+        req.resolved_at = undefined;
+        await writeDecisions(result.data);
+        return { ok: true as const };
+      },
+      10_000,
+    ).catch((err: Error) => ({ error: err.message }) as { error: string });
+
+    if ("error" in rollback) {
+      return {
+        error: `action failed (${actionResult.error}) and rollback failed (${rollback.error}) — decision left resolved; inspect ${requestId} manually`,
+      };
+    }
+    return {
+      error: `action failed — decision rolled back to unresolved: ${actionResult.error}`,
+    };
+  }
+  return { ok: true as const, action: actionResult.detail };
 }

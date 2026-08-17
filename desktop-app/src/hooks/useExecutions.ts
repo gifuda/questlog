@@ -53,6 +53,17 @@ export interface Execution {
   parent_attempt_id?: string;
   bundle_path?: string;
   executor?: string;
+  // Budget semantics (S0-C) — retries_remaining is view-only (backend-filled)
+  outcome?: string | null;
+  budget_used?: number;
+  retries_remaining?: number;
+}
+
+/** Result of an execution action — S0-A: every click gets feedback. */
+export interface ActionResult {
+  ok: boolean;
+  detail?: string;
+  error?: string;
 }
 
 export function useExecutions() {
@@ -94,28 +105,45 @@ export function useExecutions() {
 
 /**
  * Execution actions — call Tauri commands to control execution state.
+ * S0-A: failures are surfaced to the caller (never swallowed in a
+ * console.warn) so every click renders a success or failure feedback.
  */
 export function useExecutionActions() {
-  const cancel = useCallback(async (id: string) => {
-    await invoke("cancel_execution", { id });
-  }, []);
-
-  // Returns the new child execution_id (Evidence-aware Retry).
-  const retry = useCallback(async (id: string): Promise<string | null> => {
+  const cancel = useCallback(async (id: string): Promise<ActionResult> => {
     try {
-      return await invoke<string>("retry_execution", { id });
+      await invoke("cancel_execution", { id });
+      return { ok: true, detail: "cancel requested" };
     } catch (err) {
-      console.warn("Failed to retry execution:", err);
-      return null;
+      return { ok: false, error: String(err) };
     }
   }, []);
 
-  const pause = useCallback(async (id: string) => {
-    await invoke("pause_execution", { id });
+  // Returns the new child execution_id (Evidence-aware Retry).
+  const retry = useCallback(async (id: string): Promise<ActionResult & { childId?: string }> => {
+    try {
+      const childId = await invoke<string>("retry_execution", { id });
+      return { ok: true, detail: `retry scheduled (${childId.slice(0, 12)}…)`, childId };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
   }, []);
 
-  const cleanupStale = useCallback(async () => {
-    await invoke("cleanup_stale_executions");
+  const pause = useCallback(async (id: string): Promise<ActionResult> => {
+    try {
+      await invoke("pause_execution", { id });
+      return { ok: true, detail: "pause requested" };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  }, []);
+
+  const cleanupStale = useCallback(async (): Promise<ActionResult> => {
+    try {
+      await invoke("cleanup_stale_executions");
+      return { ok: true, detail: "stale executions cleaned" };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
   }, []);
 
   return { cancel, retry, pause, cleanupStale };

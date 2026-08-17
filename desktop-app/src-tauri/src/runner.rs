@@ -294,6 +294,7 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::Passed,
                         None,
+                        Some("passed"),
                     )?;
                     match final_status {
                         ExecutionStatus::Passed => {
@@ -327,6 +328,7 @@ impl Runner {
                             execution_id,
                             ExecutionStatus::Passed,
                             None,
+                            Some("no_diff_readonly"),
                         )?;
                         match final_status {
                             ExecutionStatus::Passed => {
@@ -349,6 +351,7 @@ impl Runner {
                             execution_id,
                             ExecutionStatus::Blocked,
                             Some("CLI produced no diff"),
+                            Some("no_diff"),
                         )?;
                         execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                     }
@@ -361,6 +364,7 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::Blocked,
                         Some(reason),
+                        Some("acceptance_failed"),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
@@ -372,6 +376,7 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::Blocked,
                         Some(&violation.to_string()),
+                        Some("scope_violation"),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
@@ -387,6 +392,7 @@ impl Runner {
                             "base SHA drift: expected {}, got {}",
                             expected, actual
                         )),
+                        Some("base_sha_drift"),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
@@ -398,6 +404,7 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::Blocked,
                         Some(error),
+                        Some("cli_failed"),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
@@ -406,28 +413,58 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::TimedOut,
                         Some("timeout"),
+                        Some("timeout"),
                     )?;
                     // Budget governance: a timeout is a budget signal, not a
-                    // defect. While attempts remain, auto-schedule a retry
+                    // defect. While budget remains, auto-schedule a retry
                     // (with exponentially escalated budget) instead of
                     // blocking the package and paging a human. Only an
                     // exhausted budget becomes a DecisionRequest.
-                    let attempt_no = execution_store::get_execution(execution_id)
-                        .map(|e| e.attempt_no)
-                        .unwrap_or(1);
-                    if (attempt_no as u64) < pkg.max_attempts.max(1) as u64 {
+                    let budget_used = execution_store::get_execution(execution_id)
+                        .map(|e| execution_store::effective_budget_used(&e))
+                        .unwrap_or(0);
+                    if (budget_used as u64) < pkg.max_attempts.max(1) as u64 {
                         match execution_store::create_retry_attempt(execution_id) {
                             Ok(child_id) => {
                                 log::info!(
-                                    "Runner: timeout on attempt {} → auto-retry scheduled ({}), worktree kept for resume",
-                                    attempt_no, child_id
+                                    "Runner: timeout on budget {} → auto-retry scheduled ({}), worktree kept for resume",
+                                    budget_used, child_id
                                 );
                                 // create_retry_attempt already flipped the
                                 // package back to ready.
                             }
                             Err(e) => {
+                                // S0-A2: the failure must reach the human
+                                // inbox, not just the log — a swallowed
+                                // auto-retry error leaves an unexplainable
+                                // blocked package.
                                 log::warn!("Runner: auto-retry failed for {execution_id}: {e}");
                                 execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                                let question = format!(
+                                    "Auto-retry scheduling failed for execution {} (budget {}/{}): {}. Revise the package or cancel?",
+                                    execution_id, budget_used, pkg.max_attempts.max(1), e
+                                );
+                                if let Err(dr_err) =
+                                    crate::decision_store::create_request(
+                                        crate::decision_store::NewDecisionRequest {
+                                            epic_id: &pkg.epic_id,
+                                            step_id: &pkg.step_id,
+                                            execution_id,
+                                            kind: "blocked",
+                                            question: &question,
+                                            options: vec![
+                                                "revise_package".to_string(),
+                                                "cancel".to_string(),
+                                            ],
+                                            evidence_refs: vec![],
+                                            package_revision: pkg.plan_revision,
+                                        },
+                                    )
+                                {
+                                    log::error!(
+                                        "Runner: failed to record auto-retry-failure DR for {execution_id}: {dr_err}"
+                                    );
+                                }
                             }
                         }
                     } else {
@@ -439,6 +476,7 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::Cancelled,
                         None,
+                        Some("cancelled"),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "cancelled")?;
                 }
@@ -447,6 +485,7 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::Blocked,
                         Some("paused by user"),
+                        Some("paused"),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
@@ -458,6 +497,7 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::Blocked,
                         Some(error),
+                        Some("policy_violation"),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
@@ -469,6 +509,7 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::Blocked,
                         Some(error),
+                        Some("preflight_blocked"),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
@@ -480,11 +521,12 @@ impl Runner {
                         execution_id,
                         ExecutionStatus::Blocked,
                         Some(&format!("evidence seal failed: {error}")),
+                        Some("evidence_seal_failed"),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
                 Err(e) => {
-                    execution_store::finish_execution(&exec_id, ExecutionStatus::Failed, Some(e))?;
+                    execution_store::finish_execution(&exec_id, ExecutionStatus::Failed, Some(e), None)?;
                     execution_store::mark_package_status(&pkg.package_id, "failed")?;
                 }
             }
@@ -675,6 +717,7 @@ impl Runner {
         let mut manifest = AttemptManifest::new(
             &exec.id,
             exec.attempt_no,
+            execution_store::effective_budget_used(&exec),
             exec.parent_attempt_id.as_deref(),
             pkg,
         );
@@ -721,7 +764,10 @@ impl Runner {
             }),
         );
 
-        if let Err(error) = Self::validate_before_claim(pkg, exec.attempt_no) {
+        if let Err(error) = Self::validate_before_claim(
+            pkg,
+            execution_store::effective_budget_used(&exec),
+        ) {
             let result = RunResult::PreflightBlocked {
                 execution_id: exec.id.clone(),
                 error,
@@ -1307,7 +1353,7 @@ impl Runner {
                     // the executor phase — no human decision needed.
                     None
                 } else {
-                    let exhausted = manifest.attempt_no >= pkg.max_attempts.max(1);
+                    let exhausted = manifest.budget_used >= pkg.max_attempts.max(1);
                     Some((
                         if exhausted { "retry_exhausted" } else { "blocked" },
                         if exhausted {
@@ -1331,7 +1377,7 @@ impl Runner {
             // the poll loop auto-schedules an escalated retry (no human
             // involved); only an exhausted budget pages the human.
             RunResult::Timeout { .. } => {
-                let exhausted = manifest.attempt_no >= pkg.max_attempts.max(1);
+                let exhausted = manifest.budget_used >= pkg.max_attempts.max(1);
                 if exhausted {
                     Some((
                         "retry_exhausted",
@@ -1343,7 +1389,7 @@ impl Runner {
                 }
             }
             RunResult::CliFailed { .. } => {
-                let exhausted = manifest.attempt_no >= pkg.max_attempts.max(1);
+                let exhausted = manifest.budget_used >= pkg.max_attempts.max(1);
                 Some((
                     if exhausted { "retry_exhausted" } else { "blocked" },
                     if exhausted {
@@ -1435,7 +1481,7 @@ impl Runner {
         Ok(packages.into_iter().map(|p| p.package_id).collect())
     }
 
-    fn validate_before_claim(pkg: &TaskPackageSummary, attempt_no: u32) -> Result<(), String> {
+    fn validate_before_claim(pkg: &TaskPackageSummary, budget_used: u32) -> Result<(), String> {
         if pkg.executor_preferred != "zcode" {
             return Err(format!(
                 "production Runner only accepts zcode, got '{}'",
@@ -1448,10 +1494,10 @@ impl Runner {
         if !matches!(pkg.sandbox.as_str(), "workspace-write" | "read-only") {
             return Err(format!("unsupported sandbox '{}'", pkg.sandbox));
         }
-        if pkg.timeout_seconds == 0 || pkg.max_attempts == 0 || attempt_no > pkg.max_attempts {
+        if pkg.timeout_seconds == 0 || pkg.max_attempts == 0 || budget_used >= pkg.max_attempts {
             return Err(format!(
-                "invalid or exhausted execution budget: timeout={}, attempt={}/{}",
-                pkg.timeout_seconds, attempt_no, pkg.max_attempts
+                "invalid or exhausted execution budget: timeout={}, budget={}/{}",
+                pkg.timeout_seconds, budget_used, pkg.max_attempts
             ));
         }
         if pkg.package_hash.is_empty() || pkg.package_hash != pkg.computed_hash {
@@ -2815,7 +2861,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
         let runner = Runner::new(RunnerConfig::default());
         let pkg = seal_test_pkg();
-        let mut manifest = AttemptManifest::new("exec_sealfail", 1, None, &pkg);
+        let mut manifest = AttemptManifest::new("exec_sealfail", 1, 0, None, &pkg);
         let bundle_dir = tempfile::tempdir().unwrap();
 
         // Read-only bundle dir → write_outcome_and_seal must fail.
@@ -2858,7 +2904,7 @@ mod tests {
         let (_dir, _guard) = setup();
         let runner = Runner::new(RunnerConfig::default());
         let pkg = seal_test_pkg();
-        let mut manifest = AttemptManifest::new("exec_sealfail2", 1, None, &pkg);
+        let mut manifest = AttemptManifest::new("exec_sealfail2", 1, 0, None, &pkg);
         let bundle_dir = tempfile::tempdir().unwrap();
 
         let mut perms = std::fs::metadata(bundle_dir.path()).unwrap().permissions();
@@ -2890,7 +2936,7 @@ mod tests {
         let (_dir, _guard) = setup();
         let runner = Runner::new(RunnerConfig::default());
         let pkg = seal_test_pkg();
-        let mut manifest = AttemptManifest::new("exec_sealok", 1, None, &pkg);
+        let mut manifest = AttemptManifest::new("exec_sealok", 1, 0, None, &pkg);
         let bundle_dir = tempfile::tempdir().unwrap();
 
         let result = runner.seal_bundle(

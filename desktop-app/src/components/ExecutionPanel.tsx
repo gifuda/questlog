@@ -45,11 +45,25 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
   const { t } = useTranslation();
   const { cancel, retry, pause } = useExecutionActions();
   const [expanded, setExpanded] = useState(false);
+  // S0-A: per-row action feedback — every click renders success or failure.
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const runAction = async (action: () => Promise<{ ok: boolean; detail?: string; error?: string }>) => {
+    const result = await action();
+    setFeedback(
+      result.ok
+        ? { ok: true, text: result.detail ?? "ok" }
+        : { ok: false, text: result.error ?? "action failed" },
+    );
+  };
 
   const statusKey = `execution.status.${exec.status}`;
   // Retry attempts carry a parent_attempt_id pointing at the previous attempt in the chain.
   const parentAttemptId = exec.parent_attempt_id;
   const isRetry = Boolean(parentAttemptId);
+  // S0-C: budget view — undefined on legacy rows / when the package is gone.
+  const retriesRemaining = exec.retries_remaining;
+  const budgetExhausted = retriesRemaining !== undefined && retriesRemaining <= 0;
 
   return (
     <div
@@ -118,10 +132,24 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
               <span className="font-medium">{t("execution.lastError")}:</span> {exec.last_error}
             </div>
           )}
+          {retriesRemaining !== undefined && (
+            <div className={budgetExhausted ? "text-orange-600" : "text-gray-500"}>
+              <span className="font-medium">{t("execution.retryBudget", "Retry budget")}:</span>{" "}
+              {budgetExhausted
+                ? t("execution.budgetExhausted", "exhausted — revise the sealed package to retry")
+                : t("execution.retriesLeft", "{{count}} auto-retries left", { count: retriesRemaining })}
+            </div>
+          )}
+          {feedback && (
+            <div className={`break-words ${feedback.ok ? "text-green-600" : "text-red-600"}`}>
+              {feedback.ok ? "✓ " : "✗ "}
+              {feedback.text}
+            </div>
+          )}
           <div className="flex gap-2 mt-2">
             {exec.status === "running" && (
               <button
-                onClick={() => pause(exec.id)}
+                onClick={() => runAction(() => pause(exec.id))}
                 className="px-2 py-1 text-xs rounded bg-orange-100 text-orange-700 hover:bg-orange-200"
               >
                 {t("execution.pause")}
@@ -129,15 +157,24 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
             )}
             {(exec.status === "failed" || exec.status === "cancelled" || exec.status === "stale" || exec.status === "blocked" || exec.status === "timed_out") && (
               <button
-                onClick={() => retry(exec.id)}
-                className="px-2 py-1 text-xs rounded bg-blue-100 text-blue-700 hover:bg-blue-200"
+                disabled={budgetExhausted}
+                title={
+                  budgetExhausted
+                    ? t(
+                        "execution.budgetExhaustedHint",
+                        "Auto-retry budget exhausted — revise the sealed package (prepare → validate → seal) to continue",
+                      )
+                    : undefined
+                }
+                onClick={() => runAction(() => retry(exec.id))}
+                className="px-2 py-1 text-xs rounded bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {t("execution.retry")}
               </button>
             )}
             {!(["cancelled", "passed", "blocked", "failed", "timed_out", "cancel_requested", "pause_requested"] as ExecutionStatus[]).includes(exec.status) && (
               <button
-                onClick={() => cancel(exec.id)}
+                onClick={() => runAction(() => cancel(exec.id))}
                 className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-600 hover:bg-gray-200"
               >
                 {t("execution.cancel")}

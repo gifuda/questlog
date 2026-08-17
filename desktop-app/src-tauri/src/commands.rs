@@ -923,7 +923,18 @@ fn arr_len(v: &serde_json::Value) -> u64 {
 
 #[tauri::command]
 pub fn get_executions() -> Result<Vec<crate::execution_store::Execution>, String> {
-    crate::execution_store::list_executions()
+    let mut executions = crate::execution_store::list_executions()?;
+    // S0-A/C: fill the view-only retries_remaining in ONE package read
+    // (map join, not per-row reads) so the UI can disable the retry button
+    // on an exhausted budget and explain why.
+    let caps = crate::execution_store::budget_caps_by_package().unwrap_or_default();
+    for exec in executions.iter_mut() {
+        if let Some(max_attempts) = caps.get(&exec.package_id) {
+            let used = crate::execution_store::effective_budget_used(exec);
+            exec.retries_remaining = Some(max_attempts.saturating_sub(used));
+        }
+    }
+    Ok(executions)
 }
 
 #[tauri::command]
@@ -1359,39 +1370,79 @@ pub fn resolve_decision_request(
     let request = crate::decision_store::resolve_request(&request_id, &resolution, "ui-user")?;
 
     // §5.1: resolve triggers a legal state transition, not a direct pass.
-    // The resolution determines what happens next. Action failures are
-    // RETURNED (visible to the operator) — the decision itself is already
-    // recorded either way.
+    // S0-B fail-closed: an action that FAILS rolls the decision back to
+    // unresolved — a resolution must never stand resolved without its effect
+    // (the failure reason is preserved in last_failed_resolution).
+    //
+    // CONTRACT (mirror in mcp-server/src/decision-actions.ts, same commit):
+    //   retry | resume        → schedule a child attempt (budget-capped)
+    //   cancel               → cancel the execution
+    //   revise_package | transfer_manual | manual | reject
+    //                        → cancel the execution (human work follows)
+    //   revise_scope         → cancel the execution + keep the package
+    //                           blocked until a NEW sealed revision (fresh
+    //                           budget); scene salvage is S1/S2
+    //   anything else        → record only (custom free text)
     let action = resolution.trim().to_lowercase();
-    match action.as_str() {
+    let action_result: Result<(), String> = match action.as_str() {
         "retry" | "resume" => {
             // resume == controlled retry: the attempt chain's resume logic
             // (same base + intact worktree + CLI session) reuses the
             // interrupted scene. The Runner picks the child up next poll.
-            if let Err(e) = crate::execution_store::create_retry_attempt(&request.execution_id) {
-                return Err(format!(
-                    "decision recorded, but failed to schedule the attempt for {}: {}",
-                    request.execution_id, e
-                ));
-            }
+            crate::execution_store::create_retry_attempt(&request.execution_id).map(|_| ())
         }
         "cancel" => {
-            cancel_execution_for_decision(&request.execution_id, "cancelled via decision request")?;
+            cancel_execution_for_decision(&request.execution_id, "cancelled via decision request")
         }
-        "revise_package" | "transfer_manual" | "reject" => {
-            // These require human action outside the Runner — mark blocked execution
-            // as cancelled so it doesn't linger in the queue.
+        "revise_package" | "transfer_manual" | "manual" | "reject" => {
+            // These require human action outside the Runner — mark blocked
+            // execution as cancelled so it doesn't linger in the queue.
             cancel_execution_for_decision(
                 &request.execution_id,
                 &format!("resolved as '{action}'"),
+            )
+        }
+        "revise_scope" => {
+            // Safe closure for a ScopeViolation: cancel the lingering
+            // execution and keep the package blocked until the operator
+            // seals a new revision (prepare → validate → seal — its retry
+            // budget is independent of the old chain).
+            cancel_execution_for_decision(
+                &request.execution_id,
+                "resolved as revise_scope — awaiting a new package revision",
             )?;
+            let package_id = crate::execution_store::get_execution(&request.execution_id)
+                .map(|exec| exec.package_id)
+                .map_err(|e| format!("cannot resolve package for the blocked execution: {e}"))?;
+            crate::execution_store::mark_package_status(&package_id, "blocked")
+                .map_err(|e| format!("failed to keep package blocked: {e}"))
         }
         _ => {
             // Custom resolution text — no automatic action.
+            Ok(())
+        }
+    };
+
+    match action_result {
+        Ok(()) => Ok(request),
+        Err(action_error) => {
+            // Roll the decision back so the operator can re-answer; the
+            // failed choice stays visible via last_failed_resolution.
+            match crate::decision_store::unresolve_request(&request_id, &action_error) {
+                Ok(_) => Err(format!(
+                    "action failed — decision rolled back to unresolved: {action_error}"
+                )),
+                Err(rollback_error) => {
+                    log::error!(
+                        "resolve_decision: action failed ({action_error}) and rollback failed ({rollback_error}) — request {request_id} left resolved"
+                    );
+                    Err(format!(
+                        "action failed ({action_error}) and rollback failed ({rollback_error}) — decision left resolved; inspect {request_id} manually"
+                    ))
+                }
+            }
         }
     }
-
-    Ok(request)
 }
 
 /// Cancel a DecisionRequest's execution with honest feedback: a terminal
@@ -1485,6 +1536,7 @@ mod tests {
             &parent,
             crate::execution_store::ExecutionStatus::Blocked,
             Some("paused by user"),
+            None,
         )
         .unwrap();
         (parent, "pkg1".to_string())
@@ -1525,6 +1577,88 @@ mod tests {
         assert_eq!(child.attempt_no, 2);
     }
 
+    /// S0-B: resolving a ScopeViolation DR as revise_scope performs the safe
+    /// closure — the lingering execution is cancelled, the package stays
+    /// blocked until a new sealed revision, and the decision stands resolved.
+    #[test]
+    fn resolve_revise_scope_cancels_execution_and_keeps_package_blocked() {
+        let _guard = crate::execution_store::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("QUESTLOG_RUNTIME", dir.path());
+        std::fs::create_dir_all(crate::execution_store::runtime_dir()).unwrap();
+
+        let packages = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "package_id": "pkg1", "epic_id": "e1", "step_id": "s1",
+                "plan_revision": 1, "project_path": "/tmp/proj", "repo_root": "/tmp/proj",
+                "base_sha": "abc123", "objective": "revise scope closure",
+                "scope": {"allowed_paths": ["src/**"], "forbidden_paths": [], "max_changed_files": 4},
+                "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write",
+                             "timeout_seconds": 3600, "max_attempts": 2},
+                "acceptance": [], "status": "blocked",
+                "sealed_at": "2026-08-17T00:00:00Z", "package_hash": "fixture"
+            }]
+        });
+        let runtime = crate::execution_store::runtime_dir().join("packages.json");
+        std::fs::write(&runtime, serde_json::to_string_pretty(&packages).unwrap()).unwrap();
+
+        let exec_id = crate::execution_store::enqueue_execution(
+            "pkg1", "e1", "s1", "/tmp/proj", "abc123",
+        )
+        .unwrap();
+        let _ = crate::execution_store::acquire_lease(&exec_id, "runner-1").unwrap();
+        crate::execution_store::finish_execution(
+            &exec_id,
+            crate::execution_store::ExecutionStatus::Blocked,
+            Some("changed paths outside the sealed scope"),
+            Some("scope_violation"),
+        )
+        .unwrap();
+
+        let request =
+            crate::decision_store::create_request(crate::decision_store::NewDecisionRequest {
+                epic_id: "e1",
+                step_id: "s1",
+                execution_id: &exec_id,
+                kind: "blocked",
+                question: "The candidate changed paths outside the sealed scope. Revise scope or cancel?",
+                options: vec!["revise_scope".to_string(), "cancel".to_string()],
+                evidence_refs: vec![],
+                package_revision: 1,
+            })
+            .unwrap();
+
+        let resolved =
+            resolve_decision_request(request.request_id.clone(), "revise_scope".to_string())
+                .expect("revise_scope must resolve cleanly");
+        assert!(resolved.resolved);
+
+        let exec = crate::execution_store::get_execution(&exec_id).unwrap();
+        assert_eq!(
+            exec.status,
+            crate::execution_store::ExecutionStatus::Cancelled,
+            "lingering execution must be closed"
+        );
+        assert!(exec
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("awaiting a new package revision")));
+
+        // The package must stay blocked so the Runner cannot re-claim the
+        // old scope while a revision is being prepared. (read_ready_packages
+        // filters blocked rows out, so assert against the raw store.)
+        let raw = std::fs::read_to_string(
+            crate::execution_store::runtime_dir().join("packages.json"),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let status = parsed["packages"][0]["status"].as_str().unwrap();
+        assert_eq!(status, "blocked");
+    }
+
     #[test]
     fn resolve_cancel_failure_is_visible_not_silent() {
         let _guard = crate::execution_store::TEST_LOCK
@@ -1547,15 +1681,26 @@ mod tests {
             })
             .unwrap();
 
+        let request_id = request.request_id.clone();
         let result = resolve_decision_request(request.request_id, "cancel".to_string());
         let error = result.expect_err("a real action failure must surface");
         assert!(
-            error.contains("decision recorded"),
+            error.contains("rolled back"),
             "honest framing: {error}"
         );
-        // The decision itself was still recorded.
+        // S0-B fail-closed: the decision does NOT stand resolved when its
+        // action failed — it rolls back to unresolved with the failed choice
+        // preserved in last_failed_resolution for the human.
         let stored = crate::decision_store::list_requests(true).unwrap();
-        assert!(stored.iter().any(|r| r.resolved));
+        let rolled = stored
+            .iter()
+            .find(|r| r.request_id == request_id)
+            .expect("request must exist");
+        assert!(!rolled.resolved, "rolled back to unresolved");
+        assert!(rolled
+            .last_failed_resolution
+            .as_deref()
+            .is_some_and(|trail| trail.contains("cancel")));
     }
 
     fn opt_model(id: &str, name: &str) -> ExecutorModelOption {

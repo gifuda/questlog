@@ -91,6 +91,22 @@ pub struct Execution {
     /// Attempt number in the retry chain (1 for first attempt).
     #[serde(default = "default_attempt_no")]
     pub attempt_no: u32,
+    /// Terminal-outcome kind (RunResult variant string). None while running
+    /// and on pre-migration rows (legacy budget fallback applies there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// Cumulative auto-retry budget consumed along the attempt chain.
+    /// Separated from attempt_no (S0-C): human cancel/pause and preflight/
+    /// policy blocks do NOT consume budget; executor-attributable failures do.
+    #[serde(default)]
+    pub budget_used: u32,
+    /// Idempotency flag: budget settled exactly once per terminal outcome.
+    #[serde(default)]
+    pub budget_charged: bool,
+    /// VIEW-ONLY (never persisted): remaining auto-retry budget, filled by
+    /// the get_executions command from the package's max_attempts cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries_remaining: Option<u32>,
     /// Parent execution ID (for retries). None for first attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_attempt_id: Option<String>,
@@ -286,6 +302,10 @@ pub fn enqueue_execution_with_parent(
         created_at: now,
         updated_at: now,
         attempt_no,
+        outcome: None,
+        budget_used: 0,
+        budget_charged: false,
+        retries_remaining: None,
         parent_attempt_id: parent_attempt_id.map(|s| s.to_string()),
         bundle_path: None,
         executor: None,
@@ -400,6 +420,10 @@ pub fn claim_package(
             created_at: now,
             updated_at: now,
             attempt_no: 1,
+            outcome: None,
+            budget_used: 0,
+            budget_charged: false,
+            retries_remaining: None,
             parent_attempt_id: None,
             bundle_path: None,
             executor: None,
@@ -675,12 +699,37 @@ pub fn request_control(execution_id: &str, pause: bool) -> Result<ExecutionStatu
     Ok(status)
 }
 
+/// Outcomes attributable to the executor's own retryable failure — these
+/// consume auto-retry budget (S0-C contract: timeout/CLI/acceptance/etc).
+/// Human and environment attributions (cancel/pause/policy/preflight/drift/
+/// scope) do not.
+pub fn outcome_counts_budget(outcome: &str) -> bool {
+    matches!(
+        outcome,
+        "timeout" | "cli_failed" | "acceptance_failed" | "no_diff" | "evidence_seal_failed"
+    )
+}
+
+/// Effective budget consumed by this attempt's chain. Legacy rows (terminal,
+/// written before the outcome field existed) fall back to the old
+/// attempt-based accounting so pre-migration chains keep their old ceiling.
+pub fn effective_budget_used(exec: &Execution) -> u32 {
+    if exec.outcome.is_none() && exec.attempt_no > 1 {
+        exec.attempt_no - 1
+    } else {
+        exec.budget_used
+    }
+}
+
 /// Finalize with terminal CAS semantics. A late success can never overwrite a
 /// cancellation or pause request. Returns the authoritative terminal status.
+/// `outcome` is the RunResult kind string; when it names an executor-attributable
+/// failure the chain budget settles exactly once (budget_charged guard).
 pub fn finish_execution(
     execution_id: &str,
     desired: ExecutionStatus,
     error: Option<&str>,
+    outcome: Option<&str>,
 ) -> Result<ExecutionStatus, String> {
     let now = now_ts();
     let data = mutate_executions(|data| {
@@ -702,6 +751,13 @@ pub fn finish_execution(
         exec.status = final_status;
         exec.lease = None;
         exec.last_error = error.map(str::to_string);
+        if let Some(kind) = outcome {
+            exec.outcome = Some(kind.to_string());
+            if !exec.budget_charged && outcome_counts_budget(kind) {
+                exec.budget_used += 1;
+                exec.budget_charged = true;
+            }
+        }
         exec.updated_at = now;
         Ok(())
     })?;
@@ -863,9 +919,12 @@ pub fn get_execution(id: &str) -> Result<Execution, String> {
 /// one child, never two.
 pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
     // Package policy read (separate store): the attempt budget cap.
+    // S0-C: the cap counts CONSUMED BUDGET, not attempt numbers — a human
+    // cancel/pause or a preflight/policy block leaves the budget untouched.
     let parent_snapshot = get_execution(parent_exec_id)?;
     let package = read_package(&parent_snapshot.package_id)?;
-    if parent_snapshot.attempt_no >= package.max_attempts.max(1) {
+    let parent_budget = effective_budget_used(&parent_snapshot);
+    if parent_budget >= package.max_attempts.max(1) {
         return Err(format!(
             "maximum attempts reached ({}) — revise the package before retrying",
             package.max_attempts.max(1)
@@ -919,6 +978,10 @@ pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
             created_at: now,
             updated_at: now,
             attempt_no: parent.attempt_no + 1,
+            outcome: None,
+            budget_used: parent_budget,
+            budget_charged: false,
+            retries_remaining: None,
             parent_attempt_id: Some(parent.id.clone()),
             bundle_path: None,
             executor: None,
@@ -1172,6 +1235,34 @@ pub fn read_package(package_id: &str) -> Result<TaskPackageSummary, String> {
 
 fn packages_path() -> PathBuf {
     runtime_dir().join("packages.json")
+}
+
+/// One-shot map package_id → max_attempts (highest plan_revision wins).
+/// Feeds the get_executions retries_remaining join without N+1 file reads.
+pub fn budget_caps_by_package() -> Result<std::collections::HashMap<String, u32>, String> {
+    let path = packages_path();
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read packages.json: {e}"))?;
+    let file: PackagesFile =
+        serde_json::from_str(&raw).map_err(|e| format!("parse packages.json: {e}"))?;
+    let mut caps: std::collections::HashMap<String, (u32, u32)> =
+        std::collections::HashMap::new(); // package_id → (revision, max_attempts)
+    for package in file.packages {
+        let cap = package.executor.max_attempts;
+        let revision = package.plan_revision;
+        match caps.get(&package.package_id) {
+            Some((best_revision, _)) if *best_revision >= revision => {}
+            _ => {
+                caps.insert(package.package_id, (revision, cap));
+            }
+        }
+    }
+    Ok(caps
+        .into_iter()
+        .map(|(id, (_, cap))| (id, cap.max(1)))
+        .collect())
 }
 
 /// Read all claimable packages from packages.json (written by Node MCP).
@@ -1607,6 +1698,87 @@ mod tests {
         assert_eq!(packages[0].max_attempts, 2);
     }
 
+    /// S0-C: a human cancel does not consume the auto-retry budget — the
+    /// chain's attempt_no advances but budget_used stays untouched, so a
+    /// retry after a cancel is not rejected by the cap.
+    #[test]
+    fn retry_after_human_cancel_keeps_budget() {
+        let (_dir, _guard) = setup_temp_runtime();
+        let packages = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "package_id": "pkg1", "epic_id": "e1", "step_id": "s1",
+                "plan_revision": 1, "project_path": "/tmp/proj", "repo_root": "/tmp/proj",
+                "base_sha": "abc123", "objective": "budget semantics",
+                "scope": {"allowed_paths": ["**"], "forbidden_paths": [], "max_changed_files": 10},
+                "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write",
+                             "timeout_seconds": 3600, "max_attempts": 2},
+                "acceptance": [], "status": "blocked",
+                "sealed_at": "2026-08-17T00:00:00Z", "package_hash": "fixture"
+            }]
+        });
+        std::fs::write(packages_path(), serde_json::to_string_pretty(&packages).unwrap()).unwrap();
+
+        let first = enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc123").unwrap();
+        let _ = acquire_lease(&first, "runner-1").unwrap();
+        finish_execution(&first, ExecutionStatus::Cancelled, None, Some("cancelled")).unwrap();
+        let after_cancel = get_execution(&first).unwrap();
+        assert_eq!(after_cancel.budget_used, 0, "human cancel must not charge budget");
+        assert_eq!(after_cancel.outcome.as_deref(), Some("cancelled"));
+
+        // With max_attempts=2 the old attempt-based cap would still allow one
+        // retry; with several cancels it would wrongly exhaust. Loop three
+        // cancels — budget must stay 0 and retries must keep succeeding.
+        let mut current = first;
+        for expected_attempt in 2..=4 {
+            let child = create_retry_attempt(&current).unwrap();
+            let _ = acquire_lease(&child, "runner-1").unwrap();
+            finish_execution(&child, ExecutionStatus::Cancelled, None, Some("cancelled")).unwrap();
+            let row = get_execution(&child).unwrap();
+            assert_eq!(row.attempt_no, expected_attempt);
+            assert_eq!(row.budget_used, 0, "cancel chain must never charge budget");
+            current = child;
+        }
+    }
+
+    /// S0-C: executor-attributable failures (timeout) consume budget; the
+    /// cap rejects a retry only once the budget is genuinely exhausted.
+    #[test]
+    fn timeout_budget_exhaustion_rejects_retry() {
+        let (_dir, _guard) = setup_temp_runtime();
+        let packages = serde_json::json!({
+            "version": 1,
+            "packages": [{
+                "package_id": "pkg1", "epic_id": "e1", "step_id": "s1",
+                "plan_revision": 1, "project_path": "/tmp/proj", "repo_root": "/tmp/proj",
+                "base_sha": "abc123", "objective": "budget semantics",
+                "scope": {"allowed_paths": ["**"], "forbidden_paths": [], "max_changed_files": 10},
+                "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write",
+                             "timeout_seconds": 3600, "max_attempts": 2},
+                "acceptance": [], "status": "blocked",
+                "sealed_at": "2026-08-17T00:00:00Z", "package_hash": "fixture"
+            }]
+        });
+        std::fs::write(packages_path(), serde_json::to_string_pretty(&packages).unwrap()).unwrap();
+
+        let first = enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc123").unwrap();
+        let _ = acquire_lease(&first, "runner-1").unwrap();
+        finish_execution(&first, ExecutionStatus::TimedOut, Some("timeout"), Some("timeout")).unwrap();
+        assert_eq!(get_execution(&first).unwrap().budget_used, 1);
+
+        let second = create_retry_attempt(&first).unwrap();
+        let child_row = get_execution(&second).unwrap();
+        assert_eq!(child_row.budget_used, 1, "child inherits the charged budget");
+        assert_eq!(child_row.attempt_no, 2);
+
+        let _ = acquire_lease(&second, "runner-1").unwrap();
+        finish_execution(&second, ExecutionStatus::TimedOut, Some("timeout"), Some("timeout")).unwrap();
+        assert_eq!(get_execution(&second).unwrap().budget_used, 2);
+
+        let rejected = create_retry_attempt(&second).unwrap_err();
+        assert!(rejected.contains("maximum attempts reached"), "{rejected}");
+    }
+
     #[test]
     fn create_retry_preserves_parent() {
         let (_dir, _guard) = setup_temp_runtime();
@@ -1746,7 +1918,7 @@ mod tests {
         let (_dir, _guard) = setup_temp_runtime();
         let id = enqueue_execution("pkg1", "e1", "s1", "/tmp/proj", "abc123").unwrap();
         acquire_lease(&id, "runner-1").unwrap();
-        finish_execution(&id, ExecutionStatus::TimedOut, Some("timeout")).unwrap();
+        finish_execution(&id, ExecutionStatus::TimedOut, Some("timeout"), Some("timeout")).unwrap();
 
         // A late cancel must NOT rewrite the terminal state.
         let result = release_lease(&id, ExecutionStatus::Cancelled, Some("late cancel"));
@@ -1758,7 +1930,7 @@ mod tests {
         // A blocked execution CAN still be cancelled (the DR cancel flow).
         let id2 = enqueue_execution("pkg2", "e1", "s2", "/tmp/proj", "abc123").unwrap();
         acquire_lease(&id2, "runner-1").unwrap();
-        finish_execution(&id2, ExecutionStatus::Blocked, Some("scope")).unwrap();
+        finish_execution(&id2, ExecutionStatus::Blocked, Some("scope"), None).unwrap();
         release_lease(&id2, ExecutionStatus::Cancelled, Some("DR cancel")).unwrap();
         assert_eq!(
             get_execution(&id2).unwrap().status,
@@ -1815,7 +1987,7 @@ mod tests {
             ExecutionStatus::CancelRequested
         );
 
-        let final_status = finish_execution(&id, ExecutionStatus::Passed, None).unwrap();
+        let final_status = finish_execution(&id, ExecutionStatus::Passed, None, None).unwrap();
         assert_eq!(final_status, ExecutionStatus::Cancelled);
         assert_eq!(
             get_execution(&id).unwrap().status,

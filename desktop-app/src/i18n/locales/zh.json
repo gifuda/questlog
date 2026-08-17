@@ -220,7 +220,11 @@
     "globalOff": "总闸 关",
     "globalOnTitle": "Runner 总闸已开（点击急停：停止一切自动领取）",
     "globalOffTitle": "Runner 总闸已关（急停中：项目开关不生效，点击恢复）",
-    "projectBlockedByGlobal": "项目开关已开，但总闸（⏻）关闭中——不会自动执行"
+    "projectBlockedByGlobal": "项目开关已开，但总闸（⏻）关闭中——不会自动执行",
+    "retryBudget": "重试预算",
+    "budgetExhausted": "已耗尽 — 修订封存包后重试",
+    "retriesLeft": "剩余自动重试 {{count}} 次",
+    "budgetExhaustedHint": "自动重试预算已耗尽 — 修订封存包（prepare → validate → seal）后继续"
   },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",

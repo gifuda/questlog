@@ -25,6 +25,11 @@ pub struct DecisionRequest {
     pub resolved_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
+    /// Audit trail of a resolution whose mapped action FAILED — the request
+    /// was rolled back to unresolved (S0-B fail-closed) and this records the
+    /// rejected choice plus the failure reason for the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_resolution: Option<String>,
     pub created_at: String,
 }
 
@@ -113,6 +118,7 @@ pub fn create_request(input: NewDecisionRequest<'_>) -> Result<DecisionRequest, 
             resolved_by: None,
             resolved_at: None,
             resolution: None,
+            last_failed_resolution: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         data.requests.push(request.clone());
@@ -170,6 +176,39 @@ pub fn resolve_request(
         request.resolution = Some(resolution.trim().to_string());
         request.resolved_by = Some(resolved_by.to_string());
         request.resolved_at = Some(chrono::Utc::now().to_rfc3339());
+        let updated = request.clone();
+        write_file(&mut data)?;
+        Ok(updated)
+    })
+}
+
+/// Roll back a resolution whose mapped action FAILED (S0-B fail-closed: a
+/// decision must not stand resolved when its effect did not happen). CAS on
+/// resolved==true; the failed choice is preserved in last_failed_resolution.
+pub fn unresolve_request(request_id: &str, reason: &str) -> Result<DecisionRequest, String> {
+    let path = decisions_path();
+    file_lock::with_file_lock(&path, || {
+        let mut data = read_file()?;
+        let request = data
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == request_id)
+            .ok_or_else(|| format!("decision request '{}' not found", request_id))?;
+        if !request.resolved {
+            return Err(format!(
+                "decision request '{}' is not resolved — nothing to roll back",
+                request_id
+            ));
+        }
+        let prior = request.resolution.clone().unwrap_or_default();
+        request.last_failed_resolution = Some(format!(
+            "'{}' rejected: {}",
+            prior, reason
+        ));
+        request.resolved = false;
+        request.resolution = None;
+        request.resolved_by = None;
+        request.resolved_at = None;
         let updated = request.clone();
         write_file(&mut data)?;
         Ok(updated)

@@ -220,7 +220,11 @@
     "globalOff": "Master OFF",
     "globalOnTitle": "Runner master switch is ON (click to emergency-stop all auto-claiming)",
     "globalOffTitle": "Runner master switch is OFF (emergency stop active: project switches have no effect)",
-    "projectBlockedByGlobal": "Project is ON, but the master switch (⏻) is OFF — nothing will run"
+    "projectBlockedByGlobal": "Project is ON, but the master switch (⏻) is OFF — nothing will run",
+    "retryBudget": "Retry budget",
+    "budgetExhausted": "exhausted — revise the sealed package to retry",
+    "retriesLeft": "{{count}} auto-retries left",
+    "budgetExhaustedHint": "Auto-retry budget exhausted — revise the sealed package (prepare → validate → seal) to continue"
   },
   "timeline": {
     "undoRemove": "Removed \"{{name}}\"",

@@ -73,6 +73,37 @@ describe("DecisionRequest lifecycle", () => {
     expect(all[0].resolved_by).toBe("user1");
   });
 
+  it("rolls the resolution back when the mapped action fails (S0-B fail-closed)", async () => {
+    // DR references a nonexistent execution → the cancel action genuinely
+    // fails → the decision must NOT stand resolved.
+    const req = await createDecisionRequest({
+      epic_id: "e1",
+      step_id: "s1",
+      execution_id: "exec_ghost",
+      kind: "blocked",
+      question: "cancel?",
+      options: ["cancel"],
+    });
+
+    const result = await resolveDecision(req.request_id, "cancel");
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("rolled back");
+    }
+
+    const stored = await listDecisionRequests({ include_resolved: true });
+    const rolled = stored.find((r) => r.request_id === req.request_id);
+    expect(rolled).toBeTruthy();
+    expect(rolled!.resolved).toBe(false);
+    expect(rolled!.resolution).toBeUndefined();
+    expect(rolled!.last_failed_resolution).toBeTruthy();
+    expect(rolled!.last_failed_resolution).toContain("cancel");
+
+    // After the rollback the request is answerable again.
+    const again = await resolveDecision(req.request_id, "cancel");
+    expect("error" in again).toBe(true);
+  });
+
   it("prevents double resolution", async () => {
     const req = await createDecisionRequest({
       epic_id: "e1",

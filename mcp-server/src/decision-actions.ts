@@ -9,10 +9,17 @@
  *   retry                               → create a child attempt (idempotent,
  *                                         budget-capped, package back to ready)
  *   cancel                              → mark the execution cancelled
- *   revise_package / transfer_manual / reject → cancel the lingering execution
+ *   revise_package / transfer_manual / manual / reject
+ *                                      → cancel the lingering execution
+ *   revise_scope                        → cancel the lingering execution and
+ *                                         keep the package blocked until a NEW
+ *                                         sealed revision (fresh budget)
  *   anything else (validated upstream)  → record only, no automatic action
  *
  * CONTRACT: if the Rust mapping changes, change this file in the same commit.
+ * S0-B fail-closed: when executeDecisionAction returns {error}, the caller
+ * (decision-request.ts resolveDecision) rolls the resolution back — a
+ * decision never stands resolved without its effect.
  */
 
 import { promises as fs } from "node:fs";
@@ -29,6 +36,16 @@ export const RETRYABLE_STATUSES = new Set([
   "timed_out",
   "cancelled",
   "stale",
+]);
+
+/** Outcomes that consume auto-retry budget (mirror of Rust
+ *  execution_store::outcome_counts_budget — S0-C contract). */
+export const BUDGET_COUNTING_OUTCOMES = new Set([
+  "timeout",
+  "cli_failed",
+  "acceptance_failed",
+  "no_diff",
+  "evidence_seal_failed",
 ]);
 
 interface ExecutionRow {
@@ -49,9 +66,25 @@ interface ExecutionRow {
   created_at: number;
   updated_at: number;
   attempt_no?: number;
+  outcome?: string | null;
+  budget_used?: number;
+  budget_charged?: boolean;
   parent_attempt_id?: string;
   bundle_path?: string;
   executor?: string;
+}
+
+/**
+ * Effective budget consumed by this attempt's chain. Legacy rows (terminal,
+ * written before the outcome field existed) fall back to attempt-based
+ * accounting — mirror of Rust execution_store::effective_budget_used.
+ */
+function effectiveBudgetUsed(exec: ExecutionRow): number {
+  const outcomeMissing = exec.outcome === undefined || exec.outcome === null;
+  if (outcomeMissing && (exec.attempt_no ?? 1) > 1) {
+    return (exec.attempt_no ?? 1) - 1;
+  }
+  return exec.budget_used ?? 0;
 }
 
 interface ExecutionsFile {
@@ -98,10 +131,37 @@ export async function executeDecisionAction(
       return cancelExecution(executionId, "cancelled via decision request");
     case "revise_package":
     case "transfer_manual":
+    case "manual":
     case "reject":
       // These need human work outside the Runner — cancel the lingering
       // execution so it doesn't stay in the queue.
       return cancelExecution(executionId, `resolved as '${action}'`);
+    case "revise_scope": {
+      // Safe closure for a ScopeViolation (S0-B): cancel the lingering
+      // execution and keep the package blocked until the operator seals a
+      // NEW revision via prepare → validate → seal (fresh retry budget).
+      const cancelResult = await cancelExecution(
+        executionId,
+        "resolved as revise_scope — awaiting a new package revision",
+      );
+      if ("error" in cancelResult) return cancelResult;
+      // Keep the package blocked (defensive: it already is after the
+      // violation; an execution-row miss must not silently re-arm it).
+      const keepBlocked = await withFileLock(executionsPath(), async () => {
+        const data = await readExecutionsLocked();
+        const exec = data.executions.find((e) => e.id === executionId);
+        return exec?.package_id ?? null;
+      }).catch(() => null);
+      if (keepBlocked) {
+        const blocked = await updatePackageStatus(keepBlocked, "blocked");
+        if ("error" in blocked) return { error: blocked.error };
+      }
+      return {
+        ok: true as const,
+        detail:
+          "execution cancelled; package stays blocked — prepare → validate → seal a new package revision (its retry budget is independent)",
+      };
+    }
     default:
       return { ok: true, detail: "recorded (no automatic action)" };
   }
@@ -126,11 +186,14 @@ async function retryAttempt(parentId: string): Promise<DecisionActionResult> {
       return { ok: true as const, detail: `retry already scheduled (${existing.id})` };
     }
     // Budget cap INSIDE the lock (re-read the package now) — no snapshot
-    // TOCTOU between the cap check and the child creation.
+    // TOCTOU between the cap check and the child creation. S0-C: the cap
+    // counts CONSUMED BUDGET, not attempt numbers — human cancels/pauses
+    // and preflight/policy blocks leave the budget untouched.
     const pkgResult = await getPackage(parent.package_id);
     if ("error" in pkgResult) return { error: pkgResult.error };
     const maxAttempts = Math.max(1, pkgResult.pkg.executor?.max_attempts ?? 2);
-    if ((parent.attempt_no ?? 1) >= maxAttempts) {
+    const parentBudget = effectiveBudgetUsed(parent);
+    if (parentBudget >= maxAttempts) {
       return {
         error: `maximum attempts reached (${maxAttempts}) — revise the package before retrying`,
       };
@@ -155,6 +218,9 @@ async function retryAttempt(parentId: string): Promise<DecisionActionResult> {
       created_at: now,
       updated_at: now,
       attempt_no: (parent.attempt_no ?? 1) + 1,
+      outcome: null,
+      budget_used: parentBudget,
+      budget_charged: false,
       parent_attempt_id: parent.id,
     });
     await writeExecutionsLocked(data);
@@ -166,7 +232,10 @@ async function retryAttempt(parentId: string): Promise<DecisionActionResult> {
 
 /** Mirror of Rust execution_store::release_lease(_, Cancelled, msg) —
  *  including the terminal-evidence guard: never overwrite a truly terminal
- *  state (passed/failed/cancelled/timed_out). */
+ *  state (passed/failed/cancelled/timed_out). Aligned with the Rust side
+ *  (commands.rs cancel_execution_for_decision), a terminal execution is an
+ *  IDEMPOTENT no-op, not an action failure — fail-closed rollback must not
+ *  trigger when there is simply nothing left to cancel. */
 async function cancelExecution(
   executionId: string,
   message: string,
@@ -177,7 +246,8 @@ async function cancelExecution(
     if (!exec) return { error: `execution '${executionId}' not found` };
     if (["passed", "failed", "cancelled", "timed_out"].includes(exec.status)) {
       return {
-        error: `execution '${executionId}' is already terminal (${exec.status}) — refusing to overwrite`,
+        ok: true as const,
+        detail: `execution '${executionId}' already terminal (${exec.status}) — refusing to overwrite, nothing to cancel`,
       };
     }
     exec.status = "cancelled";
@@ -185,6 +255,6 @@ async function cancelExecution(
     exec.last_error = message;
     exec.updated_at = Math.floor(Date.now() / 1000);
     await writeExecutionsLocked(data);
-    return { ok: true as const, detail: `execution ${executionId} cancelled` };
+    return { ok: true, detail: `execution ${executionId} cancelled` };
   }).catch((err: Error) => ({ error: err.message }) as DecisionActionResult);
 }
