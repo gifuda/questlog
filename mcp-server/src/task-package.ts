@@ -25,12 +25,25 @@ import path from "node:path";
 export const SCHEMA_VERSION = 1 as const;
 
 export interface TaskScope {
-  /** Glob patterns for paths the executor MAY modify. */
+  /** Glob patterns for paths the executor MAY modify (existing files). */
   allowed_paths: string[];
+  /**
+   * TaskScope v2 (S3): glob patterns for paths the executor MAY CREATE.
+   * Empty/absent on v1 packages — creation then falls back to
+   * allowed_paths (unchanged v1 behaviour). Creation rights never apply to
+   * a file that already exists in the base tree.
+   */
+  create_paths?: string[];
   /** Glob patterns for paths the executor MUST NOT touch. */
   forbidden_paths: string[];
-  /** Maximum number of files the executor may change. */
+  /** Maximum number of files the executor may change — the LAST-RESORT
+   *  breaker against runaway formatters/generators, not a work quota. */
   max_changed_files: number;
+  /** S3 three-tier semantics: exceeding the expected estimate is only
+   *  recorded; exceeding the warn threshold annotates the bundle and the
+   *  candidate but does NOT block; only max trips the breaker. */
+  expected_changed_files?: number;
+  warn_changed_files?: number;
 }
 
 export interface Precondition {
@@ -193,6 +206,35 @@ export function validatePackageContent(pkg: Partial<TaskPackage>): ValidationIss
     }
     if (pkg.scope.max_changed_files < 1) {
       issues.push({ field: "scope.max_changed_files", message: "must be ≥ 1", severity: "error" });
+    }
+    // S3 (TaskScope v2): repository-wide creation rights are forbidden — a
+    // pattern of "**" or starting with "**/" grants create access everywhere
+    // and must be narrowed to an explicit subtree (e.g. "docs/**").
+    for (const pattern of pkg.scope.create_paths ?? []) {
+      if (pattern === "**" || pattern.startsWith("**/")) {
+        issues.push({
+          field: "scope.create_paths",
+          message: `repository-wide creation pattern '${pattern}' is forbidden — list an explicit subtree instead`,
+          severity: "error",
+        });
+      }
+    }
+    // Three-tier count semantics must be monotonically ordered.
+    const expected = pkg.scope.expected_changed_files;
+    const warn = pkg.scope.warn_changed_files;
+    if (expected !== undefined && warn !== undefined && expected > warn) {
+      issues.push({
+        field: "scope.expected_changed_files",
+        message: `expected (${expected}) must be ≤ warn (${warn})`,
+        severity: "error",
+      });
+    }
+    if (warn !== undefined && warn > pkg.scope.max_changed_files) {
+      issues.push({
+        field: "scope.warn_changed_files",
+        message: `warn (${warn}) must be ≤ max (${pkg.scope.max_changed_files})`,
+        severity: "error",
+      });
     }
   } else {
     issues.push({ field: "scope", message: "scope is required", severity: "error" });

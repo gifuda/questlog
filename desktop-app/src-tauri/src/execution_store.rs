@@ -1048,8 +1048,14 @@ pub struct TaskPackageSummary {
     pub base_sha: String,
     pub objective: String,
     pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub create_paths: Vec<String>,
     pub forbidden_paths: Vec<String>,
     pub max_changed_files: u32,
+    #[serde(default)]
+    pub expected_changed_files: Option<u32>,
+    #[serde(default)]
+    pub warn_changed_files: Option<u32>,
     pub executor_preferred: String,
     pub executor_fallbacks: Vec<String>,
     /// Executor policy fields consumed by the Runner (F7 complete).
@@ -1118,10 +1124,18 @@ pub struct RawTaskPackage {
 pub struct RawScope {
     #[serde(default)]
     pub allowed_paths: Vec<String>,
+    /// S3 (TaskScope v2): creation rights. Empty on v1 packages — creation
+    /// then falls back to allowed_paths (today's behaviour, unchanged).
+    #[serde(default)]
+    pub create_paths: Vec<String>,
     #[serde(default)]
     pub forbidden_paths: Vec<String>,
     #[serde(default)]
     pub max_changed_files: u32,
+    #[serde(default)]
+    pub expected_changed_files: Option<u32>,
+    #[serde(default)]
+    pub warn_changed_files: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1192,8 +1206,11 @@ impl From<RawTaskPackage> for TaskPackageSummary {
             base_sha: raw.base_sha,
             objective: raw.objective,
             allowed_paths: raw.scope.allowed_paths,
+            create_paths: raw.scope.create_paths,
             forbidden_paths: raw.scope.forbidden_paths,
             max_changed_files: raw.scope.max_changed_files,
+            expected_changed_files: raw.scope.expected_changed_files,
+            warn_changed_files: raw.scope.warn_changed_files,
             executor_preferred: raw.executor.preferred,
             executor_fallbacks: raw.executor.fallbacks,
             sandbox: raw.executor.sandbox,

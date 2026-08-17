@@ -539,15 +539,76 @@ pub enum ChangedPathCategory {
     ForbiddenControlPlane,
     /// Matches a sealed forbidden pattern (payload = the pattern).
     Forbidden(String),
-    /// Not covered by any allowed pattern.
-    OutOfScope,
+    /// S3 v2: exists in the base tree but has no modification rights —
+    /// create rights never apply to an existing file.
+    UnauthorizedModify,
+    /// S3 v2: a new path with no creation rights.
+    UnauthorizedCreate,
     /// Inside the sealed scope.
     InScope,
 }
 
+/// The base-tree file set — the FACT SOURCE for the modify/create split
+/// (S3 TaskScope v2): a path present in the base tree needs modification
+/// rights; an absent path needs creation rights. Fetched in ONE
+/// `git ls-tree` call and queried per changed path in O(1).
+pub fn base_tree_files(worktree: &Path, base_sha: &str) -> Result<std::collections::HashSet<String>, String> {
+    let output = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", base_sha])
+        .current_dir(worktree)
+        .output()
+        .map_err(|e| format!("git ls-tree: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-tree failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+/// S3 three-tier file-count semantics. `max` stays the last-resort circuit
+/// breaker against runaway formatters/generators; `warn` only annotates the
+/// bundle and the candidate; `expected` is recorded, never enforced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeVerdict {
+    Ok,
+    OverExpected,
+    OverWarn,
+    OverMax,
+}
+
+pub fn scope_size_verdict(
+    total: usize,
+    expected: Option<u32>,
+    warn: Option<u32>,
+    max: usize,
+) -> SizeVerdict {
+    if total > max {
+        return SizeVerdict::OverMax;
+    }
+    if let Some(warn) = warn {
+        if total > warn as usize {
+            return SizeVerdict::OverWarn;
+        }
+    }
+    if let Some(expected) = expected {
+        if total > expected as usize {
+            return SizeVerdict::OverExpected;
+        }
+    }
+    SizeVerdict::Ok
+}
+
 pub fn classify_path_in_scope(
     path: &str,
+    exists_in_base: bool,
     allowed_patterns: &[String],
+    create_patterns: &[String],
     forbidden_patterns: &[String],
 ) -> ChangedPathCategory {
     if is_control_plane_path(path) || is_runner_internal_path(path) {
@@ -558,28 +619,49 @@ pub fn classify_path_in_scope(
             return ChangedPathCategory::Forbidden(pattern.clone());
         }
     }
-    if allowed_patterns.iter().any(|p| glob_match(p, path)) {
-        ChangedPathCategory::InScope
+    // TaskScope v2: modification and creation are separate rights, decided
+    // by the base tree. create_patterns matching an EXISTING file does not
+    // confer modification rights ("create cannot modify a file that already
+    // exists"). Empty create_patterns (v1 packages) falls back to
+    // allowed_paths for creation — today's behaviour, unchanged.
+    if exists_in_base {
+        if allowed_patterns.iter().any(|p| glob_match(p, path)) {
+            ChangedPathCategory::InScope
+        } else {
+            ChangedPathCategory::UnauthorizedModify
+        }
     } else {
-        ChangedPathCategory::OutOfScope
+        let create_ok = if create_patterns.is_empty() {
+            allowed_patterns.iter().any(|p| glob_match(p, path))
+        } else {
+            create_patterns.iter().any(|p| glob_match(p, path))
+                || allowed_patterns.iter().any(|p| glob_match(p, path))
+        };
+        if create_ok {
+            ChangedPathCategory::InScope
+        } else {
+            ChangedPathCategory::UnauthorizedCreate
+        }
     }
 }
 
+/// S3: path violations are reported FIRST (the operator must see the exact
+/// offending path before any count judgement); only when every path is
+/// inside its rights does the extreme-count breaker fire. Renames surface
+/// as two lines under `git diff --name-only` (old deleted + new added) and
+/// therefore pass BOTH gates — delete-side needs modify rights on the old
+/// path, add-side needs create rights on the new one.
 pub fn verify_changed_paths_in_scope(
     changed: &[String],
+    base_tree: &std::collections::HashSet<String>,
     allowed_patterns: &[String],
+    create_patterns: &[String],
     forbidden_patterns: &[String],
     max_files: usize,
 ) -> Result<(), ScopeViolation> {
-    if changed.len() > max_files {
-        return Err(ScopeViolation::TooManyFiles {
-            count: changed.len(),
-            max: max_files,
-        });
-    }
-
     for path in changed {
-        match classify_path_in_scope(path, allowed_patterns, forbidden_patterns) {
+        let exists_in_base = base_tree.contains(path);
+        match classify_path_in_scope(path, exists_in_base, allowed_patterns, create_patterns, forbidden_patterns) {
             ChangedPathCategory::ForbiddenControlPlane => {
                 return Err(ScopeViolation::ForbiddenPath {
                     path: path.clone(),
@@ -592,34 +674,75 @@ pub fn verify_changed_paths_in_scope(
                     pattern,
                 });
             }
-            ChangedPathCategory::OutOfScope => {
-                return Err(ScopeViolation::OutOfScope {
+            ChangedPathCategory::UnauthorizedModify => {
+                return Err(ScopeViolation::UnauthorizedModify {
                     path: path.clone(),
                     allowed: allowed_patterns.to_vec(),
+                });
+            }
+            ChangedPathCategory::UnauthorizedCreate => {
+                return Err(ScopeViolation::UnauthorizedCreate {
+                    path: path.clone(),
+                    create: if create_patterns.is_empty() {
+                        allowed_patterns.to_vec()
+                    } else {
+                        create_paths_view(create_patterns, allowed_patterns)
+                    },
                 });
             }
             ChangedPathCategory::InScope => {}
         }
     }
 
+    if changed.len() > max_files {
+        return Err(ScopeViolation::TooManyFiles {
+            count: changed.len(),
+            max: max_files,
+        });
+    }
+
     Ok(())
+}
+
+/// Show both creation sources in the violation message (create set plus the
+/// v1 fallback view) so the operator sees every legitimate way forward.
+fn create_paths_view(create: &[String], allowed: &[String]) -> Vec<String> {
+    let mut view = create.to_vec();
+    for pattern in allowed {
+        if !view.contains(pattern) {
+            view.push(pattern.clone());
+        }
+    }
+    view
 }
 
 #[derive(Debug)]
 pub enum ScopeViolation {
-    OutOfScope { path: String, allowed: Vec<String> },
     ForbiddenPath { path: String, pattern: String },
+    UnauthorizedModify { path: String, allowed: Vec<String> },
+    UnauthorizedCreate { path: String, create: Vec<String> },
     TooManyFiles { count: usize, max: usize },
 }
 
 impl std::fmt::Display for ScopeViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::OutOfScope { path, allowed } => {
-                write!(f, "path '{}' is not in allowed scope: {:?}", path, allowed)
-            }
             Self::ForbiddenPath { path, pattern } => {
                 write!(f, "path '{}' matches forbidden pattern '{}'", path, pattern)
+            }
+            Self::UnauthorizedModify { path, allowed } => {
+                write!(
+                    f,
+                    "existing path '{}' has no modification rights (allowed/modify scope: {:?}); create rights do not apply to existing files",
+                    path, allowed
+                )
+            }
+            Self::UnauthorizedCreate { path, create } => {
+                write!(
+                    f,
+                    "new path '{}' has no creation rights (create scope: {:?})",
+                    path, create
+                )
             }
             Self::TooManyFiles { count, max } => {
                 write!(f, "changed {} files, max allowed is {}", count, max)
@@ -911,21 +1034,187 @@ mod tests {
     }
 
     #[test]
-    fn scope_violation_on_out_of_scope() {
+    fn scope_violation_on_unauthorized_create() {
+        // New path (absent from the base tree) without creation rights.
         let result = verify_changed_paths_in_scope(
             &["src/foo.ts".to_string(), "secrets/key.txt".to_string()],
+            &std::collections::HashSet::new(),
             &["src/**".to_string()],
+            &[],
             &[],
             10,
         );
-        assert!(matches!(result, Err(ScopeViolation::OutOfScope { .. })));
+        assert!(matches!(
+            result,
+            Err(ScopeViolation::UnauthorizedCreate { .. })
+        ));
+    }
+
+    #[test]
+    fn scope_violation_on_unauthorized_modify() {
+        // Existing path (present in the base tree) whose only rights are
+        // creation rights — create must never confer modification.
+        let base: std::collections::HashSet<String> =
+            ["config.ts".to_string()].into_iter().collect();
+        let result = verify_changed_paths_in_scope(
+            &["config.ts".to_string()],
+            &base,
+            &[],
+            &["config.ts".to_string()],
+            &[],
+            10,
+        );
+        assert!(matches!(
+            result,
+            Err(ScopeViolation::UnauthorizedModify { .. })
+        ));
+    }
+
+    #[test]
+    fn create_rights_allow_new_files_v1_fallback_and_v2_split() {
+        // v1 fallback: no create_paths → allowed_paths confer creation.
+        let r = verify_changed_paths_in_scope(
+            &["src/new.ts".to_string()],
+            &std::collections::HashSet::new(),
+            &["src/**".to_string()],
+            &[],
+            &[],
+            10,
+        );
+        assert!(r.is_ok());
+        // v2 split: create_paths present → creation needs the create set…
+        let r = verify_changed_paths_in_scope(
+            &["docs/new.md".to_string()],
+            &std::collections::HashSet::new(),
+            &["src/**".to_string()],
+            &["docs/*.md".to_string()],
+            &[],
+            10,
+        );
+        assert!(r.is_ok());
+        // …and an existing file matching only the create set stays unauthorized.
+        let base: std::collections::HashSet<String> =
+            ["docs/exists.md".to_string()].into_iter().collect();
+        let r = verify_changed_paths_in_scope(
+            &["docs/exists.md".to_string()],
+            &base,
+            &[],
+            &["docs/*.md".to_string()],
+            &[],
+            10,
+        );
+        assert!(matches!(
+            r,
+            Err(ScopeViolation::UnauthorizedModify { .. })
+        ));
+    }
+
+    /// S3: specific path violations are reported BEFORE the count breaker —
+    /// the operator must see the offending path even when the count is also
+    /// over the max.
+    #[test]
+    fn path_violations_reported_before_count_breaker() {
+        let changed: Vec<String> = (0..20).map(|i| format!("out/{i}.txt")).collect();
+        let result = verify_changed_paths_in_scope(
+            &changed,
+            &std::collections::HashSet::new(),
+            &["src/**".to_string()],
+            &[],
+            &[],
+            5,
+        );
+        assert!(
+            matches!(result, Err(ScopeViolation::UnauthorizedCreate { .. })),
+            "expected the path violation, not TooManyFiles: {result:?}"
+        );
+        // Count-only breach (all paths in rights) still fires the breaker.
+        let changed: Vec<String> = (0..7).map(|i| format!("src/f{i}.ts")).collect();
+        let base: std::collections::HashSet<String> = changed.iter().cloned().collect();
+        let result = verify_changed_paths_in_scope(
+            &changed,
+            &base,
+            &["src/**".to_string()],
+            &[],
+            &[],
+            5,
+        );
+        assert!(matches!(result, Err(ScopeViolation::TooManyFiles { .. })));
+    }
+
+    /// S3 three-tier count semantics.
+    #[test]
+    fn scope_size_verdict_tiers() {
+        use super::SizeVerdict;
+        assert_eq!(scope_size_verdict(5, Some(5), Some(8), 10), SizeVerdict::Ok);
+        assert_eq!(
+            scope_size_verdict(6, Some(5), Some(8), 10),
+            SizeVerdict::OverExpected
+        );
+        assert_eq!(
+            scope_size_verdict(9, Some(5), Some(8), 10),
+            SizeVerdict::OverWarn
+        );
+        assert_eq!(
+            scope_size_verdict(11, Some(5), Some(8), 10),
+            SizeVerdict::OverMax
+        );
+        // None tiers never fire; max alone keeps today's behaviour.
+        assert_eq!(scope_size_verdict(9, None, None, 10), SizeVerdict::Ok);
+        assert_eq!(scope_size_verdict(11, None, None, 10), SizeVerdict::OverMax);
+    }
+
+    /// S3: base_tree_files reads the full base tree in one call.
+    #[test]
+    fn base_tree_files_reflects_base_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+        }
+        std::fs::write(repo.join("base-file.ts"), "x").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "base"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let sha = String::from_utf8_lossy(
+            &Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        // Post-base untracked file must NOT appear.
+        std::fs::write(repo.join("later.txt"), "y").unwrap();
+
+        let tree = base_tree_files(repo, &sha).unwrap();
+        assert!(tree.contains("base-file.ts"));
+        assert!(!tree.contains("later.txt"));
     }
 
     #[test]
     fn scope_violation_on_forbidden() {
         let result = verify_changed_paths_in_scope(
             &["src/.env".to_string()],
+            &std::collections::HashSet::new(),
             &["src/**".to_string()],
+            &[],
             &["src/.env".to_string()],
             10,
         );
@@ -935,7 +1224,7 @@ mod tests {
     #[test]
     fn scope_always_rejects_control_plane_files() {
         let changed = vec!["nested/.epics.json".to_string()];
-        let result = verify_changed_paths_in_scope(&changed, &["**".to_string()], &[], 10);
+        let result = verify_changed_paths_in_scope(&changed, &std::collections::HashSet::new(), &["**".to_string()], &[], &[], 10);
         assert!(matches!(result, Err(ScopeViolation::ForbiddenPath { .. })));
     }
 
@@ -1026,7 +1315,7 @@ mod tests {
         );
 
         // Scope check should match with UTF-8 pattern
-        let result = verify_changed_paths_in_scope(&changed, &["文档/**".to_string()], &[], 10);
+        let result = verify_changed_paths_in_scope(&changed, &std::collections::HashSet::new(), &["文档/**".to_string()], &[], &[], 10);
         assert!(
             result.is_ok(),
             "Chinese path should match UTF-8 glob pattern"
@@ -1036,7 +1325,7 @@ mod tests {
     #[test]
     fn scope_violation_on_too_many_files() {
         let changed: Vec<String> = (0..15).map(|i| format!("src/file{i}.ts")).collect();
-        let result = verify_changed_paths_in_scope(&changed, &["src/**".to_string()], &[], 10);
+        let result = verify_changed_paths_in_scope(&changed, &std::collections::HashSet::new(), &["src/**".to_string()], &[], &[], 10);
         assert!(matches!(result, Err(ScopeViolation::TooManyFiles { .. })));
     }
 
@@ -1044,7 +1333,9 @@ mod tests {
     fn scope_ok_for_all_in_scope() {
         let result = verify_changed_paths_in_scope(
             &["src/foo.ts".to_string(), "src/bar.ts".to_string()],
+            &std::collections::HashSet::new(),
             &["src/**".to_string()],
+            &[],
             &[],
             10,
         );
@@ -1063,7 +1354,7 @@ mod tests {
             "mcp-server/node_modules/typescript/lib",
         ] {
             let result =
-                verify_changed_paths_in_scope(&[path.to_string()], &["**".to_string()], &[], 10);
+                verify_changed_paths_in_scope(&[path.to_string()], &std::collections::HashSet::new(), &["**".to_string()], &[], &[], 10);
             assert!(
                 matches!(result, Err(ScopeViolation::ForbiddenPath { .. })),
                 "node_modules path '{}' should be rejected as forbidden, got {:?}",

@@ -187,6 +187,11 @@ pub struct AttemptManifest {
     /// executor was told, distinct from the sealed objective.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_prompt_ref: Option<String>,
+    /// S3: set when the changed-file count exceeded the package's warn
+    /// threshold — the candidate and acceptance still ran; this carries the
+    /// warning into the sealed bundle and the final review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_size_warning: Option<String>,
 
     pub outcome: String,
     /// SHA-256 over all files in the bundle dir at seal time.
@@ -232,6 +237,7 @@ impl AttemptManifest {
             scene_ref: None,
             scene_recovered_from: None,
             task_prompt_ref: None,
+            scope_size_warning: None,
             outcome: "running".to_string(),
             integrity_hash: None,
             created_at: now_ts(),
@@ -336,13 +342,18 @@ const SCENE_UNTRACKED_FILE_CAP: u64 = 50 * 1024 * 1024;
 ///   scene/changed-paths.json — full classification of `changed` (single source:
 ///                             the same get_changed_paths output the scope
 ///                             verifier consumed) + skipped_large list + caps
+#[allow(clippy::too_many_arguments)] // scene capture genuinely needs all of these
 pub fn write_scene_snapshot(
     dir: &Path,
     worktree_path: &Path,
     base_sha: &str,
     changed: &[String],
+    base_tree: &std::collections::HashSet<String>,
     allowed_patterns: &[String],
+    create_patterns: &[String],
     forbidden_patterns: &[String],
+    expected_changed_files: Option<u32>,
+    warn_changed_files: Option<u32>,
     max_changed_files: usize,
 ) -> Result<SceneCapture, String> {
     let git = |args: &[&str]| -> Result<String, String> {
@@ -423,7 +434,9 @@ pub fn write_scene_snapshot(
         .map(|path| {
             let category = crate::runner_git::classify_path_in_scope(
                 path,
+                base_tree.contains(path),
                 allowed_patterns,
+                create_patterns,
                 forbidden_patterns,
             );
             let category_str = match category {
@@ -431,12 +444,18 @@ pub fn write_scene_snapshot(
                     "forbidden_control_plane"
                 }
                 crate::runner_git::ChangedPathCategory::Forbidden(_) => "forbidden",
-                crate::runner_git::ChangedPathCategory::OutOfScope => "out_of_scope",
+                crate::runner_git::ChangedPathCategory::UnauthorizedModify => {
+                    "unauthorized_modify"
+                }
+                crate::runner_git::ChangedPathCategory::UnauthorizedCreate => {
+                    "unauthorized_create"
+                }
                 crate::runner_git::ChangedPathCategory::InScope => "in_scope",
             };
             serde_json::json!({
                 "path": path,
                 "category": category_str,
+                "existed_in_base": base_tree.contains(path),
                 "untracked": untracked_flag(path),
             })
         })
@@ -444,6 +463,8 @@ pub fn write_scene_snapshot(
     let partial = !skipped_large.is_empty();
     let manifest_json = serde_json::json!({
         "total": changed.len(),
+        "expected_changed_files": expected_changed_files,
+        "warn_changed_files": warn_changed_files,
         "max_changed_files": max_changed_files,
         "skipped_large": skipped_large,
         "paths": classified,
@@ -831,8 +852,14 @@ pub struct EnvironmentSnapshot {
 
     // Scope
     pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub create_paths: Vec<String>,
     pub forbidden_paths: Vec<String>,
     pub max_changed_files: u32,
+    #[serde(default)]
+    pub expected_changed_files: Option<u32>,
+    #[serde(default)]
+    pub warn_changed_files: Option<u32>,
 
     // Authority
     pub auto_edit_worktree: bool,
@@ -893,8 +920,11 @@ pub fn generate_environment_snapshot(
         branch: exec.branch.clone(),
         git_clean,
         allowed_paths: pkg.allowed_paths.clone(),
+        create_paths: pkg.create_paths.clone(),
         forbidden_paths: pkg.forbidden_paths.clone(),
         max_changed_files: pkg.max_changed_files,
+        expected_changed_files: pkg.expected_changed_files,
+        warn_changed_files: pkg.warn_changed_files,
         auto_edit_worktree: true,
         auto_commit_candidate: true,
         auto_merge: false,
@@ -1032,8 +1062,12 @@ mod tests {
             repo_path,
             &base_sha,
             &changed,
+            &crate::runner_git::base_tree_files(repo_path, &base_sha).unwrap(),
             &allowed,
             &[],
+            &[],
+            None,
+            None,
             5,
         )
         .unwrap();
@@ -1073,7 +1107,10 @@ mod tests {
         assert_eq!(by_path("src.ts")["category"], "in_scope");
         assert_eq!(by_path("docs/new-note.md")["untracked"], true);
         assert_eq!(by_path("docs/new-note.md")["category"], "in_scope");
-        assert_eq!(by_path("extra.log")["category"], "out_of_scope");
+        // S3 v2: extra.log is a NEW path (post-base commit) without
+        // creation rights — the violation class is unauthorized_create.
+        assert_eq!(by_path("extra.log")["category"], "unauthorized_create");
+        assert_eq!(by_path("extra.log")["existed_in_base"], false);
     }
 
     /// S1: a clean tree with nothing to capture reports None — nothing to
@@ -1101,8 +1138,12 @@ mod tests {
             repo_path,
             &base_sha,
             &[],
+            &crate::runner_git::base_tree_files(repo_path, &base_sha).unwrap(),
             &["src.ts".to_string()],
             &[],
+            &[],
+            None,
+            None,
             5,
         )
         .unwrap();
@@ -1136,8 +1177,12 @@ mod tests {
             repo_path,
             &base_sha,
             &["src.ts".to_string()],
+            &crate::runner_git::base_tree_files(repo_path, &base_sha).unwrap(),
             &["src.ts".to_string()],
             &[],
+            &[],
+            None,
+            None,
             5,
         )
         .unwrap();
@@ -1203,8 +1248,12 @@ mod tests {
             a,
             &base_sha,
             &changed,
+            &crate::runner_git::base_tree_files(a, &base_sha).unwrap(),
             &["src.ts".to_string()],
             &[],
+            &[],
+            None,
+            None,
             5,
         )
         .unwrap();
@@ -1258,8 +1307,12 @@ mod tests {
             a,
             &base_sha,
             &["src.ts".to_string()],
+            &crate::runner_git::base_tree_files(a, &base_sha).unwrap(),
             &["src.ts".to_string()],
             &[],
+            &[],
+            None,
+            None,
             5,
         )
         .unwrap();
@@ -1287,8 +1340,11 @@ mod tests {
             base_sha: "abc123".to_string(),
             objective: "test objective".to_string(),
             allowed_paths: vec!["src.ts".to_string()],
+            create_paths: vec![],
             forbidden_paths: vec![],
             max_changed_files: 5,
+            expected_changed_files: None,
+            warn_changed_files: None,
             executor_preferred: "zcode".to_string(),
             executor_fallbacks: vec![],
             sandbox: "workspace-write".to_string(),

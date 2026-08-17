@@ -111,6 +111,58 @@ describe("validatePackageContent", () => {
     expect(issues.some((i) => i.field === "scope.allowed_paths")).toBe(true);
   });
 
+  // ─── S3 (TaskScope v2) ───
+
+  it("rejects repository-wide creation patterns in create_paths", () => {
+    for (const pattern of ["**", "**/*.log"]) {
+      const issues = validatePackageContent({
+        objective: "do X",
+        epic_id: "e1",
+        step_id: "s1",
+        scope: {
+          allowed_paths: ["src/**"],
+          create_paths: [pattern],
+          forbidden_paths: [],
+          max_changed_files: 5,
+        },
+      });
+      expect(
+        issues.some((i) => i.field === "scope.create_paths" && i.severity === "error"),
+        `pattern '${pattern}' must be rejected`,
+      ).toBe(true);
+    }
+    // Subtree creation patterns stay legal.
+    const ok = validatePackageContent({
+      objective: "do X",
+      epic_id: "e1",
+      step_id: "s1",
+      scope: {
+        allowed_paths: ["src/**"],
+        create_paths: ["docs/**"],
+        forbidden_paths: [],
+        max_changed_files: 5,
+      },
+    });
+    expect(ok.some((i) => i.field === "scope.create_paths")).toBe(false);
+  });
+
+  it("enforces expected ≤ warn ≤ max ordering", () => {
+    const issues = validatePackageContent({
+      objective: "do X",
+      epic_id: "e1",
+      step_id: "s1",
+      scope: {
+        allowed_paths: ["src/**"],
+        forbidden_paths: [],
+        max_changed_files: 10,
+        expected_changed_files: 20,
+        warn_changed_files: 15,
+      },
+    });
+    expect(issues.some((i) => i.field === "scope.expected_changed_files")).toBe(true);
+    expect(issues.some((i) => i.field === "scope.warn_changed_files")).toBe(true);
+  });
+
   it("rejects auto_merge, auto_push, auto_deploy in authority", () => {
     const issues = validatePackageContent({
       objective: "do X",

@@ -372,11 +372,18 @@ impl Runner {
                     execution_id,
                     violation,
                 }) => {
+                    let outcome_kind =
+                        if matches!(violation, runner_git::ScopeViolation::TooManyFiles { .. }) {
+                            // S3: count breach — never a scene-recovery source.
+                            "scope_count_violation"
+                        } else {
+                            "scope_violation"
+                        };
                     execution_store::finish_execution(
                         execution_id,
                         ExecutionStatus::Blocked,
                         Some(&violation.to_string()),
-                        Some("scope_violation"),
+                        Some(outcome_kind),
                     )?;
                     execution_store::mark_package_status(&pkg.package_id, "blocked")?;
                 }
@@ -1187,10 +1194,16 @@ impl Runner {
             return Ok(result);
         }
 
-        // 6. Verify scope (circuit breaker) — use package's allowed/forbidden paths
+        // 6. Verify scope (circuit breaker) — path rights are the HARD gate
+        // (modify vs create decided by the base tree); file COUNT uses the
+        // S3 three-tier semantics: max is the last-resort breaker, warn only
+        // annotates the bundle and the candidate, expected is recorded.
+        let base_tree = runner_git::base_tree_files(&worktree_path, &pkg.base_sha)?;
         if let Err(violation) = runner_git::verify_changed_paths_in_scope(
             &changed,
+            &base_tree,
             &pkg.allowed_paths,
+            &pkg.create_paths,
             &pkg.forbidden_paths,
             pkg.max_changed_files as usize,
         ) {
@@ -1200,6 +1213,34 @@ impl Runner {
             };
             let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
             return Ok(result);
+        }
+        // Three-tier count semantics (path rights already passed): a warn
+        // breach does NOT block — the candidate and acceptance continue,
+        // carrying a visible scope-size warning for the final review.
+        match runner_git::scope_size_verdict(
+            changed.len(),
+            pkg.expected_changed_files,
+            pkg.warn_changed_files,
+            pkg.max_changed_files as usize,
+        ) {
+            runner_git::SizeVerdict::OverWarn => {
+                let warning = format!(
+                    "{} files changed exceeds the warn threshold ({}) — max breaker is {}",
+                    changed.len(),
+                    pkg.warn_changed_files.unwrap_or(0),
+                    pkg.max_changed_files
+                );
+                log::warn!("Runner: scope-size warning for {}: {warning}", exec.id);
+                manifest.scope_size_warning = Some(warning);
+            }
+            runner_git::SizeVerdict::OverExpected => {
+                log::info!(
+                    "Runner: {} files changed exceeds the expected estimate ({})",
+                    changed.len(),
+                    pkg.expected_changed_files.unwrap_or(0)
+                );
+            }
+            _ => {}
         }
 
         match execution_store::get_execution(&exec.id)?.status {
@@ -1266,6 +1307,12 @@ impl Runner {
                     "QuestLog-Step": pkg.step_id,
                     "QuestLog-Package": format!("{}@{}", pkg.package_id, pkg.plan_revision),
                     "QuestLog-Execution": exec.id,
+                    // S3: warn-breach marker so the final review sees the
+                    // scope-size warning on the candidate itself.
+                    "QuestLog-ScopeWarning": manifest
+                        .scope_size_warning
+                        .clone()
+                        .unwrap_or_else(|| "none".to_string()),
                 }),
             },
         )?;
@@ -1386,8 +1433,13 @@ impl Runner {
                         worktree,
                         &pkg.base_sha,
                         &changed,
+                        &runner_git::base_tree_files(worktree, &pkg.base_sha)
+                            .unwrap_or_default(),
                         &pkg.allowed_paths,
+                        &pkg.create_paths,
                         &pkg.forbidden_paths,
+                        pkg.expected_changed_files,
+                        pkg.warn_changed_files,
                         pkg.max_changed_files as usize,
                     ) {
                         Ok(attempt_bundle::SceneCapture::None) => Some(true),
@@ -1478,7 +1530,15 @@ impl Runner {
                 ("acceptance_failed", Some(reason.clone()))
             }
             RunResult::ScopeViolation { violation, .. } => {
-                ("scope_violation", Some(violation.to_string()))
+                // S3: a count breach is NOT a path-rights breach — the
+                // outcomes differ so scene recovery (S2) only ever selects
+                // path violations (recovering an over-count scene would just
+                // re-trip the breaker).
+                if matches!(violation, runner_git::ScopeViolation::TooManyFiles { .. }) {
+                    ("scope_count_violation", Some(violation.to_string()))
+                } else {
+                    ("scope_violation", Some(violation.to_string()))
+                }
             }
             RunResult::BaseShaDrift {
                 expected, actual, ..
@@ -2983,8 +3043,11 @@ mod tests {
             base_sha: "abc".to_string(),
             objective: "test".to_string(),
             allowed_paths: vec!["src/**".to_string()],
+            create_paths: vec![],
             forbidden_paths: vec![],
             max_changed_files: 1,
+            expected_changed_files: None,
+            warn_changed_files: None,
             executor_preferred: "zcode".to_string(),
             executor_fallbacks: vec![],
             sandbox: "workspace-write".to_string(),
@@ -3059,9 +3122,9 @@ mod tests {
             &pkg,
             RunResult::ScopeViolation {
                 execution_id: exec_id.clone(),
-                violation: runner_git::ScopeViolation::OutOfScope {
+                violation: runner_git::ScopeViolation::UnauthorizedCreate {
                     path: "outside.txt".to_string(),
-                    allowed: pkg.allowed_paths.clone(),
+                    create: pkg.allowed_paths.clone(),
                 },
             },
             None,
@@ -3083,7 +3146,7 @@ mod tests {
         let classes =
             std::fs::read_to_string(bundle_dir.path().join("scene/changed-paths.json"))
                 .unwrap();
-        assert!(classes.contains("out_of_scope"), "classes: {classes}");
+        assert!(classes.contains("unauthorized_create"), "classes: {classes}");
         // Execution row flagged preserved → the cleanup gate may clear the
         // worktree (evidence is complete).
         let exec = crate::execution_store::get_execution(&exec_id).unwrap();
@@ -3101,8 +3164,11 @@ mod tests {
             base_sha: "abc".to_string(),
             objective: "test".to_string(),
             allowed_paths: vec!["src/**".to_string()],
+            create_paths: vec![],
             forbidden_paths: vec![],
             max_changed_files: 1,
+            expected_changed_files: None,
+            warn_changed_files: None,
             executor_preferred: "zcode".to_string(),
             executor_fallbacks: vec![],
             sandbox: "workspace-write".to_string(),
@@ -3309,8 +3375,11 @@ mod tests {
             base_sha: base_sha.to_string(),
             objective: "test".to_string(),
             allowed_paths: vec!["src/**".to_string()],
+            create_paths: vec![],
             forbidden_paths: vec![],
             max_changed_files: 5,
+            expected_changed_files: None,
+            warn_changed_files: None,
             executor_preferred: "zcode".to_string(),
             executor_fallbacks: vec![],
             sandbox: "workspace-write".to_string(),
@@ -3570,8 +3639,11 @@ mod tests {
             base_sha: stale_sha,
             objective: "test".to_string(),
             allowed_paths: vec!["src/**".to_string()],
+            create_paths: vec![],
             forbidden_paths: vec![],
             max_changed_files: 5,
+            expected_changed_files: None,
+            warn_changed_files: None,
             executor_preferred: "zcode".to_string(),
             executor_fallbacks: vec![],
             sandbox: "workspace-write".to_string(),
@@ -3651,8 +3723,11 @@ mod tests {
             base_sha: head_sha,
             objective: "test".to_string(),
             allowed_paths: vec!["src/**".to_string()],
+            create_paths: vec![],
             forbidden_paths: vec![],
             max_changed_files: 5,
+            expected_changed_files: None,
+            warn_changed_files: None,
             executor_preferred: "zcode".to_string(),
             executor_fallbacks: vec![],
             sandbox: "workspace-write".to_string(),
