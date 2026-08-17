@@ -107,6 +107,29 @@ export interface PrepareResult {
  * The server resolves canonical project path, git root, and base SHA.
  * Returns a draft package with validation issues to fix before sealing.
  */
+/** S7-followup: the human-readable package number. Same step → same number
+ *  (its revision chain is ONE package in the operator's mental model); the
+ *  global counter otherwise advances. */
+async function nextDisplayNo(stepId: string): Promise<number> {
+  const { getPackagesForStep } = await import("./runtime-store.js");
+  const mine = await getPackagesForStep(stepId);
+  if (!("error" in (mine as { error?: string })) && Array.isArray(mine) && mine.length > 0) {
+    const nums = (mine as { display_no?: number }[]).map((p) => p.display_no).filter((n): n is number => typeof n === "number");
+    if (nums.length > 0) return Math.max(...nums);
+  }
+  // Global max across every stored package (raw file read — no scoped API).
+  const raw = await (await import("node:fs/promises")).readFile(
+    `${process.env.QUESTLOG_RUNTIME ?? `${process.env.HOME}/questlog-runtime`}/packages.json`,
+    "utf-8",
+  ).catch(() => null);
+  if (!raw) return 1;
+  const parsed = JSON.parse(raw) as { packages?: { display_no?: number }[] };
+  const all = (parsed.packages ?? [])
+    .map((p) => p.display_no)
+    .filter((n): n is number => typeof n === "number");
+  return all.length > 0 ? Math.max(...all) + 1 : 1;
+}
+
 export async function prepareTaskPackage(
   cwd: string,
   input: PrepareInput,
@@ -171,11 +194,16 @@ export async function prepareTaskPackage(
 
   // Build draft package
   const packageId = `pkg_${crypto.randomUUID()}`;
+  // Human-readable package number: stable across plan revisions of the same
+  // package_id (a re-prepare of the same step keeps its number); a brand-new
+  // package takes the global max + 1.
+  const displayNo = await nextDisplayNo(input.step_id);
   const draftPkg: TaskPackage = {
     schema_version: SCHEMA_VERSION,
     package_id: packageId,
     epic_id: input.epic_id,
     step_id: input.step_id,
+    display_no: displayNo,
     plan_revision: 1,
     project_path: projectPath,
     repo_root: repoRoot,

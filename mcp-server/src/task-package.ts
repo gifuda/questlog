@@ -108,6 +108,9 @@ export type ExecutorKind = "codex" | "zcode" | "manual";
 export interface TaskPackage {
   schema_version: typeof SCHEMA_VERSION;
   package_id: string;
+  /** Human-readable package number, stable across plan revisions
+   *  of the same package_id (assigned by prepare, indexed for the UI). */
+  display_no?: number;
   epic_id: string;
   step_id: string;
   /** Incremented on every field change; old revisions are superseded. */

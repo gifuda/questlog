@@ -107,12 +107,20 @@ pub struct Execution {
     /// the get_executions command from the package's max_attempts cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries_remaining: Option<u32>,
+    /// VIEW-ONLY (never persisted): human-readable package number, filled by
+    /// the get_executions command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_display_no: Option<u32>,
     /// S1: whether the attempt's full worktree scene was captured into the
     /// bundle before any worktree-clearing terminal. Some(false) → the
     /// worktree IS the remaining evidence and must be kept. None = not
     /// applicable (no worktree yet, e.g. preflight/policy/cli-probe paths).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene_preserved: Option<bool>,
+    /// S2: when this attempt recovered a previous ScopeViolation scene into
+    /// its worktree, the source execution id. Inherited by retry children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_recovered_from: Option<String>,
     /// Parent execution ID (for retries). None for first attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_attempt_id: Option<String>,
@@ -312,7 +320,9 @@ pub fn enqueue_execution_with_parent(
         budget_used: 0,
         budget_charged: false,
         retries_remaining: None,
+        package_display_no: None,
         scene_preserved: None,
+        scene_recovered_from: None,
         parent_attempt_id: parent_attempt_id.map(|s| s.to_string()),
         bundle_path: None,
         executor: None,
@@ -431,7 +441,9 @@ pub fn claim_package(
             budget_used: 0,
             budget_charged: false,
             retries_remaining: None,
+            package_display_no: None,
             scene_preserved: None,
+            scene_recovered_from: None,
             parent_attempt_id: None,
             bundle_path: None,
             executor: None,
@@ -830,6 +842,9 @@ pub fn update_execution(execution_id: &str, updates: ExecutionUpdates) -> Result
         if let Some(scene_preserved) = updates.scene_preserved {
             exec.scene_preserved = Some(scene_preserved);
         }
+        if let Some(recovered) = updates.scene_recovered_from {
+            exec.scene_recovered_from = Some(recovered);
+        }
         exec.updated_at = now;
         Ok(())
     })?;
@@ -846,6 +861,7 @@ pub struct ExecutionUpdates {
     pub bundle_path: Option<String>,
     pub executor: Option<String>,
     pub scene_preserved: Option<bool>,
+    pub scene_recovered_from: Option<String>,
 }
 
 // ─── Stale lease detection and cleanup ───
@@ -994,7 +1010,10 @@ pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
             budget_used: parent_budget,
             budget_charged: false,
             retries_remaining: None,
+            package_display_no: None,
             scene_preserved: None,
+            // Retry children physically carry the recovered worktree.
+            scene_recovered_from: parent.scene_recovered_from.clone(),
             parent_attempt_id: Some(parent.id.clone()),
             bundle_path: None,
             executor: None,
@@ -1047,6 +1066,10 @@ pub struct TaskPackageSummary {
     pub repo_root: String,
     pub base_sha: String,
     pub objective: String,
+    /// Human-readable package number assigned by the publish/prepare gate
+    /// (stable across plan revisions of the same package_id).
+    #[serde(default)]
+    pub display_no: Option<u32>,
     pub allowed_paths: Vec<String>,
     #[serde(default)]
     pub create_paths: Vec<String>,
@@ -1103,6 +1126,9 @@ pub struct RawTaskPackage {
     pub repo_root: String,
     pub base_sha: String,
     pub objective: String,
+    /// Human-readable package number (stable across plan revisions).
+    #[serde(default)]
+    pub display_no: Option<u32>,
     pub scope: RawScope,
     pub executor: RawExecutor,
     pub acceptance: Vec<RawAcceptance>,
@@ -1205,6 +1231,7 @@ impl From<RawTaskPackage> for TaskPackageSummary {
             repo_root: raw.repo_root,
             base_sha: raw.base_sha,
             objective: raw.objective,
+            display_no: raw.display_no,
             allowed_paths: raw.scope.allowed_paths,
             create_paths: raw.scope.create_paths,
             forbidden_paths: raw.scope.forbidden_paths,
@@ -1295,6 +1322,31 @@ pub fn find_recoverable_scene(
         })
         .max_by_key(|e| e.updated_at)
         .map(|e| e.id.clone())
+}
+
+/// One-shot map package_id → display_no (highest plan_revision wins) —
+/// feeds the get_executions join so the UI can show the human-readable
+/// package number on every execution row.
+pub fn display_nos_by_package() -> Result<std::collections::HashMap<String, u32>, String> {
+    let path = packages_path();
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read packages.json: {e}"))?;
+    let file: PackagesFile =
+        serde_json::from_str(&raw).map_err(|e| format!("parse packages.json: {e}"))?;
+    let mut best: std::collections::HashMap<String, (u32, u32)> =
+        std::collections::HashMap::new();
+    for package in file.packages {
+        let Some(no) = package.display_no else { continue };
+        match best.get(&package.package_id) {
+            Some((rev, _)) if *rev >= package.plan_revision => {}
+            _ => {
+                best.insert(package.package_id, (package.plan_revision, no));
+            }
+        }
+    }
+    Ok(best.into_iter().map(|(id, (_, no))| (id, no)).collect())
 }
 
 /// One-shot map package_id → max_attempts (highest plan_revision wins).
@@ -1758,6 +1810,47 @@ mod tests {
         assert_eq!(packages[0].max_attempts, 2);
     }
 
+    /// S7-followup: display_nos_by_package picks the highest-revision row's
+    /// number (revisions of one package_id share their display number).
+    #[test]
+    fn display_nos_pick_highest_revision() {
+        let (_dir, _guard) = setup_temp_runtime();
+        let packages = serde_json::json!({
+            "version": 1,
+            "packages": [
+                {"package_id": "pkgA", "epic_id": "e1", "step_id": "s1", "plan_revision": 1,
+                 "display_no": 7, "project_path": "/tmp/p", "repo_root": "/tmp/p",
+                 "base_sha": "a", "objective": "o",
+                 "scope": {"allowed_paths": ["**"], "forbidden_paths": [], "max_changed_files": 5},
+                 "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write",
+                              "timeout_seconds": 60, "max_attempts": 2},
+                 "acceptance": [], "status": "superseded",
+                 "sealed_at": "t", "package_hash": "h"},
+                {"package_id": "pkgA", "epic_id": "e1", "step_id": "s1", "plan_revision": 3,
+                 "display_no": 7, "project_path": "/tmp/p", "repo_root": "/tmp/p",
+                 "base_sha": "a", "objective": "o",
+                 "scope": {"allowed_paths": ["**"], "forbidden_paths": [], "max_changed_files": 5},
+                 "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write",
+                              "timeout_seconds": 60, "max_attempts": 2},
+                 "acceptance": [], "status": "blocked",
+                 "sealed_at": "t", "package_hash": "h"},
+                {"package_id": "pkgB", "epic_id": "e1", "step_id": "s2", "plan_revision": 1,
+                 "project_path": "/tmp/p", "repo_root": "/tmp/p",
+                 "base_sha": "a", "objective": "o",
+                 "scope": {"allowed_paths": ["**"], "forbidden_paths": [], "max_changed_files": 5},
+                 "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write",
+                              "timeout_seconds": 60, "max_attempts": 2},
+                 "acceptance": [], "status": "sealed",
+                 "sealed_at": "t", "package_hash": "h"}
+            ]
+        });
+        std::fs::write(packages_path(), serde_json::to_string_pretty(&packages).unwrap()).unwrap();
+        let map = display_nos_by_package().unwrap();
+        assert_eq!(map.get("pkgA"), Some(&7));
+        // Packages without a display_no (legacy) simply stay absent.
+        assert!(!map.contains_key("pkgB"));
+    }
+
     /// S2: recoverable-scene selection — same package, scope_violation
     /// outcome, terminal, matching base, fully preserved scene; newest wins;
     /// everything else is filtered out.
@@ -1789,7 +1882,9 @@ mod tests {
             budget_used: 0,
             budget_charged: false,
             retries_remaining: None,
+            package_display_no: None,
             scene_preserved: preserved,
+            scene_recovered_from: None,
             parent_attempt_id: None,
             bundle_path: None,
             executor: None,

@@ -58,6 +58,8 @@ export interface Execution {
   budget_used?: number;
   retries_remaining?: number;
   scene_preserved?: boolean;
+  scene_recovered_from?: string;
+  package_display_no?: number;
 }
 
 /** Result of an execution action — S0-A: every click gets feedback. */
@@ -529,4 +531,39 @@ export async function getAttemptDetail(executionId: string): Promise<AttemptDeta
   } catch {
     return null;
   }
+}
+
+/** What the Runner is working on right now (S7-followup banner). */
+export interface CurrentExecution {
+  execution_id: string;
+  package_id: string;
+  package_display_no: number | null;
+  epic_title: string;
+  step_title: string;
+  status: string;
+  attempt_no: number;
+  scene_recovered_from: string | null;
+  updated_at: number;
+}
+
+export function useCurrentExecution(pollMs = 5000) {
+  const [current, setCurrent] = useState<CurrentExecution | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const data = await invoke<CurrentExecution | null>("get_current_execution");
+        if (alive) setCurrent(data);
+      } catch {
+        /* banner is best-effort */
+      }
+    };
+    tick();
+    const id = setInterval(tick, pollMs);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [pollMs]);
+  return current;
 }

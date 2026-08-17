@@ -226,7 +226,10 @@
     "retriesLeft": "剩余自动重试 {{count}} 次",
     "budgetExhaustedHint": "自动重试预算已耗尽 — 修订封存包（prepare → validate → seal）后继续",
     "blockedByGlobalFirst": "方案授权已开，但总闸（急停）关闭——开启总闸后才会自动执行",
-    "blockedByProjectFirst": "方案授权已开，但项目信任（一次性设置）未开——开启项目开关后才会自动执行"
+    "blockedByProjectFirst": "方案授权已开，但项目信任（一次性设置）未开——开启项目开关后才会自动执行",
+    "runningNow": "运行中",
+    "sceneRecovered": "断点恢复",
+    "recoveredFrom": "成果已恢复自"
   },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",
@@ -250,5 +253,14 @@
     "actionable": "当前可做{{parallel}}: {{names}}",
     "actionableNone": "当前无可做步骤（等待前置完成或方案已完成）",
     "planId": "方案ID: {{id}}"
+  },
+  "drq": {
+    "retryExhausted": "重试预算已耗尽——请查看证据后修订封存包，或取消。",
+    "gitDrift": "封存后 Git base 已变化——请修订并重新封存包，或取消。",
+    "verifierFailed": "候选提交未通过验收命令——请查看证据后重试、修订封存包，或取消。",
+    "approval": "执行被暂停/需要授权——续跑、修订封存包，或取消？",
+    "adjudication": "存在两条可行路径，需要人工裁决。",
+    "scopePath": "候选改动越出了封存范围。完整现场（diff、新文件、路径分类）已封存在 bundle 的 scene/ 目录；修订后的新包首次执行会自动恢复现场（仅限同一 base）。修订范围还是取消？",
+    "scopeForbiddenOrCount": "候选触碰了禁区/控制平面路径，或改动文件数超过最后熔断上限——改范围救不了它。请修订封存包（去掉该目标或提高上限），或取消。"
   }
 }

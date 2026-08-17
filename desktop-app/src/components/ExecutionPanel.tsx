@@ -14,7 +14,7 @@
 
 import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { useExecutions, useExecutionActions, useDecisionRequests, type Execution, type ExecutionStatus } from "../hooks/useExecutions";
+import { useExecutions, useExecutionActions, useDecisionRequests, useCurrentExecution, type Execution, type ExecutionStatus } from "../hooks/useExecutions";
 
 const STATUS_COLORS: Record<ExecutionStatus, string> = {
   queued: "bg-gray-100 text-gray-700",
@@ -88,6 +88,19 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
           {exec.executor && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-200">
               {exec.executor}
+            </span>
+          )}
+          {exec.package_display_no !== undefined && (
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 border border-blue-200">
+              #{exec.package_display_no}
+            </span>
+          )}
+          {exec.scene_recovered_from && (
+            <span
+              title={`${t("execution.recoveredFrom", "成果已恢复自")} ${exec.scene_recovered_from.slice(0, 16)}…`}
+              className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 border border-amber-200"
+            >
+              ⏫ {t("execution.sceneRecovered", "断点恢复")}
             </span>
           )}
           <span className="text-xs text-gray-500">
@@ -187,6 +200,37 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
   );
 }
 
+/** Chinese labels for the fixed decision actions (original English stays
+ *  available on hover and is what actually gets resolved). */
+const OPTION_LABELS: Record<string, string> = {
+  retry: "重试",
+  resume: "续跑",
+  cancel: "取消",
+  revise_scope: "修订范围并继续",
+  revise_package: "修订封存包",
+  transfer_manual: "转人工",
+  manual: "转人工",
+  reject: "拒绝",
+};
+
+/** Localized question by kind + option signature; the English original is
+ *  preserved in the tooltip so nothing is lost. */
+function localizedQuestion(
+  t: (k: string, opts?: Record<string, unknown>) => string,
+  kind: string,
+  options: string[],
+): string {
+  const has = (o: string) => options.includes(o);
+  if (kind === "retry_exhausted") return t("drq.retryExhausted");
+  if (kind === "git_drift") return t("drq.gitDrift");
+  if (kind === "verifier_failed") return t("drq.verifierFailed");
+  if (kind === "approval") return t("drq.approval");
+  if (kind === "adjudication") return t("drq.adjudication");
+  if (kind === "blocked" && has("revise_scope")) return t("drq.scopePath");
+  if (kind === "blocked" && has("revise_package")) return t("drq.scopeForbiddenOrCount");
+  return "";
+}
+
 export function DecisionInbox() {
   const { t } = useTranslation();
   const { requests, loading, error, resolve } = useDecisionRequests();
@@ -220,7 +264,9 @@ export function DecisionInbox() {
       <div className="space-y-2">
         {requests.map((request) => (
           <div key={request.request_id} className="rounded border border-orange-500/20 p-2 text-[10px]">
-            <div className="text-body font-medium">{request.question}</div>
+            <div className="text-body font-medium" title={request.question}>
+              {localizedQuestion(t, request.kind, request.options) || request.question}
+            </div>
             <div className="text-faint mt-0.5">
               {request.kind} · rev {request.package_revision} · {request.execution_id.slice(0, 12)}
             </div>
@@ -234,10 +280,11 @@ export function DecisionInbox() {
                 <button
                   key={option}
                   disabled={submitting === request.request_id}
+                  title={option}
                   onClick={() => answer(request.request_id, option)}
                   className="px-2 py-0.5 rounded bg-orange-500/15 text-orange-300 hover:bg-orange-500/25 disabled:opacity-40"
                 >
-                  {option}
+                  {OPTION_LABELS[option] ?? option}
                 </button>
               ))}
               <input
@@ -335,6 +382,32 @@ export default function ExecutionPanel({ stepId }: { stepId?: string }) {
           ))}
         </div>
       ))}
+    </div>
+  );
+}
+
+/** Top banner: what the Runner is executing right now. */
+export function RunningBanner() {
+  const { t } = useTranslation();
+  const current = useCurrentExecution();
+  if (!current) return null;
+  return (
+    <div className="px-4 py-1 border-b border-blue-500/30 bg-blue-500/5 flex items-center gap-2 text-[11px]">
+      <span className="animate-pulse">⚙</span>
+      <span className="font-medium text-blue-400">{t("execution.runningNow", "运行中")}</span>
+      {current.package_display_no !== null && (
+        <span className="font-mono px-1 rounded bg-blue-500/15 text-blue-300">
+          #{current.package_display_no}
+        </span>
+      )}
+      <span className="truncate">{current.step_title}</span>
+      <span className="text-faint">· {t(`execution.status.${current.status}`, current.status)}</span>
+      <span className="text-faint">· attempt {current.attempt_no}</span>
+      {current.scene_recovered_from && (
+        <span className="px-1 rounded bg-amber-500/15 text-amber-300">
+          ⏫ {t("execution.sceneRecovered", "断点恢复")}
+        </span>
+      )}
     </div>
   );
 }

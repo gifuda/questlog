@@ -939,13 +939,75 @@ pub fn get_executions() -> Result<Vec<crate::execution_store::Execution>, String
     // (map join, not per-row reads) so the UI can disable the retry button
     // on an exhausted budget and explain why.
     let caps = crate::execution_store::budget_caps_by_package().unwrap_or_default();
+    let display_nos = crate::execution_store::display_nos_by_package().unwrap_or_default();
     for exec in executions.iter_mut() {
         if let Some(max_attempts) = caps.get(&exec.package_id) {
             let used = crate::execution_store::effective_budget_used(exec);
             exec.retries_remaining = Some(max_attempts.saturating_sub(used));
         }
+        exec.package_display_no = display_nos.get(&exec.package_id).copied();
     }
     Ok(executions)
+}
+
+/// What is the Runner working on right now — the freshest in-flight
+/// execution joined with its human-readable package number and step/epic
+/// titles, for the App's "currently running" banner.
+#[tauri::command]
+pub fn get_current_execution() -> Result<Option<serde_json::Value>, String> {
+    let inflight = crate::execution_store::list_executions()?
+        .into_iter()
+        .filter(|e| {
+            matches!(
+                e.status,
+                crate::execution_store::ExecutionStatus::Queued
+                    | crate::execution_store::ExecutionStatus::Running
+                    | crate::execution_store::ExecutionStatus::Candidate
+                    | crate::execution_store::ExecutionStatus::Verifying
+            )
+        })
+        .max_by_key(|e| e.updated_at);
+    let Some(exec) = inflight else {
+        return Ok(None);
+    };
+    let display_no = crate::execution_store::display_nos_by_package()
+        .ok()
+        .and_then(|m| m.get(&exec.package_id).copied());
+    // Titles from the owning project's board (best-effort — missing board
+    // degrades to ids, never fails the banner).
+    let (epic_title, step_title) = (|| {
+        let board = std::fs::read_to_string(
+            std::path::Path::new(&exec.project_path).join(".epics.json"),
+        )
+        .ok()?;
+        let v: serde_json::Value = serde_json::from_str(&board).ok()?;
+        let step_title = v["steps"]
+            .as_array()?
+            .iter()
+            .find(|s| s["id"] == exec.step_id.as_str())
+            .and_then(|s| s["title"].as_str())
+            .map(str::to_string)?;
+        let epic_title = v["epics"]
+            .as_array()?
+            .iter()
+            .find(|e| e["id"] == exec.epic_id.as_str())
+            .and_then(|e| e["title"].as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| exec.epic_id.clone());
+        Some((epic_title, step_title))
+    })()
+        .unwrap_or((exec.epic_id.clone(), exec.step_id.clone()));
+    Ok(Some(serde_json::json!({
+        "execution_id": exec.id,
+        "package_id": exec.package_id,
+        "package_display_no": display_no,
+        "epic_title": epic_title,
+        "step_title": step_title,
+        "status": format!("{:?}", exec.status).to_lowercase(),
+        "attempt_no": exec.attempt_no,
+        "scene_recovered_from": exec.scene_recovered_from,
+        "updated_at": exec.updated_at,
+    })))
 }
 
 #[tauri::command]

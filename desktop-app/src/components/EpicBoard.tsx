@@ -6,7 +6,7 @@ import { epicStatusBadge, stageOrder, statusOptions, statusRank } from "../epicC
 import { formatDate } from "../utils";
 import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
-import ExecutionPanel, { DecisionInbox } from "./ExecutionPanel";
+import ExecutionPanel, { DecisionInbox, RunningBanner } from "./ExecutionPanel";
 import ExecutorModelSelector from "./ExecutorModelSelector";
 
 /** i18n keys for epic status labels (statuses stay lowercase in data). */
@@ -115,6 +115,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
           📂 {projectStatus?.project_enabled ? t("execution.projectOn") : t("execution.projectOff")}
         </button>
       </div>
+      <RunningBanner />
       <DecisionInbox />
 
       {/* 总表 */}

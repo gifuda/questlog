@@ -949,6 +949,15 @@ impl Runner {
                                 report.untracked_restored
                             );
                             manifest.scene_recovered_from = Some(prev_id.clone());
+                            // Also stamp the execution row so the UI can show
+                            // the recovery badge without reading the bundle.
+                            let _ = execution_store::update_execution(
+                                &exec.id,
+                                ExecutionUpdates {
+                                    scene_recovered_from: Some(prev_id.clone()),
+                                    ..Default::default()
+                                },
+                            );
                             let _ = attempt_bundle::append_event(
                                 &bundle_dir,
                                 &serde_json::json!({
@@ -1482,6 +1491,7 @@ impl Runner {
                     &manifest.execution_id,
                     ExecutionUpdates {
                         scene_preserved: Some(preserved),
+                        scene_recovered_from: None,
                         ..Default::default()
                     },
                 ) {
@@ -1575,11 +1585,38 @@ impl Runner {
                 "Git base changed after the package was sealed. Revise and reseal the package?",
                 vec!["revise_package".to_string(), "cancel".to_string()],
             )),
-            RunResult::ScopeViolation { .. } => Some((
-                "blocked",
-                "The candidate changed paths outside the sealed scope. The full scene (diff, untracked files, changed-path classification) is captured in the bundle's scene/ directory; a revised package's first attempt automatically restores it (same base only). Revise scope or cancel?",
-                vec!["revise_scope".to_string(), "cancel".to_string()],
-            )),
+            RunResult::ScopeViolation { violation, .. } => {
+                // The RIGHT options depend on the violation class: path-rights
+                // breaches are fixed by approving accurate paths in a new
+                // revision (revise_scope); forbidden/control-plane breaches
+                // can never be fixed by scope (revise_package); count
+                // breaches are fixed by a higher max (revise_package).
+                let control_plane_or_forbidden = matches!(
+                    violation,
+                    runner_git::ScopeViolation::ForbiddenPath { .. }
+                );
+                let count_breach =
+                    matches!(violation, runner_git::ScopeViolation::TooManyFiles { .. });
+                Some(if control_plane_or_forbidden {
+                    (
+                        "blocked",
+                        "The candidate touched a forbidden/control-plane path — no scope revision can allow this. Revise the package (drop that goal) or cancel.",
+                        vec!["revise_package".to_string(), "cancel".to_string()],
+                    )
+                } else if count_breach {
+                    (
+                        "blocked",
+                        "The candidate changed more files than the last-resort breaker allows. The full scene is captured in the bundle's scene/ directory. Revise the package (raise max) or cancel.",
+                        vec!["revise_package".to_string(), "cancel".to_string()],
+                    )
+                } else {
+                    (
+                        "blocked",
+                        "The candidate changed paths outside the sealed scope. The full scene (diff, untracked files, changed-path classification) is captured in the bundle's scene/ directory; a revised package's first attempt automatically restores it (same base only). Revise scope or cancel?",
+                        vec!["revise_scope".to_string(), "cancel".to_string()],
+                    )
+                })
+            }
             RunResult::AcceptanceFailed { .. } => Some((
                 "verifier_failed",
                 "The exact candidate failed acceptance. Inspect evidence and choose retry, revise, or cancel.",
@@ -3042,6 +3079,7 @@ mod tests {
             repo_root: "/does/not/exist".to_string(),
             base_sha: "abc".to_string(),
             objective: "test".to_string(),
+            display_no: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3163,6 +3201,7 @@ mod tests {
             repo_root: "/tmp/proj".to_string(),
             base_sha: "abc".to_string(),
             objective: "test".to_string(),
+            display_no: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3374,6 +3413,7 @@ mod tests {
             repo_root: repo_path,
             base_sha: base_sha.to_string(),
             objective: "test".to_string(),
+            display_no: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3638,6 +3678,7 @@ mod tests {
             repo_root: repo_path,
             base_sha: stale_sha,
             objective: "test".to_string(),
+            display_no: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3722,6 +3763,7 @@ mod tests {
             repo_root: repo_path,
             base_sha: head_sha,
             objective: "test".to_string(),
+            display_no: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],

@@ -53,6 +53,7 @@ pub fn run() {
             commands::delete_step,
             // 执行状态模块 (G2 — Runner state)
             commands::get_executions,
+            commands::get_current_execution,
             commands::get_execution,
             commands::cancel_execution,
             commands::retry_execution,

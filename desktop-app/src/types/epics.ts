@@ -37,6 +37,7 @@ export interface EpicStep {
     status: string;
   };
   updated_at: string;
+  created_at: string;
 }
 
 export interface EpicLinks {
