@@ -531,14 +531,26 @@ impl Runner {
                 }
             }
 
-            // Worktree cleanup: removed on every terminal outcome EXCEPT a
-            // timeout that scheduled an auto-retry — the retry resumes the
-            // same session in the same worktree, so the scene must survive.
-            // This check runs AFTER the result match above: the Timeout arm
-            // creates the retry child there, and only then can we see it.
-            let mut keep_worktree = false;
+            // Worktree cleanup: removed on every terminal outcome EXCEPT:
+            //   1. a timeout that scheduled an auto-retry (the retry resumes
+            //      the same session in the same worktree), or
+            //   2. S1 evidence-incomplete outcomes — scene_preserved=false
+            //      (capture failed/partial) or process_execution returned Err
+            //      (internal failure before sealing; the worktree IS the
+            //      remaining evidence and must survive for manual recovery).
+            // OR semantics: any one reason keeps the scene. A get_execution
+            // failure also keeps it (fail-open: never delete what we cannot
+            // inspect).
+            let process_errored = result.is_err();
+            let mut keep_worktree = process_errored;
             if let Ok(final_exec) = execution_store::get_execution(&exec_id) {
-                if final_exec.status == ExecutionStatus::TimedOut {
+                if final_exec.scene_preserved == Some(false) {
+                    log::error!(
+                        "Runner: keeping worktree for {exec_id} — scene capture incomplete, the worktree is the remaining evidence"
+                    );
+                    keep_worktree = true;
+                }
+                if !keep_worktree && final_exec.status == ExecutionStatus::TimedOut {
                     // Auto-retry child (queued/running) exists for this package?
                     if let Ok(all) = execution_store::list_executions() {
                         keep_worktree = all.iter().any(|e| {
@@ -550,6 +562,9 @@ impl Runner {
                         });
                     }
                 }
+            } else {
+                // Cannot inspect the final state — do not delete the scene.
+                keep_worktree = true;
             }
             if !keep_worktree {
                 if let Ok(final_exec) = execution_store::get_execution(&exec_id) {
@@ -772,7 +787,7 @@ impl Runner {
                 execution_id: exec.id.clone(),
                 error,
             };
-            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], None);
             return Ok(result);
         }
 
@@ -786,7 +801,7 @@ impl Runner {
                     execution_id: exec.id.clone(),
                     error,
                 };
-                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], None);
                 return Ok(result);
             }
         };
@@ -796,7 +811,7 @@ impl Runner {
                 expected: pkg.base_sha.clone(),
                 actual: effective_base.sha().to_string(),
             };
-            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], None);
             return Ok(result);
         }
 
@@ -873,7 +888,7 @@ impl Runner {
                     pkg.executor_preferred
                 ),
             };
-            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
             return Ok(result);
         }
 
@@ -884,7 +899,7 @@ impl Runner {
                 execution_id: exec.id.clone(),
                 error: "ZCode CLI not available".to_string(),
             };
-            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
             return Ok(result);
         }
         // Budget governance: each retry attempt gets an exponentially larger
@@ -976,21 +991,21 @@ impl Runner {
                 let result = RunResult::Cancelled {
                     execution_id: exec.id.clone(),
                 };
-                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
                 return Ok(result);
             }
             SupervisionOutcome::Paused => {
                 let result = RunResult::Paused {
                     execution_id: exec.id.clone(),
                 };
-                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
                 return Ok(result);
             }
             SupervisionOutcome::TimedOut => {
                 let result = RunResult::Timeout {
                     execution_id: exec.id.clone(),
                 };
-                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
                 return Ok(result);
             }
             SupervisionOutcome::Completed => {}
@@ -1001,7 +1016,7 @@ impl Runner {
                 execution_id: exec.id.clone(),
                 error: "CLI exited with non-zero status".to_string(),
             };
-            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
             return Ok(result);
         }
 
@@ -1020,7 +1035,7 @@ impl Runner {
                             .to_string(),
                     };
                     let result =
-                        self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                        self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
                     return Ok(result);
                 }
                 let stdout_nonempty = stdout_path
@@ -1036,7 +1051,7 @@ impl Runner {
                                 .to_string(),
                     };
                     let result =
-                        self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                        self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
                     return Ok(result);
                 }
                 let mut verifier_results: Vec<VerifierResult> = Vec::new();
@@ -1056,6 +1071,7 @@ impl Runner {
                             result,
                             None,
                             &verifier_results,
+                            Some(&worktree_path),
                         );
                         return Ok(result);
                     }
@@ -1070,13 +1086,14 @@ impl Runner {
                     result,
                     None,
                     &verifier_results,
+                    Some(&worktree_path),
                 );
                 return Ok(result);
             }
             let result = RunResult::NoDiff {
                 execution_id: exec.id.clone(),
             };
-            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
             return Ok(result);
         }
 
@@ -1091,7 +1108,7 @@ impl Runner {
                 execution_id: exec.id.clone(),
                 violation,
             };
-            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+            let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
             return Ok(result);
         }
 
@@ -1100,14 +1117,14 @@ impl Runner {
                 let result = RunResult::Cancelled {
                     execution_id: exec.id.clone(),
                 };
-                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
                 return Ok(result);
             }
             ExecutionStatus::PauseRequested => {
                 let result = RunResult::Paused {
                     execution_id: exec.id.clone(),
                 };
-                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
                 return Ok(result);
             }
             _ => {}
@@ -1131,7 +1148,7 @@ impl Runner {
                 let result = RunResult::NoDiff {
                     execution_id: exec.id.clone(),
                 };
-                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[]);
+                let result = self.seal_bundle(&bundle_dir, &mut manifest, pkg, result, None, &[], Some(&worktree_path));
                 return Ok(result);
             }
         };
@@ -1182,6 +1199,7 @@ impl Runner {
                 result,
                 Some(&candidate_sha),
                 &[],
+                Some(&worktree_path),
             );
             return Ok(result);
         }
@@ -1221,6 +1239,7 @@ impl Runner {
                     result,
                     Some(&candidate_sha),
                     &verifier_results,
+                    Some(&worktree_path),
                 );
                 return Ok(result);
             }
@@ -1238,6 +1257,7 @@ impl Runner {
             result,
             Some(&candidate_sha),
             &verifier_results,
+            Some(&worktree_path),
         );
         Ok(result)
     }
@@ -1248,6 +1268,7 @@ impl Runner {
     /// converted to EvidenceSealFailed — evidence fail-closed, a success
     /// without a sealed bundle is not a success. Failure-class results pass
     /// through unchanged (their DecisionRequest is already created below).
+    #[allow(clippy::too_many_arguments)] // sealing genuinely needs all of these
     fn seal_bundle(
         &self,
         bundle_dir: &Path,
@@ -1256,7 +1277,80 @@ impl Runner {
         result: RunResult,
         candidate_sha: Option<&str>,
         verifier_results: &[VerifierResult],
+        worktree_path: Option<&Path>,
     ) -> RunResult {
+        // 0. S1 scene capture FIRST — before any worktree-clearing terminal
+        //    this attempt can reach, the full recoverable scene (tracked
+        //    staged+unstaged diff, untracked copies, post-base commits,
+        //    changed-path classification) must already sit in the bundle.
+        //    Runs before the DR creation (its question references scene/)
+        //    and before write_outcome_and_seal (scene_ref is hashed).
+        //    None = no worktree yet (preflight/policy/cli-probe) — N/A.
+        //    A capture failure does NOT change the RunResult (the DR keeps
+        //    its meaning); scene_preserved=Some(false) keeps the worktree.
+        if let Some(worktree) = worktree_path {
+            let scene_preserved = match runner_git::get_changed_paths(worktree, &pkg.base_sha) {
+                Ok(changed) => {
+                    match attempt_bundle::write_scene_snapshot(
+                        bundle_dir,
+                        worktree,
+                        &pkg.base_sha,
+                        &changed,
+                        &pkg.allowed_paths,
+                        &pkg.forbidden_paths,
+                        pkg.max_changed_files as usize,
+                    ) {
+                        Ok(attempt_bundle::SceneCapture::None) => Some(true),
+                        Ok(attempt_bundle::SceneCapture::Complete { dir_ref }) => {
+                            manifest.scene_ref = Some(dir_ref);
+                            Some(true)
+                        }
+                        Ok(attempt_bundle::SceneCapture::Partial { dir_ref }) => {
+                            log::error!(
+                                "Scene capture PARTIAL for {} — oversize untracked files listed but not copied; worktree must be kept",
+                                manifest.execution_id
+                            );
+                            manifest.scene_ref = Some(dir_ref);
+                            Some(false)
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "Scene capture FAILED for {}: {} — worktree must be kept",
+                                manifest.execution_id,
+                                e
+                            );
+                            Some(false)
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!(
+                        "Scene capture could not enumerate changes for {}: {} — worktree must be kept",
+                        manifest.execution_id,
+                        e
+                    );
+                    Some(false)
+                }
+            };
+            // The write-back itself failing must not break sealing (B2.1):
+            // log it; the missing flag makes the poll loop err toward
+            // keeping the worktree only when Some(false) was the value.
+            if let Some(preserved) = scene_preserved {
+                if let Err(err) = execution_store::update_execution(
+                    &manifest.execution_id,
+                    ExecutionUpdates {
+                        scene_preserved: Some(preserved),
+                        ..Default::default()
+                    },
+                ) {
+                    log::error!(
+                        "scene_preserved write-back failed for {}: {err}",
+                        manifest.execution_id
+                    );
+                }
+            }
+        }
+
         // 1. Write verifier results FIRST — fail-closed for success-class
         //    outcomes: a pass without its verifier evidence is not a pass.
         let mut evidence_error: Option<String> = None;
@@ -1333,7 +1427,7 @@ impl Runner {
             )),
             RunResult::ScopeViolation { .. } => Some((
                 "blocked",
-                "The candidate changed paths outside the sealed scope. Revise scope or cancel?",
+                "The candidate changed paths outside the sealed scope. The full scene (diff, untracked files, changed-path classification) is captured in the bundle's scene/ directory. Revise scope or cancel?",
                 vec!["revise_scope".to_string(), "cancel".to_string()],
             )),
             RunResult::AcceptanceFailed { .. } => Some((
@@ -2823,6 +2917,89 @@ mod tests {
         assert!(error.contains("hash mismatch"));
     }
 
+    /// S1: seal_bundle with a live worktree captures the scene into the
+    /// bundle AND writes scene_preserved back onto the execution row — the
+    /// two facts the worktree-cleanup gate relies on.
+    #[test]
+    fn seal_bundle_captures_scene_and_flags_execution() {
+        let _guard = crate::execution_store::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("QUESTLOG_RUNTIME", dir.path());
+        std::fs::create_dir_all(crate::execution_store::runtime_dir()).unwrap();
+
+        // A real repo with a change outside the sealed scope (src/** only).
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = repo.path();
+        git(repo_path, &["init", "-q"]);
+        std::fs::write(repo_path.join("README.md"), "base\n").unwrap();
+        git(repo_path, &["add", "."]);
+        git(repo_path, &["commit", "-qm", "base"]);
+        let base_sha = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::write(repo_path.join("outside.txt"), "out of scope change\n").unwrap();
+        std::fs::write(repo_path.join("README.md"), "tracked edit too\n").unwrap();
+
+        let exec_id = crate::execution_store::enqueue_execution(
+            "pkg_seal",
+            "e1",
+            "s1",
+            "/tmp/proj",
+            &base_sha,
+        )
+        .unwrap();
+
+        let runner = Runner::new(RunnerConfig::default());
+        let mut pkg = seal_test_pkg();
+        pkg.base_sha = base_sha;
+        let mut manifest =
+            AttemptManifest::new(&exec_id, 1, 0, None, &pkg);
+        let bundle_dir = tempfile::tempdir().unwrap();
+
+        let result = runner.seal_bundle(
+            bundle_dir.path(),
+            &mut manifest,
+            &pkg,
+            RunResult::ScopeViolation {
+                execution_id: exec_id.clone(),
+                violation: runner_git::ScopeViolation::OutOfScope {
+                    path: "outside.txt".to_string(),
+                    allowed: pkg.allowed_paths.clone(),
+                },
+            },
+            None,
+            &[],
+            Some(repo_path),
+        );
+        match result {
+            RunResult::ScopeViolation { .. } => {}
+            other => panic!("expected ScopeViolation, got {other:?}"),
+        }
+
+        // Scene captured and referenced in the (sealed) manifest.
+        assert_eq!(manifest.scene_ref.as_deref(), Some("scene"));
+        assert!(bundle_dir.path().join("scene/diff-full.patch").exists());
+        assert!(bundle_dir
+            .path()
+            .join("scene/untracked/outside.txt")
+            .exists());
+        let classes =
+            std::fs::read_to_string(bundle_dir.path().join("scene/changed-paths.json"))
+                .unwrap();
+        assert!(classes.contains("out_of_scope"), "classes: {classes}");
+        // Execution row flagged preserved → the cleanup gate may clear the
+        // worktree (evidence is complete).
+        let exec = crate::execution_store::get_execution(&exec_id).unwrap();
+        assert_eq!(exec.scene_preserved, Some(true));
+    }
+
     fn seal_test_pkg() -> TaskPackageSummary {
         TaskPackageSummary {
             package_id: "pkg_seal".to_string(),
@@ -2879,6 +3056,7 @@ mod tests {
             },
             Some("abc"),
             &[],
+            None,
         );
 
         // Restore writability so the tempdir can be cleaned up.
@@ -2920,6 +3098,7 @@ mod tests {
             },
             None,
             &[],
+            None,
         );
 
         let mut perms = std::fs::metadata(bundle_dir.path()).unwrap().permissions();
@@ -2949,6 +3128,7 @@ mod tests {
             },
             Some("abc"),
             &[],
+            None,
         );
         assert!(matches!(result, RunResult::Passed { .. }));
         // Sealed bundle carries an integrity hash.

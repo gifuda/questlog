@@ -172,6 +172,11 @@ pub struct AttemptManifest {
     pub verifier_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decisions_ref: Option<String>,
+    /// S1: full worktree scene capture (scene/ dir) — tracked diff, untracked
+    /// copies, post-base commits and the changed-path classification captured
+    /// BEFORE any worktree-clearing terminal. Absent on pre-S1 bundles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_ref: Option<String>,
 
     pub outcome: String,
     /// SHA-256 over all files in the bundle dir at seal time.
@@ -214,6 +219,7 @@ impl AttemptManifest {
             candidate_ref: None,
             verifier_ref: None,
             decisions_ref: None,
+            scene_ref: None,
             outcome: "running".to_string(),
             integrity_hash: None,
             created_at: now_ts(),
@@ -284,6 +290,168 @@ pub fn write_diff_patch(
     let patch_path = dir.join("diff.patch");
     std::fs::write(&patch_path, &output.stdout).map_err(|e| format!("write diff: {e}"))?;
     Ok(Some("diff.patch".to_string()))
+}
+
+/// S1 outcome of a scene capture.
+#[derive(Debug)]
+pub enum SceneCapture {
+    /// Nothing to capture — clean tree, no untracked files, no post-base
+    /// commits. Nothing to preserve counts as preserved.
+    None,
+    /// Fully written; `dir_ref` is the bundle-relative scene dir reference.
+    Complete { dir_ref: String },
+    /// Written, but at least one untracked file exceeded the size cap and
+    /// was only LISTED (skipped_large), not copied — the worktree must be
+    /// kept so the skipped content remains recoverable by hand.
+    Partial { dir_ref: String },
+}
+
+/// Hard cap for a single untracked file copied into the scene. Above this
+/// the file is recorded in changed-paths.json as skipped_large and the
+/// capture is marked Partial (fail-safe direction: keep the worktree).
+const SCENE_UNTRACKED_FILE_CAP: u64 = 50 * 1024 * 1024;
+
+/// Capture the full worktree scene into the bundle's `scene/` directory —
+/// the recoverable evidence a ScopeViolation (or any worktree-clearing
+/// terminal state) must leave behind BEFORE the circuit breaker fires
+/// (S1; verified: `git diff <base_sha>` covers staged+unstaged tracked
+/// changes because it compares the commit against the working tree).
+///
+/// Contents:
+///   scene/diff-full.patch   — `git diff --binary <base_sha>` (tracked net change)
+///   scene/untracked/<rel>   — copies of untracked new files (gitignore-respecting)
+///   scene/commits.txt       — `git log --oneline <base_sha>..HEAD` (resume chains)
+///   scene/changed-paths.json — full classification of `changed` (single source:
+///                             the same get_changed_paths output the scope
+///                             verifier consumed) + skipped_large list + caps
+pub fn write_scene_snapshot(
+    dir: &Path,
+    worktree_path: &Path,
+    base_sha: &str,
+    changed: &[String],
+    allowed_patterns: &[String],
+    forbidden_patterns: &[String],
+    max_changed_files: usize,
+) -> Result<SceneCapture, String> {
+    let git = |args: &[&str]| -> Result<String, String> {
+        let output = std::process::Command::new("git")
+            .arg("-c")
+            .arg("core.quotePath=false")
+            .args(args)
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| format!("git {:?}: {e}", args))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    };
+
+    // 1. Tracked diff (staged + unstaged net change vs base).
+    let diff = git(&["diff", "--binary", base_sha])?;
+
+    // 2. Untracked new files (gitignore-respecting).
+    let untracked_raw = git(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let untracked: Vec<std::path::PathBuf> = untracked_raw
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect();
+
+    // 3. Post-base commits (resume chains may carry committed work).
+    let commits = git(&["log", "--oneline", &format!("{base_sha}..HEAD")])?;
+
+    let diff_empty = diff.trim().is_empty();
+    let commits_empty = commits.trim().is_empty();
+    if diff_empty && untracked.is_empty() && commits_empty && changed.is_empty() {
+        return Ok(SceneCapture::None);
+    }
+
+    let scene_dir = dir.join("scene");
+    std::fs::create_dir_all(&scene_dir).map_err(|e| format!("mkdir scene: {e}"))?;
+
+    if !diff_empty {
+        std::fs::write(scene_dir.join("diff-full.patch"), diff.as_bytes())
+            .map_err(|e| format!("write diff-full.patch: {e}"))?;
+    }
+    if !commits_empty {
+        std::fs::write(scene_dir.join("commits.txt"), commits.as_bytes())
+            .map_err(|e| format!("write commits.txt: {e}"))?;
+    }
+
+    // Copy untracked files (size-capped; oversize files are only listed).
+    let mut skipped_large: Vec<String> = Vec::new();
+    let untracked_set: std::collections::HashSet<String> = untracked
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    for rel in &untracked {
+        let src = worktree_path.join(rel);
+        let size = std::fs::metadata(&src).map_err(|e| format!("stat {}: {e}", rel.display()))?.len();
+        if size > SCENE_UNTRACKED_FILE_CAP {
+            skipped_large.push(rel.to_string_lossy().to_string());
+            continue;
+        }
+        let dst = scene_dir.join("untracked").join(rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir untracked parent: {e}"))?;
+        }
+        std::fs::copy(&src, &dst).map_err(|e| format!("copy untracked {}: {e}", rel.display()))?;
+    }
+
+    // 4. Full changed-path classification (same input the scope verifier saw).
+    let untracked_flag = |path: &str| untracked_set.contains(path);
+    let classified: Vec<serde_json::Value> = changed
+        .iter()
+        .map(|path| {
+            let category = crate::runner_git::classify_path_in_scope(
+                path,
+                allowed_patterns,
+                forbidden_patterns,
+            );
+            let category_str = match category {
+                crate::runner_git::ChangedPathCategory::ForbiddenControlPlane => {
+                    "forbidden_control_plane"
+                }
+                crate::runner_git::ChangedPathCategory::Forbidden(_) => "forbidden",
+                crate::runner_git::ChangedPathCategory::OutOfScope => "out_of_scope",
+                crate::runner_git::ChangedPathCategory::InScope => "in_scope",
+            };
+            serde_json::json!({
+                "path": path,
+                "category": category_str,
+                "untracked": untracked_flag(path),
+            })
+        })
+        .collect();
+    let partial = !skipped_large.is_empty();
+    let manifest_json = serde_json::json!({
+        "total": changed.len(),
+        "max_changed_files": max_changed_files,
+        "skipped_large": skipped_large,
+        "paths": classified,
+    });
+    std::fs::write(
+        scene_dir.join("changed-paths.json"),
+        serde_json::to_string_pretty(&manifest_json)
+            .map_err(|e| format!("serialize changed-paths: {e}"))?,
+    )
+    .map_err(|e| format!("write changed-paths.json: {e}"))?;
+
+    if partial {
+        Ok(SceneCapture::Partial {
+            dir_ref: "scene".to_string(),
+        })
+    } else {
+        Ok(SceneCapture::Complete {
+            dir_ref: "scene".to_string(),
+        })
+    }
 }
 
 /// Candidate commit info written after a successful commit.
@@ -391,22 +559,20 @@ pub fn append_event(dir: &Path, event: &serde_json::Value) -> Result<(), String>
 /// Files are sorted by name for deterministic ordering.
 fn compute_integrity_hash(dir: &Path) -> Result<String, String> {
     use std::io::Read;
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| format!("read bundle dir: {e}"))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
-        .filter(|e| is_content_file(&e.file_name().to_string_lossy()))
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
+    // S1: recurse into subdirectories (scene/ and any future evidence dir) —
+    // a tampered scene file must fail verify_integrity just like a tampered
+    // top-level evidence file. Keys are bundle-relative paths.
+    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    collect_content_files(dir, "", &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = sha2::Sha256::new();
-    for entry in &entries {
-        let name = entry.file_name();
-        hasher.update(name.to_string_lossy().as_bytes());
+    for (rel, path) in &files {
+        hasher.update(rel.as_bytes());
         hasher.update(b"\0");
 
         let mut file =
-            std::fs::File::open(entry.path()).map_err(|e| format!("open for hash: {e}"))?;
+            std::fs::File::open(path).map_err(|e| format!("open for hash: {e}"))?;
         let mut buf = [0u8; 8192];
         loop {
             let n = file
@@ -421,6 +587,29 @@ fn compute_integrity_hash(dir: &Path) -> Result<String, String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_content_files(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("read bundle dir: {e}"))?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let file_type = entry.file_type().map_err(|e| format!("stat bundle entry: {e}"))?;
+        if file_type.is_dir() {
+            collect_content_files(&entry.path(), &rel, out)?;
+        } else if file_type.is_file() && is_content_file(&name) {
+            out.push((rel, entry.path()));
+        }
+    }
+    Ok(())
 }
 
 /// Determine if a file is a content file (should be included in integrity hash).
@@ -675,6 +864,208 @@ mod tests {
         (dir, guard)
     }
 
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-c")
+            .arg("user.email=t@t")
+            .arg("-c")
+            .arg("user.name=t")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// S1: the scene capture must preserve everything a worktree-clearing
+    /// terminal would otherwise destroy — tracked staged+unstaged diff,
+    /// untracked copies, post-base commits, and the full classification.
+    #[test]
+    fn scene_snapshot_captures_full_worktree_state() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = repo.path();
+        git(repo_path, &["init", "-q"]);
+        std::fs::write(repo_path.join("src.ts"), "base\n").unwrap();
+        git(repo_path, &["add", "."]);
+        git(repo_path, &["commit", "-qm", "base"]);
+        let base_sha = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // staged change, unstaged change on top, untracked new file,
+        // and one post-base commit (resume-chain shape).
+        std::fs::write(repo_path.join("src.ts"), "staged\n").unwrap();
+        git(repo_path, &["add", "src.ts"]);
+        std::fs::write(repo_path.join("src.ts"), "unstaged-final\n").unwrap();
+        std::fs::create_dir_all(repo_path.join("docs")).unwrap();
+        std::fs::write(repo_path.join("docs/new-note.md"), "untracked content\n").unwrap();
+        std::fs::write(repo_path.join("extra.log"), "committed later\n").unwrap();
+        git(repo_path, &["add", "extra.log"]);
+        git(repo_path, &["commit", "-qm", "post-base"]);
+
+        let bundle = tempfile::tempdir().unwrap();
+        let changed = vec![
+            "src.ts".to_string(),
+            "docs/new-note.md".to_string(),
+            "extra.log".to_string(),
+        ];
+        let allowed = vec!["src.ts".to_string(), "docs/**".to_string()];
+        let capture = write_scene_snapshot(
+            bundle.path(),
+            repo_path,
+            &base_sha,
+            &changed,
+            &allowed,
+            &[],
+            5,
+        )
+        .unwrap();
+
+        match capture {
+            SceneCapture::Complete { dir_ref } => assert_eq!(dir_ref, "scene"),
+            other => panic!("expected Complete, got {other:?}"),
+        }
+
+        // diff-full.patch carries the net working-tree change vs base
+        // (staged+unstaged; the post-base commit's extra.log shows too).
+        let patch = std::fs::read_to_string(bundle.path().join("scene/diff-full.patch")).unwrap();
+        assert!(patch.contains("unstaged-final"), "patch: {patch}");
+        // untracked file copied with structure.
+        let copied =
+            std::fs::read_to_string(bundle.path().join("scene/untracked/docs/new-note.md"))
+                .unwrap();
+        assert_eq!(copied, "untracked content\n");
+        // post-base commits listed.
+        let commits =
+            std::fs::read_to_string(bundle.path().join("scene/commits.txt")).unwrap();
+        assert!(commits.contains("post-base"), "commits: {commits}");
+        // classification: src/docs in scope, extra.log out of scope, untracked flagged.
+        let classes =
+            std::fs::read_to_string(bundle.path().join("scene/changed-paths.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&classes).unwrap();
+        assert_eq!(v["total"], 3);
+        assert_eq!(v["max_changed_files"], 5);
+        let paths = v["paths"].as_array().unwrap();
+        let by_path = |p: &str| {
+            paths
+                .iter()
+                .find(|e| e["path"] == p)
+                .unwrap_or_else(|| panic!("missing {p} in {classes}"))
+                .clone()
+        };
+        assert_eq!(by_path("src.ts")["category"], "in_scope");
+        assert_eq!(by_path("docs/new-note.md")["untracked"], true);
+        assert_eq!(by_path("docs/new-note.md")["category"], "in_scope");
+        assert_eq!(by_path("extra.log")["category"], "out_of_scope");
+    }
+
+    /// S1: a clean tree with nothing to capture reports None — nothing to
+    /// preserve counts as preserved, and no scene/ dir is left behind.
+    #[test]
+    fn scene_snapshot_none_for_clean_tree() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = repo.path();
+        git(repo_path, &["init", "-q"]);
+        std::fs::write(repo_path.join("src.ts"), "base\n").unwrap();
+        git(repo_path, &["add", "."]);
+        git(repo_path, &["commit", "-qm", "base"]);
+        let base_sha = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let bundle = tempfile::tempdir().unwrap();
+        let capture = write_scene_snapshot(
+            bundle.path(),
+            repo_path,
+            &base_sha,
+            &[],
+            &["src.ts".to_string()],
+            &[],
+            5,
+        )
+        .unwrap();
+        assert!(matches!(capture, SceneCapture::None));
+        assert!(!bundle.path().join("scene").exists());
+    }
+
+    /// S1: scene/ files are INSIDE the integrity hash — tampering with a
+    /// captured scene file must fail verify_integrity.
+    #[test]
+    fn integrity_hash_covers_scene_dir() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = repo.path();
+        git(repo_path, &["init", "-q"]);
+        std::fs::write(repo_path.join("src.ts"), "base\n").unwrap();
+        git(repo_path, &["add", "."]);
+        git(repo_path, &["commit", "-qm", "base"]);
+        let base_sha = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::write(repo_path.join("src.ts"), "changed\n").unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let capture = write_scene_snapshot(
+            bundle.path(),
+            repo_path,
+            &base_sha,
+            &["src.ts".to_string()],
+            &["src.ts".to_string()],
+            &[],
+            5,
+        )
+        .unwrap();
+        assert!(matches!(capture, SceneCapture::Complete { .. }));
+
+        let manifest = AttemptManifest::new(
+            "exec_scene_hash",
+            1,
+            0,
+            None,
+            &mock_pkg(),
+        );
+        let mut manifest = manifest;
+        manifest.scene_ref = Some("scene".to_string());
+        let outcome = AttemptOutcome {
+            outcome: "scope_violation".to_string(),
+            reason: Some("test".to_string()),
+            candidate_sha: None,
+            finished_at: 1,
+        };
+        write_outcome_and_seal(bundle.path(), &mut manifest, &outcome).unwrap();
+        assert!(verify_integrity(bundle.path()).unwrap(), "sealed bundle must verify");
+
+        // Tamper with a scene file → the seal must catch it.
+        std::fs::write(
+            bundle.path().join("scene/diff-full.patch"),
+            b"tampered",
+        )
+        .unwrap();
+        assert!(
+            !verify_integrity(bundle.path()).unwrap(),
+            "tampered scene must fail verification"
+        );
+    }
+
     fn mock_pkg() -> TaskPackageSummary {
         TaskPackageSummary {
             package_id: "pkg_test".to_string(),
@@ -730,6 +1121,7 @@ mod tests {
             budget_used: 0,
             budget_charged: false,
             retries_remaining: None,
+            scene_preserved: None,
             parent_attempt_id: None,
             bundle_path: None,
             executor: None,

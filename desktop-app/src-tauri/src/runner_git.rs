@@ -529,6 +529,42 @@ pub fn get_changed_paths(worktree_path: &Path, base_sha: &str) -> Result<Vec<Str
 
 /// Check if all changed paths match at least one allowed glob pattern.
 /// Uses simple glob matching (* and **).
+/// S1 shared path classifier — `verify_changed_paths_in_scope` (the circuit
+/// breaker verdict) and the AttemptBundle scene snapshot (the recorded
+/// classification) both call this single function, so the two can never
+/// drift apart.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChangedPathCategory {
+    /// QuestLog control-plane / runtime files — always forbidden.
+    ForbiddenControlPlane,
+    /// Matches a sealed forbidden pattern (payload = the pattern).
+    Forbidden(String),
+    /// Not covered by any allowed pattern.
+    OutOfScope,
+    /// Inside the sealed scope.
+    InScope,
+}
+
+pub fn classify_path_in_scope(
+    path: &str,
+    allowed_patterns: &[String],
+    forbidden_patterns: &[String],
+) -> ChangedPathCategory {
+    if is_control_plane_path(path) || is_runner_internal_path(path) {
+        return ChangedPathCategory::ForbiddenControlPlane;
+    }
+    for pattern in forbidden_patterns {
+        if glob_match(pattern, path) {
+            return ChangedPathCategory::Forbidden(pattern.clone());
+        }
+    }
+    if allowed_patterns.iter().any(|p| glob_match(p, path)) {
+        ChangedPathCategory::InScope
+    } else {
+        ChangedPathCategory::OutOfScope
+    }
+}
+
 pub fn verify_changed_paths_in_scope(
     changed: &[String],
     allowed_patterns: &[String],
@@ -543,29 +579,26 @@ pub fn verify_changed_paths_in_scope(
     }
 
     for path in changed {
-        if is_control_plane_path(path) || is_runner_internal_path(path) {
-            return Err(ScopeViolation::ForbiddenPath {
-                path: path.clone(),
-                pattern: "QuestLog control-plane/runtime files".to_string(),
-            });
-        }
-        // Check forbidden first
-        for pattern in forbidden_patterns {
-            if glob_match(pattern, path) {
+        match classify_path_in_scope(path, allowed_patterns, forbidden_patterns) {
+            ChangedPathCategory::ForbiddenControlPlane => {
                 return Err(ScopeViolation::ForbiddenPath {
                     path: path.clone(),
-                    pattern: pattern.clone(),
+                    pattern: "QuestLog control-plane/runtime files".to_string(),
                 });
             }
-        }
-
-        // Check allowed
-        let allowed = allowed_patterns.iter().any(|p| glob_match(p, path));
-        if !allowed {
-            return Err(ScopeViolation::OutOfScope {
-                path: path.clone(),
-                allowed: allowed_patterns.to_vec(),
-            });
+            ChangedPathCategory::Forbidden(pattern) => {
+                return Err(ScopeViolation::ForbiddenPath {
+                    path: path.clone(),
+                    pattern,
+                });
+            }
+            ChangedPathCategory::OutOfScope => {
+                return Err(ScopeViolation::OutOfScope {
+                    path: path.clone(),
+                    allowed: allowed_patterns.to_vec(),
+                });
+            }
+            ChangedPathCategory::InScope => {}
         }
     }
 

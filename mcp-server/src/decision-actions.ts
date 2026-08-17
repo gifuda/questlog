@@ -69,6 +69,7 @@ interface ExecutionRow {
   outcome?: string | null;
   budget_used?: number;
   budget_charged?: boolean;
+  scene_preserved?: boolean;
   parent_attempt_id?: string;
   bundle_path?: string;
   executor?: string;
@@ -255,6 +256,6 @@ async function cancelExecution(
     exec.last_error = message;
     exec.updated_at = Math.floor(Date.now() / 1000);
     await writeExecutionsLocked(data);
-    return { ok: true, detail: `execution ${executionId} cancelled` };
+    return { ok: true as const, detail: `execution ${executionId} cancelled` };
   }).catch((err: Error) => ({ error: err.message }) as DecisionActionResult);
 }

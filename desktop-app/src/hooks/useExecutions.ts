@@ -57,6 +57,7 @@ export interface Execution {
   outcome?: string | null;
   budget_used?: number;
   retries_remaining?: number;
+  scene_preserved?: boolean;
 }
 
 /** Result of an execution action — S0-A: every click gets feedback. */

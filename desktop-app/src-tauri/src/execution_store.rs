@@ -107,6 +107,12 @@ pub struct Execution {
     /// the get_executions command from the package's max_attempts cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries_remaining: Option<u32>,
+    /// S1: whether the attempt's full worktree scene was captured into the
+    /// bundle before any worktree-clearing terminal. Some(false) → the
+    /// worktree IS the remaining evidence and must be kept. None = not
+    /// applicable (no worktree yet, e.g. preflight/policy/cli-probe paths).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_preserved: Option<bool>,
     /// Parent execution ID (for retries). None for first attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_attempt_id: Option<String>,
@@ -306,6 +312,7 @@ pub fn enqueue_execution_with_parent(
         budget_used: 0,
         budget_charged: false,
         retries_remaining: None,
+        scene_preserved: None,
         parent_attempt_id: parent_attempt_id.map(|s| s.to_string()),
         bundle_path: None,
         executor: None,
@@ -424,6 +431,7 @@ pub fn claim_package(
             budget_used: 0,
             budget_charged: false,
             retries_remaining: None,
+            scene_preserved: None,
             parent_attempt_id: None,
             bundle_path: None,
             executor: None,
@@ -819,6 +827,9 @@ pub fn update_execution(execution_id: &str, updates: ExecutionUpdates) -> Result
         if let Some(executor) = updates.executor {
             exec.executor = Some(executor);
         }
+        if let Some(scene_preserved) = updates.scene_preserved {
+            exec.scene_preserved = Some(scene_preserved);
+        }
         exec.updated_at = now;
         Ok(())
     })?;
@@ -834,6 +845,7 @@ pub struct ExecutionUpdates {
     pub status: Option<ExecutionStatus>,
     pub bundle_path: Option<String>,
     pub executor: Option<String>,
+    pub scene_preserved: Option<bool>,
 }
 
 // ─── Stale lease detection and cleanup ───
@@ -982,6 +994,7 @@ pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
             budget_used: parent_budget,
             budget_charged: false,
             retries_remaining: None,
+            scene_preserved: None,
             parent_attempt_id: Some(parent.id.clone()),
             bundle_path: None,
             executor: None,
