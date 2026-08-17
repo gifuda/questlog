@@ -23,6 +23,8 @@ import {
   validatePlanSpec,
   detectDecisionGaps,
   globsMayOverlap,
+  compileCreatePaths,
+  estimateScopeTiers,
   type PlanSpec,
 } from "../src/plan-publisher.js";
 import {
@@ -648,5 +650,116 @@ describe("publishPlan: concurrency", () => {
     expect(board.epics).toHaveLength(6);
     expect(board.steps).toHaveLength(3);
     expect(board.epics.find((e) => e.id === (published as { epic_id: string }).epic_id)).toBeTruthy();
+  });
+});
+
+// ─── S4: publish-gate scope compiler & tier estimator ───
+
+describe("compileCreatePaths (S4)", () => {
+  const base = {
+    title: "t",
+    objective: "o",
+    acceptance_command_ids: ["cargo:check"],
+  };
+
+  it("mirrors exact files to their directory subtree and globs to themselves", () => {
+    const out = compileCreatePaths({
+      ...base,
+      allowed_paths: ["src-tauri/src/foo.rs", "docs/guide.md"],
+    });
+    expect(out).toContain("src-tauri/src/**");
+    expect(out).toContain("docs/**"); // docs/guide.md mirrors to docs/**
+  });
+
+  it("skips root-level exact files (never compiles a repo-wide pattern)", () => {
+    const out = compileCreatePaths({ ...base, allowed_paths: ["README.md"] });
+    // No mirror slot for a root-level file; docs slot requires a root prefix.
+    expect(out.some((p) => p === "**" || p.startsWith("**/"))).toBe(false);
+    expect(out.some((p) => p.includes("README"))).toBe(false);
+  });
+
+  it("adds cargo test slots under the impl root, never repo-wide", () => {
+    const out = compileCreatePaths({
+      ...base,
+      allowed_paths: ["src-tauri/src/**"],
+      acceptance_command_ids: ["cargo:test"],
+    });
+    expect(out).toContain("src-tauri/src/**");
+    expect(out.some((p) => p.startsWith("src-tauri") && p.includes("tests"))).toBe(true);
+    expect(out.every((p) => p !== "**" && !p.startsWith("**/"))).toBe(true);
+  });
+
+  it("docs-only steps get no test slots", () => {
+    const out = compileCreatePaths({
+      ...base,
+      allowed_paths: ["docs/plan.md"],
+      acceptance_command_ids: ["cargo:test"],
+    });
+    expect(out.some((p) => p.includes("tests"))).toBe(false);
+    expect(out).toContain("docs/**");
+  });
+
+  it("explicit create_paths bypasses compilation (filtered of repo-wide)", () => {
+    const out = compileCreatePaths({
+      ...base,
+      allowed_paths: ["src/**"],
+      create_paths: ["docs/x.md", "**"],
+    });
+    expect(out).toEqual(["docs/x.md"]);
+  });
+
+  it("caps test slots at four across multiple roots", () => {
+    const out = compileCreatePaths({
+      ...base,
+      allowed_paths: ["a/src/**", "b/src/**", "c/src/**", "d/src/**", "e/src/**", "f/src/**"],
+      acceptance_command_ids: ["cargo:test"],
+    });
+    const testSlots = out.filter((p) => p.includes("tests"));
+    expect(testSlots.length).toBeLessThanOrEqual(4);
+  });
+});
+
+describe("estimateScopeTiers (S4)", () => {
+  const base = {
+    title: "t",
+    objective: "o",
+    acceptance_command_ids: ["cargo:check"],
+  };
+
+  it("estimates from surfaces: exact + glob×4 + acceptance + type-sync", () => {
+    const t = estimateScopeTiers({
+      ...base,
+      allowed_paths: ["src/foo.rs", "src/bar/**"],
+      acceptance_command_ids: ["cargo:check", "cargo:test", "cargo:clippy", "test:mcp"],
+    });
+    // exact=1, glob=1 → 1+4; acceptance min(4,3)=3; type-sync +2 → expected=10
+    expect(t.expected).toBe(10);
+    expect(t.warn).toBe(Math.ceil(10 * 1.5) + 2);
+    expect(t.max).toBeGreaterThanOrEqual(40);
+    expect(t.expected).toBeLessThanOrEqual(t.warn);
+    expect(t.warn).toBeLessThanOrEqual(t.max);
+  });
+
+  it("explicit small max clamps expected and warn (monotonic guarantee)", () => {
+    const t = estimateScopeTiers({
+      ...base,
+      allowed_paths: ["src/**", "web/**", "docs/**", "a/**", "b/**"],
+      max_changed_files: 6,
+    });
+    expect(t.max).toBe(6);
+    expect(t.expected).toBeLessThanOrEqual(6);
+    expect(t.warn).toBeLessThanOrEqual(6);
+    expect(t.expected).toBeLessThanOrEqual(t.warn);
+  });
+
+  it("explicit tiers pass through; compiled flag is decided by the caller", () => {
+    const t = estimateScopeTiers({
+      ...base,
+      allowed_paths: ["src/**"],
+      expected_changed_files: 3,
+      warn_changed_files: 5,
+      max_changed_files: 20,
+    });
+    expect(t).toEqual({ expected: 3, warn: 5, max: 20 });
   });
 });

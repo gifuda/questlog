@@ -146,6 +146,24 @@ describe("validatePackageContent", () => {
     expect(ok.some((i) => i.field === "scope.create_paths")).toBe(false);
   });
 
+  it("rejects expected above max (S4 fourth tier ordering)", () => {
+    const issues = validatePackageContent({
+      objective: "do X",
+      epic_id: "e1",
+      step_id: "s1",
+      scope: {
+        allowed_paths: ["src/**"],
+        forbidden_paths: [],
+        max_changed_files: 8,
+        expected_changed_files: 12,
+        warn_changed_files: 10,
+      },
+    });
+    expect(
+      issues.some((i) => i.field === "scope.expected_changed_files" && i.severity === "error"),
+    ).toBe(true);
+  });
+
   it("enforces expected ≤ warn ≤ max ordering", () => {
     const issues = validatePackageContent({
       objective: "do X",

@@ -60,7 +60,14 @@ export interface PrepareInput {
   context_refs?: string[];
   allowed_paths: string[];
   forbidden_paths?: string[];
+  /** S4: creation rights compiled by the publish gate (or hand-written for
+   *  internal reuse). Absent → the Runner's v1 fallback applies (creation
+   *  follows allowed_paths). */
+  create_paths?: string[];
   max_changed_files?: number;
+  /** S4 three-tier counts; absent tiers simply don't fire. */
+  expected_changed_files?: number;
+  warn_changed_files?: number;
   executor_preferred?: string;
   executor_timeout_seconds?: number;
   executor_max_attempts?: number;
@@ -177,8 +184,11 @@ export async function prepareTaskPackage(
     context_refs: input.context_refs ?? [],
     scope: {
       allowed_paths: input.allowed_paths,
+      create_paths: input.create_paths ?? [],
       forbidden_paths: input.forbidden_paths ?? [],
       max_changed_files: input.max_changed_files ?? 10,
+      expected_changed_files: input.expected_changed_files,
+      warn_changed_files: input.warn_changed_files,
     },
     // No implicit preconditions: git_clean is opt-in (the standard package is
     // an independent carrier; execution happens in an isolated worktree).

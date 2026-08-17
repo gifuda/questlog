@@ -72,7 +72,17 @@ export interface PlanStepSpec {
   depends_on?: number[];
   allowed_paths: string[];
   forbidden_paths?: string[];
+  /** S4: creation rights — OPTIONAL and normally NOT hand-written: the
+   *  publish gate compiles a limited creation surface from allowed_paths +
+   *  acceptance commands + docs conventions. Explicit values bypass
+   *  compilation (human judgement wins). */
+  create_paths?: string[];
   max_changed_files?: number;
+  /** S4 tier estimates — optional overrides; the publish gate estimates
+   *  these from the implementation/test/type-sync surfaces. max stays the
+   *  last-resort breaker — batch refactors may override it explicitly. */
+  expected_changed_files?: number;
+  warn_changed_files?: number;
   context_refs?: string[];
   acceptance_command_ids: string[];
   /** Requested authority deltas merged over the conservative default —
@@ -117,6 +127,10 @@ export interface PublishedStep {
   package_id: string;
   plan_revision: number;
   package_hash: string;
+  /** S4: the compiled creation surface and estimated tiers — auditable. */
+  create_paths: string[];
+  tiers: ScopeTiers;
+  tiers_compiled: boolean;
 }
 
 export interface PublishPublished {
@@ -358,9 +372,118 @@ export function globsMayOverlap(a: string, b: string): boolean {
   return false;
 }
 
-function scopesMayOverlap(a: PlanStepSpec, b: PlanStepSpec): string | null {
-  for (const ga of a.allowed_paths) {
-    for (const gb of b.allowed_paths) {
+// ─── S4: publish-gate scope compiler & tier estimator ───
+//
+// The conversation submits a complete PlanSpec; the GATE derives the limited
+// creation surface and the three-tier counts. Compilation only happens on
+// the publishPlan path — a direct pushStepWithPackage call never compiles.
+
+function isRepoWidePattern(pattern: string): boolean {
+  return pattern === "**" || pattern.startsWith("**/");
+}
+
+/** First path segment of a pattern, when it is a meaningful subtree root
+ * (no wildcard, not "."). Root-level FILES (no "/") yield null — their
+ * first segment is a filename, not a directory. */
+function rootPrefixOf(pattern: string): string | null {
+  if (!pattern.includes("/")) return null;
+  const first = pattern.split("/")[0];
+  if (!first || first === "." || first.includes("*")) return null;
+  return first;
+}
+
+/** S4: compile a LIMITED creation surface. Deterministic and auditable:
+ * mirror of the modify surface (an exact file grants its directory subtree,
+ * a glob grants itself; root-level exact files grant nothing — never a
+ * repo-wide pattern), plus at most one bounded test slot per root (from
+ * acceptance commands; docs-only steps get none) and one docs slot. An
+ * explicit create_paths bypasses compilation entirely. */
+export function compileCreatePaths(step: PlanStepSpec): string[] {
+  if (step.create_paths && step.create_paths.length > 0) {
+    return step.create_paths.filter((p) => !isRepoWidePattern(p));
+  }
+
+  const slots = new Set<string>();
+  const roots = new Set<string>();
+  for (const pattern of step.allowed_paths) {
+    if (isRepoWidePattern(pattern)) continue;
+    if (pattern.includes("*")) {
+      slots.add(pattern);
+    } else if (pattern.includes("/")) {
+      // Exact file inside a directory → same-directory subtree.
+      const dir = pattern.slice(0, pattern.lastIndexOf("/"));
+      slots.add(`${dir}/**`);
+    }
+    // Root-level exact files: no directory → no mirror slot (conservative).
+    const root = rootPrefixOf(pattern);
+    if (root) roots.add(root);
+  }
+
+  const rootList = [...roots];
+  const docsOnly = rootList.length > 0 && rootList.every((r) => r === "docs");
+  if (!docsOnly && rootList.length > 0) {
+    const isCargo = step.acceptance_command_ids.some(
+      (id) => id.startsWith("cargo:") || id === "test:desktop",
+    );
+    const isTs = step.acceptance_command_ids.some((id) => /^(test|build|lint):(mcp|web)$/.test(id));
+    const testSlots: string[] = [];
+    for (const root of rootList) {
+      if (testSlots.length >= 4) break;
+      if (isCargo) testSlots.push(`${root}/**/tests/**`);
+      else if (isTs) testSlots.push(`${root}/**/*.test.ts`);
+    }
+    if (isCargo && testSlots.length < 4 && rootList[0]) {
+      // Rust convention: unit tests live beside the source (covered by the
+      // mirror); integration tests under tests/ at the root.
+      testSlots.push(`${rootList[0]}/tests/**`);
+    }
+    for (const slot of testSlots) slots.add(slot);
+  }
+  if (rootList.length > 0) slots.add("docs/**");
+
+  return [...slots];
+}
+
+export interface ScopeTiers {
+  expected: number;
+  warn: number;
+  max: number;
+}
+
+/** S4: estimate the three-tier counts from the plan's surfaces —
+ * implementation (exact files count 1 each, glob surfaces ~4: impl + test +
+ * type-sync + neighbours), acceptance (≤3), type-sync (+2 when source
+ * patterns present). max is the last-resort breaker: explicit override
+ * (batch refactors) wins, otherwise max(warn×2, 40). The clamp order
+ * guarantees expected ≤ warn ≤ max on every output. */
+export function estimateScopeTiers(step: PlanStepSpec): ScopeTiers {
+  const exact = step.allowed_paths.filter((p) => !p.includes("*")).length;
+  const globs = step.allowed_paths.length - exact;
+  const acceptance = Math.min(step.acceptance_command_ids.length, 3);
+  const typeSync = step.allowed_paths.some(
+    (p) => p.includes("src") || /\.(rs|ts|tsx|py)$/.test(p),
+  )
+    ? 2
+    : 0;
+  let expected =
+    step.expected_changed_files ?? exact + globs * 4 + acceptance + typeSync;
+  const warnDraft = step.warn_changed_files ?? Math.ceil(expected * 1.5) + 2;
+  const max =
+    step.max_changed_files ?? Math.max(warnDraft * 2, 40);
+  // Monotonic clamp: explicit small max tightens everything above it.
+  expected = Math.min(expected, max);
+  const warn = Math.min(Math.max(warnDraft, expected), max);
+  return { expected, warn, max };
+}
+
+/** Effective write surface for overlap detection: modify + create. */
+function effectiveWritePaths(step: PlanStepSpec, compiled: string[]): string[] {
+  return [...step.allowed_paths, ...compiled];
+}
+
+function scopesMayOverlap(a: PlanStepSpec, b: PlanStepSpec, aCreate: string[] = [], bCreate: string[] = []): string | null {
+  for (const ga of effectiveWritePaths(a, aCreate)) {
+    for (const gb of effectiveWritePaths(b, bCreate)) {
       if (globsMayOverlap(ga, gb)) return `${ga} ↔ ${gb}`;
     }
   }
@@ -403,6 +526,10 @@ function dependencyClosures(spec: PlanSpec): Set<number>[] {
  */
 export function detectDecisionGaps(spec: PlanSpec): DecisionQuestion[] {
   const questions: DecisionQuestion[] = [];
+  // S4: overlap detection covers the EFFECTIVE write surface — modify AND
+  // the compiled creation surface (two steps that may create inside the
+  // same subtree without a dependency edge are a parallel hazard).
+  const compiledCreates = spec.steps.map((step) => compileCreatePaths(step));
 
   // 1. Unconfirmed consumers — downstream impact a human must sign off on.
   const consumers = spec.chain?.consumers ?? [];
@@ -422,7 +549,7 @@ export function detectDecisionGaps(spec: PlanSpec): DecisionQuestion[] {
   for (let i = 0; i < spec.steps.length; i++) {
     for (let j = i + 1; j < spec.steps.length; j++) {
       if (closures[j].has(i)) continue; // ordered: j transitively depends on i
-      const overlap = scopesMayOverlap(spec.steps[i], spec.steps[j]);
+      const overlap = scopesMayOverlap(spec.steps[i], spec.steps[j], compiledCreates[i], compiledCreates[j]);
       if (overlap) {
         questions.push({
           category: "step_scope_conflict",
@@ -636,6 +763,10 @@ export async function publishPlan(cwd: string, spec: PlanSpec): Promise<PublishP
       const step = spec.steps[i];
       // Backward references are validated, so created[j] always exists here.
       const dependsOn = (step.depends_on ?? []).map((j) => created[j].step_id);
+      // S4: the gate compiles the limited creation surface and estimates
+      // the three tiers (explicit spec values win over compilation).
+      const createPaths = compileCreatePaths(step);
+      const tiers = estimateScopeTiers(step);
       const result = await pushStepWithPackage(projectPath, {
         epic_id: createdEpicId,
         title: step.title,
@@ -645,7 +776,10 @@ export async function publishPlan(cwd: string, spec: PlanSpec): Promise<PublishP
         context_refs: step.context_refs,
         allowed_paths: step.allowed_paths,
         forbidden_paths: step.forbidden_paths,
-        max_changed_files: step.max_changed_files,
+        create_paths: createPaths,
+        max_changed_files: tiers.max,
+        expected_changed_files: tiers.expected,
+        warn_changed_files: tiers.warn,
         executor_preferred: step.executor?.preferred,
         executor_sandbox: step.executor?.sandbox,
         executor_timeout_seconds: step.executor?.timeout_seconds,
@@ -663,6 +797,12 @@ export async function publishPlan(cwd: string, spec: PlanSpec): Promise<PublishP
         package_id: result.package_id,
         plan_revision: result.plan_revision,
         package_hash: result.package_hash,
+        create_paths: createPaths,
+        tiers,
+        tiers_compiled:
+          step.max_changed_files === undefined &&
+          step.expected_changed_files === undefined &&
+          step.warn_changed_files === undefined,
       });
     }
 
@@ -672,7 +812,15 @@ export async function publishPlan(cwd: string, spec: PlanSpec): Promise<PublishP
       steps: created,
       summary:
         `Published epic '${spec.title.trim()}' with ${created.length} step(s) and ${created.length} sealed package(s). ` +
-        "Packages are sealed only — not enqueued; auto_execute/project/master switches are left OFF for human authorization.",
+        "Packages are sealed only — not enqueued; auto_execute/project/master switches are left OFF for human authorization. " +
+        `Scope tiers per step (S4 gate-compiled unless explicitly overridden; max is the last-resort breaker, default floor 40): ` +
+        created
+          .map(
+            (c, i) =>
+              `step${i} expected/warn/max=${c.tiers.expected}/${c.tiers.warn}/${c.tiers.max}, create_paths=${c.create_paths.length}`,
+          )
+          .join("; ") +
+        ".",
     };
   } catch (err) {
     // Unexpected internal failure — fail closed with a best-effort targeted

@@ -236,6 +236,15 @@ export function validatePackageContent(pkg: Partial<TaskPackage>): ValidationIss
         severity: "error",
       });
     }
+    // S4: the fourth tier ordering — an expected estimate above the breaker
+    // means the plan expects to trip its own last resort. Malformed.
+    if (expected !== undefined && expected > pkg.scope.max_changed_files) {
+      issues.push({
+        field: "scope.expected_changed_files",
+        message: `expected (${expected}) must be ≤ max (${pkg.scope.max_changed_files}) — the plan cannot expect to trip its own breaker`,
+        severity: "error",
+      });
+    }
   } else {
     issues.push({ field: "scope", message: "scope is required", severity: "error" });
   }
