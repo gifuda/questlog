@@ -12,6 +12,7 @@ import {
   listDecisionRequests, resolveDecision,
 } from "./decision-request.js";
 import { registerPublishPlanTool } from "./publish-plan-tool.js";
+import { sweepWorktrees, DEFAULT_TTL_DAYS } from "./worktree-sweep.js";
 
 const server = new McpServer({
   name: "todo-board",
@@ -937,6 +938,64 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
+
+// ─── sweep_worktrees ───
+server.tool(
+  "sweep_worktrees",
+  [
+    "Bounded governance for QuestLog historical worktrees and their questlog/exec_* branches.",
+    "DRY-RUN BY DEFAULT: classifies every target and reports; nothing is deleted.",
+    "Verdicts: reclaimable / keep_active (in-flight reference) / keep_evidence (scene-incomplete worktree) / keep_unmerged_candidate (candidate_sha not in HEAD — deleting would break the lineage) / keep_fresh (within TTL) / unknown (not provably QuestLog-owned → kept).",
+    "apply=true additionally requires: the master kill switch OFF, and holds the executions.json lock with an in-lock re-classification; removals are git-native (worktree remove --force + branch -D).",
+    "Review the dry-run list with a human before ever passing apply=true.",
+  ].join("\n"),
+  {
+    project_dir: z.string().describe("Target project directory (git operations run against its repo root)"),
+    apply: z.boolean().optional().describe("Default false (dry-run). true performs the reclaimable removals — requires the master kill switch to be OFF."),
+    ttl_days: z.number().optional().describe(`Days of inactivity before a target is reclaimable (default ${DEFAULT_TTL_DAYS}); BOTH the directory mtime and the branch tip date must be past it.`),
+  },
+  async (input: { project_dir?: string; apply?: boolean; ttl_days?: number }) => {
+    const resolved = await resolveCwd({ project_dir: input.project_dir }, () => process.cwd());
+    if ("error" in resolved) {
+      return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
+    }
+    const result = await sweepWorktrees(resolved.cwd, {
+      apply: input.apply,
+      ttlDays: input.ttl_days,
+    });
+    if ("error" in result) {
+      return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+    }
+    const lines = [
+      `🧹 worktree sweep — mode: ${result.mode} (repo ${result.repo_root}, TTL ${result.ttl_days}d)`,
+      `  reclaimable: ${result.summary.reclaimable} · keep_active: ${result.summary.keep_active} · keep_evidence: ${result.summary.keep_evidence} · keep_unmerged_candidate: ${result.summary.keep_unmerged_candidate} · keep_fresh: ${result.summary.keep_fresh} · unknown: ${result.summary.unknown}` +
+        (result.mode === "apply" ? ` · removed: ${result.summary.removed} · failed: ${result.summary.failed}` : ""),
+      "",
+      ...result.items.map((item) => {
+        const base = `  [${item.verdict}] ${item.target.branch}` +
+          (item.target.dir ? ` (dir ${item.target.dir})` : " (branch only)");
+        const action = item.action ? ` → ${item.action}` : item.actionError ? ` → FAILED: ${item.actionError}` : "";
+        return `${base}\n      ${item.reason}${action}`;
+      }),
+    ];
+    if (result.mode === "dry-run" && result.summary.reclaimable > 0) {
+      lines.push(
+        "",
+        "Dry-run only — nothing was deleted. Review the list above with a human before re-calling with apply=true (master switch must be OFF).",
+      );
+    }
+    return {
+      content: [{ type: "text", text: lines.join("\n") }],
+      structuredContent: {
+        mode: result.mode,
+        repo_root: result.repo_root,
+        ttl_days: result.ttl_days,
+        summary: result.summary,
+        items: result.items,
+      },
+    };
+  },
+);
 
 main().catch((err) => {
   console.error("MCP server error:", err);
