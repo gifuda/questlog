@@ -49,6 +49,33 @@ impl Default for RunnerConfig {
 }
 
 /// The result of processing a single execution.
+/// Connection-class failure detection (network-failure auto-retry): these
+/// errors say nothing about the WORK — the CLI never got through to the
+/// model — so within budget the Runner retries automatically instead of
+/// paging a human. Genuine code/CLI errors keep the human DecisionRequest.
+pub fn is_network_failure(error: &str) -> bool {
+    let e = error.to_lowercase();
+    const SIGNALS: [&str; 16] = [
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "connection error",
+        "unreachable",
+        "no route to host",
+        "network is down",
+        "network error",
+        "dns",
+        "getaddrinfo",
+        "name resolution",
+        "enotfound",
+        "econnrefused",
+        "econnreset",
+        "failed to fetch",
+        "rate limit",
+    ];
+    SIGNALS.iter().any(|sig| e.contains(sig))
+}
+
 #[derive(Debug)]
 pub enum RunResult {
     Passed {
@@ -413,7 +440,53 @@ impl Runner {
                         Some(error),
                         Some("cli_failed"),
                     )?;
-                    execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                    // Network-failure governance (same spirit as timeouts):
+                    // a connection-class failure is an environment signal,
+                    // not a defect — retry within budget (the retry reuses
+                    // the retained worktree/session when possible) instead
+                    // of paging a human. Genuine CLI/code errors keep the
+                    // human DR created by seal_bundle.
+                    let network = is_network_failure(error);
+                    let budget_used = execution_store::get_execution(execution_id)
+                        .map(|e| execution_store::effective_budget_used(&e))
+                        .unwrap_or(0);
+                    if network && (budget_used as u64) < pkg.max_attempts.max(1) as u64 {
+                        match execution_store::create_retry_attempt(execution_id) {
+                            Ok(child_id) => {
+                                log::info!(
+                                    "Runner: network-class CLI failure (budget {}/{}) → auto-retry scheduled ({})",
+                                    budget_used, pkg.max_attempts.max(1), child_id
+                                );
+                                // create_retry_attempt flipped the package
+                                // back to ready — skip the blocked marking.
+                            }
+                            Err(e) => {
+                                log::warn!("Runner: network auto-retry failed for {execution_id}: {e}");
+                                execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                                let question = format!(
+                                    "Network-class CLI failure, and auto-retry scheduling failed (budget {}/{}): {}. Revise the package or cancel?",
+                                    budget_used, pkg.max_attempts.max(1), e
+                                );
+                                let _ = crate::decision_store::create_request(
+                                    crate::decision_store::NewDecisionRequest {
+                                        epic_id: &pkg.epic_id,
+                                        step_id: &pkg.step_id,
+                                        execution_id,
+                                        kind: "blocked",
+                                        question: &question,
+                                        options: vec![
+                                            "revise_package".to_string(),
+                                            "cancel".to_string(),
+                                        ],
+                                        evidence_refs: vec![],
+                                        package_revision: pkg.plan_revision,
+                                    },
+                                );
+                            }
+                        }
+                    } else {
+                        execution_store::mark_package_status(&pkg.package_id, "blocked")?;
+                    }
                 }
                 Ok(RunResult::Timeout { execution_id }) => {
                     execution_store::finish_execution(
@@ -556,6 +629,28 @@ impl Runner {
                         "Runner: keeping worktree for {exec_id} — scene capture incomplete, the worktree is the remaining evidence"
                     );
                     keep_worktree = true;
+                }
+                // Network-class CLI failures with a scheduled auto-retry
+                // keep the worktree too — the CLI may have made partial
+                // progress before the connection dropped, and the retry's
+                // resume path reuses the scene when possible.
+                if !keep_worktree
+                    && final_exec.status == ExecutionStatus::Blocked
+                    && final_exec.outcome.as_deref() == Some("cli_failed")
+                    && final_exec
+                        .last_error
+                        .as_deref()
+                        .is_some_and(is_network_failure)
+                {
+                    if let Ok(all) = execution_store::list_executions() {
+                        keep_worktree = all.iter().any(|e| {
+                            e.parent_attempt_id.as_deref() == Some(final_exec.id.as_str())
+                                && matches!(
+                                    e.status,
+                                    ExecutionStatus::Queued | ExecutionStatus::Running
+                                )
+                        });
+                    }
                 }
                 if !keep_worktree && final_exec.status == ExecutionStatus::TimedOut {
                     // Auto-retry child (queued/running) exists for this package?
@@ -1669,25 +1764,35 @@ impl Runner {
                     None
                 }
             }
-            RunResult::CliFailed { .. } => {
-                let exhausted = manifest.budget_used >= pkg.max_attempts.max(1);
-                Some((
-                    if exhausted { "retry_exhausted" } else { "blocked" },
-                    if exhausted {
-                        "The attempt budget is exhausted. Inspect evidence, revise the package, or cancel."
-                    } else {
-                        "The attempt did not produce a verified candidate. Inspect evidence and choose retry, revise, or cancel."
-                    },
-                    if exhausted {
-                        vec!["revise_package".to_string(), "cancel".to_string()]
-                    } else {
-                        vec![
-                            "retry".to_string(),
-                            "revise_package".to_string(),
-                            "cancel".to_string(),
-                        ]
-                    },
-                ))
+            RunResult::CliFailed { error, .. } => {
+                // Network-class failures within budget are auto-retried by
+                // the poll loop (same governance as timeouts) — a DR here
+                // would page a human for something the system already took
+                // over. Genuine errors and exhausted budgets still page.
+                if is_network_failure(error)
+                    && manifest.budget_used < pkg.max_attempts.max(1)
+                {
+                    None
+                } else {
+                    let exhausted = manifest.budget_used >= pkg.max_attempts.max(1);
+                    Some((
+                        if exhausted { "retry_exhausted" } else { "blocked" },
+                        if exhausted {
+                            "The attempt budget is exhausted. Inspect evidence, revise the package, or cancel."
+                        } else {
+                            "The attempt did not produce a verified candidate. Inspect evidence and choose retry, revise, or cancel."
+                        },
+                        if exhausted {
+                            vec!["revise_package".to_string(), "cancel".to_string()]
+                        } else {
+                            vec![
+                                "retry".to_string(),
+                                "revise_package".to_string(),
+                                "cancel".to_string(),
+                            ]
+                        },
+                    ))
+                }
             }
             RunResult::Paused { .. } => Some((
                 "approval",
@@ -2468,6 +2573,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("QUESTLOG_RUNTIME", dir.path().join("runtime"));
         (dir, guard)
+    }
+
+    /// Network-class failure detection: connection/DNS/rate-limit signals
+    /// are retryable; genuine code errors are not.
+    #[test]
+    fn network_failure_detection() {
+        assert!(is_network_failure("fetch failed: Connection refused"));
+        assert!(is_network_failure("Error: getaddrinfo ENOTFOUND api.example.com"));
+        assert!(is_network_failure("request failed: ECONNRESET"));
+        assert!(is_network_failure("Network is unreachable"));
+        assert!(is_network_failure("429 rate limit exceeded"));
+        assert!(is_network_failure("Failed to fetch"));
+        assert!(!is_network_failure("exit code 1: cargo test failed"));
+        assert!(!is_network_failure("panicked at 'index out of bounds'"));
+        assert!(!is_network_failure("syntax error in src/main.rs"));
     }
 
     #[test]
