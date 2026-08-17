@@ -224,7 +224,9 @@
     "retryBudget": "Retry budget",
     "budgetExhausted": "exhausted — revise the sealed package to retry",
     "retriesLeft": "{{count}} auto-retries left",
-    "budgetExhaustedHint": "Auto-retry budget exhausted — revise the sealed package (prepare → validate → seal) to continue"
+    "budgetExhaustedHint": "Auto-retry budget exhausted — revise the sealed package (prepare → validate → seal) to continue",
+    "blockedByGlobalFirst": "Plan authorized, but the master switch (emergency stop) is OFF — turn it on to auto-execute",
+    "blockedByProjectFirst": "Plan authorized, but the project trust (one-time setting) is OFF — enable the project switch to auto-execute"
   },
   "timeline": {
     "undoRemove": "Removed \"{{name}}\"",

@@ -287,3 +287,79 @@ describe("enqueueStep returns runner_eligible", () => {
     expect(enqueueResult.message).toContain("BLOCKED");
   });
 });
+
+// ─── S5: primary_blocker causal priority ───
+
+describe("primary_blocker priority (S5)", () => {
+  it("picks the master kill switch over everything else", async () => {
+    // Global OFF + epic not authorized: global wins as THE reason.
+    await fs.writeFile(
+      path.join(process.env.QUESTLOG_RUNTIME!, "runner-config.json"),
+      JSON.stringify({
+        version: 2,
+        global_enabled: false,
+        projects: { [projectDir]: { enabled: true } },
+        revision: 3,
+      }),
+    );
+    const pkgId = await buildSealedPackage();
+    const result = await verifyPickupReadiness(pkgId);
+    if ("error" in result) throw new Error(result.error);
+    expect(result.primary_blocker).not.toBeNull();
+    expect(result.primary_blocker!.check).toBe("global_enabled");
+  });
+
+  it("picks project trust over plan authorization", async () => {
+    // Global ON, project OFF, epic unauthorized: project wins.
+    await fs.writeFile(
+      path.join(process.env.QUESTLOG_RUNTIME!, "runner-config.json"),
+      JSON.stringify({
+        version: 2,
+        global_enabled: true,
+        projects: {},
+        revision: 4,
+      }),
+    );
+    const pkgId = await buildSealedPackage();
+    const result = await verifyPickupReadiness(pkgId);
+    if ("error" in result) throw new Error(result.error);
+    expect(result.primary_blocker).not.toBeNull();
+    expect(result.primary_blocker!.check).toBe("project_enabled");
+  });
+
+  it("runner-offline surfaces when switches pass but the thread cannot live", async () => {
+    // Global ON and NO project enabled anywhere: the thread condition fails
+    // while global+target-project checks pass — acceptance 9's "Runner
+    // offline" must name itself.
+    await fs.writeFile(
+      path.join(process.env.QUESTLOG_RUNTIME!, "runner-config.json"),
+      JSON.stringify({
+        version: 2,
+        global_enabled: true,
+        projects: {},
+        revision: 5,
+      }),
+    );
+    const pkgId = await buildSealedPackage();
+    const result = await verifyPickupReadiness(pkgId);
+    if ("error" in result) throw new Error(result.error);
+    const runnerBlocker = result.blockers.find((b) => b.check === "runner_thread_alive");
+    expect(runnerBlocker).toBeTruthy();
+    // project_enabled outranks runner_thread_alive, so the PRIMARY stays the
+    // project switch here; the runner-offline reason is listed and reachable.
+    expect(result.primary_blocker!.check).toBe("project_enabled");
+  });
+
+  it("plan authorization is the primary when only it blocks", async () => {
+    // Switches all on; flip the epic's auto_execute to false.
+    await writeRunnerConfig({ [projectDir]: { enabled: true } });
+    const epicsPath = path.join(projectDir, ".epics.json");
+    const board = JSON.parse(await fs.readFile(epicsPath, "utf-8"));
+    board.epics[0].auto_execute = false;
+    await fs.writeFile(epicsPath, JSON.stringify(board));
+    const pkgId = await buildSealedPackage();
+    const result = await verifyPickupReadiness(pkgId);
+    if ("error" in result) throw new Error(result.error);
+    expect(result.primary_blocker!.check).toBe("epic_auto_execute_allows");
+  });
+});

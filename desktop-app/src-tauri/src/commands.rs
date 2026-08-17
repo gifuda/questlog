@@ -766,10 +766,21 @@ fn epics_to_json(data: &crate::models::EpicsFile, project_path: &str) -> serde_j
                 .iter()
                 .map(|s| s.id.clone())
                 .collect();
-            let epic_steps: Vec<serde_json::Value> = data
+            // S5: stable (order, created_at) ordering — the UI list, focus
+            // and next-step hints must never follow JSON insertion order
+            // (a step inserted later with a smaller order shows first).
+            let mut ordered_steps: Vec<&crate::models::Step> = data
                 .steps
                 .iter()
                 .filter(|s| s.epic_id == e.id)
+                .collect();
+            ordered_steps.sort_by(|a, b| {
+                a.order
+                    .cmp(&b.order)
+                    .then_with(|| a.created_at.cmp(&b.created_at))
+            });
+            let epic_steps: Vec<serde_json::Value> = ordered_steps
+                .into_iter()
                 .map(|s| {
                     let depends_titles: Vec<String> = s
                         .depends_on
@@ -1482,9 +1493,48 @@ mod tests {
     use super::*;
 
     // arr_len: edge cases for the JSON helper used by epic rendering.
-    // (epics_to_json itself is covered indirectly by the frontend; its
-    // assembly logic is dense and couples to the full EpicsFile shape, so we
-    // pin only the small pure helper here.)
+    // S5: epics_to_json's step ORDERING is pinned directly here (it is the
+    // App's single data source — acceptance 10).
+
+    /// S5 (acceptance 10): the serialized step list is ordered by
+    /// (order, created_at) — a step inserted LATER with the SMALLEST order
+    /// must serialize first, matching the Runner's order semantics. The
+    /// JSON insertion order must never leak through.
+    #[test]
+    fn epic_steps_ordered_by_order_not_insertion() {
+        let data: crate::models::EpicsFile = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "project": "p",
+            "epics": [{"id": "e1", "title": "T", "status": "active",
+                       "created_at": "2026-08-17T00:00:00Z",
+                       "updated_at": "2026-08-17T00:00:00Z"}],
+            "steps": [
+                {"id": "s3", "epic_id": "e1", "title": "C", "stage": "pending",
+                 "order": 3, "created_at": "2026-08-17T03:00:00Z",
+                 "updated_at": "2026-08-17T03:00:00Z"},
+                {"id": "s1", "epic_id": "e1", "title": "A", "stage": "pending",
+                 "order": 1, "created_at": "2026-08-17T01:00:00Z",
+                 "updated_at": "2026-08-17T01:00:00Z"},
+                {"id": "s0", "epic_id": "e1", "title": "LATE-SMALLEST", "stage": "pending",
+                 "order": 0, "created_at": "2026-08-17T09:00:00Z",
+                 "updated_at": "2026-08-17T09:00:00Z"},
+                {"id": "s2", "epic_id": "e1", "title": "B", "stage": "pending",
+                 "order": 1, "created_at": "2026-08-17T00:00:00Z",
+                 "updated_at": "2026-08-17T00:00:00Z"}
+            ]
+        }))
+        .unwrap();
+        let out = epics_to_json(&data, "/tmp/proj");
+        let titles: Vec<&str> = out["epics"][0]["steps"]
+            .as_array()
+            .expect("epics array with steps")
+            .iter()
+            .map(|s| s["title"].as_str().unwrap())
+            .collect();
+        // order 0 (late-inserted) first; the order-1 tie breaks on created_at
+        // ascending (B at 00:00 before A at 01:00); then order 3.
+        assert_eq!(titles, vec!["LATE-SMALLEST", "B", "A", "C"]);
+    }
 
     #[test]
     fn arr_len_counts_children_array() {

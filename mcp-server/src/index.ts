@@ -831,14 +831,22 @@ server.tool(
       `🔍 Readiness check for package ${result.package_id}`,
       `  Status: ${result.status}`,
       `  Will be picked up: ${result.will_be_picked_up ? "✅ YES" : "❌ NO"}`,
-      "",
+    ];
+    if (result.primary_blocker) {
+      lines.push(
+        "",
+        `⛔ 唯一阻断原因 (primary): [${result.primary_blocker.check}] ${result.primary_blocker.reason}`,
+        "   层级语义: master kill switch=急停 / project switch=一次性信任设置 / epic auto_execute=每方案一次授权",
+      );
+    }
+    lines.push(
       "Runner-side checks:",
       `  • project_enabled:          ${result.runner_side_checks.project_enabled}`,
       `  • epic_auto_execute_allows: ${result.runner_side_checks.epic_auto_execute_allows}`,
       `  • runner_thread_alive:      ${result.runner_side_checks.runner_thread_alive}`,
       `  • already_in_flight:        ${result.runner_side_checks.already_in_flight}`,
       `  • acceptance_commands_ok:   ${result.acceptance_commands_available}`,
-    ];
+    );
     if (result.blockers.length > 0) {
       lines.push("", "Blockers:");
       for (const b of result.blockers) {

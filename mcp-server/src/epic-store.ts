@@ -201,7 +201,7 @@ function epicProgressVisited(epicId: string, data: EpicsFile, visited: Set<strin
 export function actionableSteps(epicId: string, steps: Step[]): Step[] {
   const epicSteps = steps
     .filter((s) => s.epic_id === epicId)
-    .sort((a, b) => a.order - b.order);
+    .sort((a, b) => a.order - b.order || a.created_at.localeCompare(b.created_at));
   const observedIds = new Set(
     epicSteps.filter((s) => s.stage === "observed").map((s) => s.id)
   );
@@ -459,7 +459,16 @@ export async function updateStep(cwd: string, id: string, patch: {
 
 export async function listEpics(cwd: string): Promise<EpicsFile | { error: string }> {
   const result = await readEpicsSafe(cwd);
-  if ("ok" in result) return result.data;
+  if ("ok" in result) {
+    // S5: single-exit stable (order, created_at) ordering — never expose
+    // JSON insertion order (a later-inserted step with a smaller order
+    // must list first, matching the Rust backend and the Runner's order
+    // semantics).
+    result.data.steps.sort(
+      (a, b) => a.order - b.order || a.created_at.localeCompare(b.created_at),
+    );
+    return result.data;
+  }
   if ("notFound" in result) {
     return { version: 1, project: path.basename(cwd), epics: [], steps: [] };
   }

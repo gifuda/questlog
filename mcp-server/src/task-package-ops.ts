@@ -703,6 +703,10 @@ export interface ReadinessResult {
   status: string;
   will_be_picked_up: boolean;
   blockers: ReadinessBlocker[];
+  /** S5: THE single blocking reason by causal priority (emergency stop >
+   *  project trust > Runner thread > plan authorization > wait > registry).
+   *  Null when there are no blockers. */
+  primary_blocker: ReadinessBlocker | null;
   runner_side_checks: {
     global_enabled: boolean;
     project_enabled: boolean;
@@ -893,6 +897,36 @@ export async function verifyPickupReadiness(
     ? Object.values(config.projects).some((p) => p.enabled)
     : false;
   const runnerThreadAlive = globalEnabled && anyProjectEnabled;
+  // S5 (acceptance 9): the Runner-offline state must surface as its own
+  // blocking reason. The theoretical corner: switches pass here, yet the
+  // thread condition itself fails — point the operator at the Rust-side
+  // heartbeat (runtime_status) for live diagnosis.
+  if (globalEnabled && !runnerThreadAlive) {
+    blockers.push({
+      check: "runner_thread_alive",
+      reason:
+        "Runner thread is not running (no enabled project keeps it alive) — check the desktop app's runner runtime status heartbeat",
+    });
+  }
+
+  // S5: THE single blocking reason — causal priority: emergency stop >
+  // one-time project trust > Runner thread > per-plan authorization (the
+  // only switch normal operation touches) > wait states > registry gaps.
+  const BLOCKER_PRIORITY: Record<string, number> = {
+    global_enabled: 0,
+    project_enabled: 1,
+    runner_thread_alive: 2,
+    epic_auto_execute_allows: 3,
+    already_in_flight: 4,
+    acceptance_commands_available: 5,
+  };
+  const primaryBlocker =
+    blockers.length === 0
+      ? null
+      : [...blockers].sort(
+          (a, b) =>
+            (BLOCKER_PRIORITY[a.check] ?? 99) - (BLOCKER_PRIORITY[b.check] ?? 99),
+        )[0] ?? null;
 
   const willBePickedUp =
     blockers.length === 0 &&
@@ -903,6 +937,7 @@ export async function verifyPickupReadiness(
     status: pkg.status,
     will_be_picked_up: willBePickedUp,
     blockers,
+    primary_blocker: primaryBlocker,
     runner_side_checks: {
       global_enabled: globalEnabled,
       project_enabled: projectEnabled,

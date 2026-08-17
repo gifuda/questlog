@@ -224,7 +224,9 @@
     "retryBudget": "重试预算",
     "budgetExhausted": "已耗尽 — 修订封存包后重试",
     "retriesLeft": "剩余自动重试 {{count}} 次",
-    "budgetExhaustedHint": "自动重试预算已耗尽 — 修订封存包（prepare → validate → seal）后继续"
+    "budgetExhaustedHint": "自动重试预算已耗尽 — 修订封存包（prepare → validate → seal）后继续",
+    "blockedByGlobalFirst": "方案授权已开，但总闸（急停）关闭——开启总闸后才会自动执行",
+    "blockedByProjectFirst": "方案授权已开，但项目信任（一次性设置）未开——开启项目开关后才会自动执行"
   },
   "timeline": {
     "undoRemove": "已移除「{{name}}」",

@@ -1,4 +1,4 @@
-import { useState, useEffect, Fragment } from "react";
+import { useMemo, useState, useEffect, Fragment } from "react";
 import { useTranslation } from "react-i18next";
 import { useEpics } from "../hooks/useEpics";
 import { useProjectRunner, useRunnerStatus, getEpicAutoExecute, setEpicAutoExecute } from "../hooks/useExecutions";
@@ -155,6 +155,8 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                   onDeleteStep={(stepId) => deleteStep(stepId)}
                   onAddChild={(id, title, opts) => addEpic(title, { ...opts, parentId: id })}
                   projectPath={projectPath}
+                  globalEnabled={projectStatus?.global_enabled}
+                  projectEnabled={projectStatus?.project_enabled}
                 />
                 {sortEpics(epic.children ?? []).map((child) => (
                   <EpicRow
@@ -169,6 +171,8 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                     onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
                     onDeleteStep={(stepId) => deleteStep(stepId)}
                     projectPath={projectPath}
+                    globalEnabled={projectStatus?.global_enabled}
+                    projectEnabled={projectStatus?.project_enabled}
                   />
                 ))}
               </Fragment>
@@ -379,9 +383,12 @@ interface EpicRowProps {
   onAddChild?: (epicId: string, title: string, opts: { description?: string; priority?: string }) => void;
   /** 项目路径（用于方案级 auto_execute 控制，仅顶级方案）。 */
   projectPath?: string;
+  /** S5: 上层开关状态——三态阻断原因推导（总闸急停 > 项目信任 > 方案授权）。 */
+  globalEnabled?: boolean;
+  projectEnabled?: boolean;
 }
 
-function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, onUpdateStep, onDeleteStep, onAddChild, projectPath }: EpicRowProps) {
+function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, onUpdateStep, onDeleteStep, onAddChild, projectPath, globalEnabled, projectEnabled }: EpicRowProps) {
   const { t } = useTranslation();
   const badge = epicStatusBadge[epic.status];
   const [expanded, setExpanded] = useState(false);
@@ -408,9 +415,20 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
     setAutoExec(next);
   };
 
-  const currentStep = epic.steps.find((s) => IN_PROGRESS_STAGES.includes(s.stage));
+  // S5: stable (order, created_at) ordering — ONE sorted array feeds every
+  // consumer (list render, focus, next-step, dependency dropdown), so the
+  // UI never follows JSON insertion order and always matches the backend.
+  const steps = useMemo(
+    () =>
+      [...epic.steps].sort(
+        (a, b) => a.order - b.order || a.created_at.localeCompare(b.created_at),
+      ),
+    [epic.steps],
+  );
+
+  const currentStep = steps.find((s) => IN_PROGRESS_STAGES.includes(s.stage));
   // 下一步排除在办步骤本身，避免两列显示同一条
-  const nextStep = epic.steps.find((s) => s !== currentStep && s.actionable && s.stage !== "observed");
+  const nextStep = steps.find((s) => s !== currentStep && s.actionable && s.stage !== "observed");
   const isDone = epic.status === "done";
   const isBlocked = epic.status === "blocked";
 
@@ -453,7 +471,12 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
             <button
               onClick={toggleAutoExec}
               title={
-                autoExec === true ? t("execution.epicAutoOn")
+                autoExec === true
+                  ? globalEnabled === false
+                    ? t("execution.blockedByGlobalFirst")
+                    : projectEnabled === false
+                      ? t("execution.blockedByProjectFirst")
+                      : t("execution.epicAutoOn")
                   : autoExec === false ? t("execution.epicAutoOff")
                   : t("execution.epicAutoInherit")
               }
@@ -566,7 +589,7 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
                   {epic.steps.length === 0 && (
                     <div className="text-xs text-faint py-1">{t("epic.noSteps")}</div>
                   )}
-                  {epic.steps.map((step) => (
+                  {steps.map((step) => (
                     <StepRow
                       key={step.id}
                       step={step}
@@ -607,7 +630,7 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
               {/* 添加步骤表单 */}
               {showAddStep && (
                 <StepAddForm
-                  existingSteps={epic.steps.map((s) => ({ id: s.id, title: s.title }))}
+                  existingSteps={steps.map((s) => ({ id: s.id, title: s.title }))}
                   onCancel={() => setShowAddStep(false)}
                   onSubmit={(title, desc, dependsOn) => { onAddStep(epic.id, title, desc, dependsOn); setShowAddStep(false); }}
                 />
@@ -928,7 +951,9 @@ function priorityBadge(priority: string): string {
 type TFunc = (key: string, opts?: Record<string, unknown>) => string;
 
 function copyEpicRef(epic: Epic, t: TFunc) {
-  const actionable = epic.steps.filter((s) => s.actionable);
+  const actionable = [...epic.steps]
+    .sort((a, b) => a.order - b.order || a.created_at.localeCompare(b.created_at))
+    .filter((s) => s.actionable);
   const status = t(epicStatusKey[epic.status]);
   const lines = [
     t("protocol.continuePlan", { title: epic.title }),
