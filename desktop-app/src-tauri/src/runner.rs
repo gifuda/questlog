@@ -779,6 +779,41 @@ impl Runner {
         base.saturating_mul(1u64 << exp).min(7200)
     }
 
+    /// Standard hard-boundary envelope appended to EVERY executor task. The
+    /// sealed objective says WHAT to build; this says what is structurally
+    /// off-limits. Production incident 2026-08-18 (S4): an executor observed
+    /// prior steps' panel states, concluded stage self-advancement was part
+    /// of the job, and edited `.epics.json` — a forbidden control-plane
+    /// touch that hard-blocks the step. The objective cannot carry these
+    /// clauses reliably (every package author must remember them); the
+    /// Runner can and must.
+    fn task_envelope(pkg: &TaskPackageSummary) -> String {
+        let list = |v: &[String]| {
+            if v.is_empty() {
+                "（无）".to_string()
+            } else {
+                v.join("、")
+            }
+        };
+        let create_note = if pkg.create_paths.is_empty() {
+            "（未声明——新建文件也必须落在修改权路径内）".to_string()
+        } else {
+            list(&pkg.create_paths)
+        };
+        format!(
+            "\n\n[QuestLog 施工边界（硬约束，越界即熔断）]\n\
+             ▸ 修改权（仅限这些已有文件）: {allowed}\n\
+             ▸ 新建权（仅限这些路径下新建文件）: {create}\n\
+             ▸ 禁区（绝不触碰）: {forbidden}\n\
+             ▸ 控制面/运行时状态文件（.epics.json、.todos.json、questlog 运行时数据、各类 *.lock）永远禁止修改——面板阶段推进、包状态、里程碑登记全部由 Runner 负责，不是你的工作。若认为需要面板登记，写进最终报告即可。\n\
+             ▸ 不要执行 git commit / push / merge——候选提交由 Runner 统一收口，你的改动留在工作区就是正确交付。\n\
+             ▸ 交付 = worktree 内的文件改动；只在最终回复里描述而不落盘 = 未完成。",
+            allowed = list(&pkg.allowed_paths),
+            create = create_note,
+            forbidden = list(&pkg.forbidden_paths),
+        )
+    }
+
     /// Resolve the CLI session id for a finished execution. The headless CLI
     /// does NOT print its session id, but it always records a row in the
     /// ZCode session DB keyed by the (resolved) working directory — look it
@@ -1035,13 +1070,17 @@ impl Runner {
                     match attempt_bundle::recover_scene_into_worktree(
                         &worktree_path,
                         &prev_bundle,
+                        &pkg.allowed_paths,
+                        &pkg.create_paths,
+                        &pkg.forbidden_paths,
                     ) {
                         Ok(report) => {
                             log::info!(
-                                "Runner: recovered scene from {prev_id} into {} (patched={}, untracked={})",
+                                "Runner: recovered scene from {prev_id} into {} (patched={}, untracked={}, skipped_out_of_scope={})",
                                 worktree_path.display(),
                                 report.patched,
-                                report.untracked_restored
+                                report.untracked_restored,
+                                report.skipped_out_of_scope
                             );
                             manifest.scene_recovered_from = Some(prev_id.clone());
                             // Also stamp the execution row so the UI can show
@@ -1061,11 +1100,12 @@ impl Runner {
                                     "source_execution": prev_id,
                                     "patched": report.patched,
                                     "untracked_restored": report.untracked_restored,
+                                    "skipped_out_of_scope": report.skipped_out_of_scope,
                                 }),
                             );
                             recovery_note = format!(
-                                "\n\n[QuestLog 成果恢复] 前次尝试因范围封存被熔断，其改动已应用在当前工作区（patched={}，untracked 新文件 {} 个）。请在其基础上验证、调整并完成目标——不要从零重做。",
-                                report.patched, report.untracked_restored
+                                "\n\n[QuestLog 成果恢复] 前次尝试因范围封存被熔断，其改动已按当前包范围过滤后应用在当前工作区（patched={}，untracked 新文件 {} 个，越权路径未回放 {} 个）。请在其基础上验证、调整并完成目标——不要从零重做。",
+                                report.patched, report.untracked_restored, report.skipped_out_of_scope
                             );
                         }
                         Err(e) => {
@@ -1101,26 +1141,21 @@ impl Runner {
         };
         let mut handle = if let Some(sid) = &resume {
             let task = format!(
-                "{}\n\n[续接说明] 你在恢复一个因超时中断的会话：已完成的分析和阶段不要重做，先查看工作区当前状态再继续。剩余预算约 {} 秒。",
+                "{}{}\n\n[续接说明] 你在恢复一个因超时中断的会话：已完成的分析和阶段不要重做，先查看工作区当前状态再继续。剩余预算约 {} 秒。",
                 pkg.objective,
+                Self::task_envelope(pkg),
                 timeout.as_secs()
             );
             executor.start_with_resume(&task, sid, &worktree_path, sandbox, timeout)?
         } else {
-            let task = if recovery_note.is_empty() {
-                pkg.objective.clone()
-            } else {
-                format!("{}{}", pkg.objective, recovery_note)
-            };
-            // S2: persist the actual prompt so audits can see what the
-            // executor was told, distinct from the sealed objective.
-            if !recovery_note.is_empty() {
-                match attempt_bundle::write_task_prompt(&bundle_dir, &task) {
-                    Ok(Some(ref_name)) => manifest.task_prompt_ref = Some(ref_name),
-                    Ok(None) => {}
-                    Err(e) => {
-                        log::warn!("Failed to persist task prompt: {e}");
-                    }
+            let task = format!("{}{}{}", pkg.objective, Self::task_envelope(pkg), recovery_note);
+            // Persist the actual prompt (objective + boundaries) so audits can
+            // see what the executor was told, distinct from the sealed objective.
+            match attempt_bundle::write_task_prompt(&bundle_dir, &task) {
+                Ok(Some(ref_name)) => manifest.task_prompt_ref = Some(ref_name),
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("Failed to persist task prompt: {e}");
                 }
             }
             executor.start(&task, &worktree_path, sandbox, timeout)?
@@ -3346,6 +3381,33 @@ mod tests {
             package_hash: "h".to_string(),
             computed_hash: "h".to_string(),
         }
+    }
+
+    /// S4 incident 2026-08-18: the executor must be TOLD the hard boundaries
+    /// (scope lists, control-plane prohibition, no-git-commit, deliverable
+    /// = files) — an objective alone let an executor self-advance its panel
+    /// stage in .epics.json and hard-block the step.
+    #[test]
+    fn task_envelope_carries_hard_boundaries() {
+        let mut pkg = seal_test_pkg();
+        pkg.allowed_paths = vec!["automation/trade_update.py".to_string()];
+        pkg.create_paths = vec!["automation/tests/**".to_string()];
+        pkg.forbidden_paths = vec!["**/持仓数据.json".to_string()];
+        let envelope = Runner::task_envelope(&pkg);
+        assert!(envelope.contains("[QuestLog 施工边界"), "boundary header");
+        assert!(envelope.contains("automation/trade_update.py"), "modify rights listed");
+        assert!(envelope.contains("automation/tests/**"), "create rights listed");
+        assert!(envelope.contains("**/持仓数据.json"), "forbidden listed");
+        assert!(envelope.contains(".epics.json"), "control-plane prohibition");
+        assert!(envelope.contains("Runner 负责"), "panel work belongs to the Runner");
+        assert!(envelope.contains("git commit"), "no self-commit clause");
+        assert!(envelope.contains("落盘"), "deliverable-must-land-in-files clause");
+
+        // v1 package without create rights: the fallback note, not an empty list.
+        let mut v1 = seal_test_pkg();
+        v1.create_paths = vec![];
+        let v1_envelope = Runner::task_envelope(&v1);
+        assert!(v1_envelope.contains("未声明"), "v1 fallback note for create rights");
     }
 
     #[test]

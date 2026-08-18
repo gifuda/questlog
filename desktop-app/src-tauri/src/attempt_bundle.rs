@@ -494,6 +494,10 @@ pub struct SceneRecovery {
     pub patched: bool,
     /// Number of untracked files copied back into the worktree.
     pub untracked_restored: usize,
+    /// Number of scene paths NOT replayed because the CURRENT package scope
+    /// does not authorize them (scope was tightened, or the old attempt
+    /// touched control-plane/forbidden files).
+    pub skipped_out_of_scope: usize,
 }
 
 /// S2: recover a captured scene into a FRESH worktree — the "reuse the work
@@ -504,6 +508,9 @@ pub struct SceneRecovery {
 pub fn recover_scene_into_worktree(
     worktree: &Path,
     bundle_dir: &Path,
+    allowed_patterns: &[String],
+    create_patterns: &[String],
+    forbidden_patterns: &[String],
 ) -> Result<SceneRecovery, String> {
     let scene_dir = bundle_dir.join("scene");
     if !scene_dir.is_dir() {
@@ -518,15 +525,58 @@ pub fn recover_scene_into_worktree(
         ));
     }
 
+    // Replay ONLY paths the CURRENT package authorizes. A scope-violation
+    // scene by definition contains paths the old attempt was NOT allowed to
+    // touch (possibly control-plane, e.g. an executor self-advancing its
+    // panel stage in .epics.json) — replaying those verbatim would re-trip
+    // the same circuit breaker on the recovered attempt: a violation loop.
+    // changed-paths.json carries each path's base-existence flag captured at
+    // the same base SHA the recovery itself requires, so classification is
+    // exact. Without the classification file we refuse (the caller degrades
+    // to a clean re-run) rather than blindly replay everything.
+    let classification: SceneChangedPaths = if has_classification {
+        let raw = std::fs::read_to_string(scene_dir.join("changed-paths.json"))
+            .map_err(|e| format!("read changed-paths.json: {e}"))?;
+        serde_json::from_str(&raw).map_err(|e| format!("parse changed-paths.json: {e}"))?
+    } else {
+        return Err(
+            "changed-paths.json missing — cannot filter recovery by scope; degrading to clean re-run"
+                .to_string(),
+        );
+    };
+    let mut tracked_keep: Vec<&str> = Vec::new();
+    let mut untracked_keep: Vec<&str> = Vec::new();
+    let mut skipped_out_of_scope = 0usize;
+    for entry in &classification.paths {
+        match crate::runner_git::classify_path_in_scope(
+            &entry.path,
+            entry.existed_in_base,
+            allowed_patterns,
+            create_patterns,
+            forbidden_patterns,
+        ) {
+            crate::runner_git::ChangedPathCategory::InScope => {
+                if entry.untracked {
+                    untracked_keep.push(entry.path.as_str());
+                } else {
+                    tracked_keep.push(entry.path.as_str());
+                }
+            }
+            _ => skipped_out_of_scope += 1,
+        }
+    }
+
     let mut patched = false;
-    if has_diff {
+    if has_diff && !tracked_keep.is_empty() {
         let patch_abs = scene_dir.join("diff-full.patch");
-        let output = std::process::Command::new("git")
-            .args([
-                "apply",
-                "--whitespace=nowarn",
-                &patch_abs.to_string_lossy(),
-            ])
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["apply", "--whitespace=nowarn"]);
+        for path in &tracked_keep {
+            cmd.arg("--include");
+            cmd.arg(path);
+        }
+        cmd.arg(patch_abs.to_string_lossy().as_ref());
+        let output = cmd
             .current_dir(worktree)
             .output()
             .map_err(|e| format!("git apply spawn: {e}"))?;
@@ -539,10 +589,12 @@ pub fn recover_scene_into_worktree(
         patched = true;
     }
 
-    // Copy untracked files back, preserving structure.
+    // Copy authorized untracked files back, preserving structure.
     let untracked_root = scene_dir.join("untracked");
     let mut untracked_restored = 0usize;
     if untracked_root.is_dir() {
+        let keep_set: std::collections::HashSet<&str> =
+            untracked_keep.iter().copied().collect();
         let mut stack = vec![untracked_root.clone()];
         while let Some(dir) = stack.pop() {
             let entries = std::fs::read_dir(&dir)
@@ -556,6 +608,10 @@ pub fn recover_scene_into_worktree(
                 let rel = path
                     .strip_prefix(&untracked_root)
                     .map_err(|e| format!("rel path: {e}"))?;
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                if !keep_set.contains(rel_str.as_str()) {
+                    continue;
+                }
                 let dst = worktree.join(rel);
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent)
@@ -571,7 +627,31 @@ pub fn recover_scene_into_worktree(
     Ok(SceneRecovery {
         patched,
         untracked_restored,
+        skipped_out_of_scope,
     })
+}
+
+/// Read-side mirror of the changed-paths.json the scene snapshot writes —
+/// see `write_scene_snapshot` for the authoritative shape.
+#[derive(Debug, Deserialize)]
+struct SceneChangedPaths {
+    #[serde(default)]
+    #[allow(dead_code)] // read for completeness; recovery only needs `paths`
+    total: usize,
+    #[serde(default)]
+    paths: Vec<SceneChangedPath>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SceneChangedPath {
+    path: String,
+    #[serde(default)]
+    #[allow(dead_code)] // the OLD package's category; recovery re-classifies
+    category: String,
+    #[serde(default)]
+    existed_in_base: bool,
+    #[serde(default)]
+    untracked: bool,
 }
 
 /// S2: persist the task string the executor actually received. The sealed
@@ -1268,9 +1348,17 @@ mod tests {
         git(b, &["add", "."]);
         git(b, &["commit", "-qm", "base"]);
 
-        let recovery = recover_scene_into_worktree(b, bundle.path()).unwrap();
+        let recovery = recover_scene_into_worktree(
+            b,
+            bundle.path(),
+            &["src.ts".to_string()],
+            &["docs/**".to_string()],
+            &[],
+        )
+        .unwrap();
         assert!(recovery.patched);
         assert_eq!(recovery.untracked_restored, 1);
+        assert_eq!(recovery.skipped_out_of_scope, 0);
         assert_eq!(
             std::fs::read_to_string(b.join("src.ts")).unwrap(),
             "reworked content\n"
@@ -1325,8 +1413,94 @@ mod tests {
         git(b, &["add", "."]);
         git(b, &["commit", "-qm", "diverged"]);
 
-        let result = recover_scene_into_worktree(b, bundle.path());
+        let result = recover_scene_into_worktree(b, bundle.path(), &["src.ts".to_string()], &[], &[]);
         assert!(result.is_err(), "expected apply failure on drifted base");
+    }
+
+    /// Production shape 2026-08-18 (S4 incident): a scope-violation scene
+    /// containing a control-plane edit (.epics.json) plus real in-scope work.
+    /// Recovery into a REVISED package must replay only the authorized
+    /// paths — replaying the control-plane hunk verbatim would re-trip the
+    /// circuit breaker and loop the step forever.
+    #[test]
+    fn scene_recovery_filters_paths_the_new_scope_does_not_allow() {
+        let repo_a = tempfile::tempdir().unwrap();
+        let a = repo_a.path();
+        git(a, &["init", "-q"]);
+        std::fs::write(a.join("src.ts"), "base\n").unwrap();
+        std::fs::write(a.join(".epics.json"), "{\"v\":1}\n").unwrap();
+        git(a, &["add", "."]);
+        git(a, &["commit", "-qm", "base"]);
+        let base_sha = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(a)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // The old attempt: real work + a forbidden control-plane self-advance.
+        std::fs::write(a.join("src.ts"), "reworked content\n").unwrap();
+        std::fs::write(a.join(".epics.json"), "{\"v\":2}\n").unwrap();
+        std::fs::create_dir_all(a.join("docs")).unwrap();
+        std::fs::write(a.join("docs/note.md"), "precious analysis\n").unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let changed = vec![
+            "src.ts".to_string(),
+            ".epics.json".to_string(),
+            "docs/note.md".to_string(),
+        ];
+        write_scene_snapshot(
+            bundle.path(),
+            a,
+            &base_sha,
+            &changed,
+            &crate::runner_git::base_tree_files(a, &base_sha).unwrap(),
+            &["src.ts".to_string()],
+            &[],
+            &[],
+            None,
+            None,
+            5,
+        )
+        .unwrap();
+
+        // Fresh worktree at the same base.
+        let repo_b = tempfile::tempdir().unwrap();
+        let b = repo_b.path();
+        git(b, &["init", "-q"]);
+        std::fs::write(b.join("src.ts"), "base\n").unwrap();
+        std::fs::write(b.join(".epics.json"), "{\"v\":1}\n").unwrap();
+        git(b, &["add", "."]);
+        git(b, &["commit", "-qm", "base"]);
+
+        // REVISED package: src.ts authorized, docs/** creation authorized,
+        // .epics.json must never come back.
+        let recovery = recover_scene_into_worktree(
+            b,
+            bundle.path(),
+            &["src.ts".to_string()],
+            &["docs/**".to_string()],
+            &[],
+        )
+        .unwrap();
+        assert!(recovery.patched, "authorized tracked work must replay");
+        assert_eq!(recovery.untracked_restored, 1);
+        assert_eq!(recovery.skipped_out_of_scope, 1, ".epics.json must be filtered");
+        assert_eq!(
+            std::fs::read_to_string(b.join("src.ts")).unwrap(),
+            "reworked content\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(b.join(".epics.json")).unwrap(),
+            "{\"v\":1}\n",
+            "control-plane edit must NOT be replayed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(b.join("docs/note.md")).unwrap(),
+            "precious analysis\n"
+        );
     }
 
     fn mock_pkg() -> TaskPackageSummary {
