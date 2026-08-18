@@ -818,7 +818,8 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 }
 
 /// Create a candidate commit in the worktree with QuestLog trailers.
-/// Only commits paths that are in the allowed scope.
+/// Only commits paths authorized by the TaskScope v2 rights union:
+/// allowed_paths (modify rights) ∪ create_paths (creation rights).
 ///
 /// If the CLI executor already created its own commit (common with ZCode
 /// which follows "commit after change" conventions), the existing commit
@@ -833,6 +834,7 @@ pub fn create_candidate_commit(
     plan_revision: u32,
     execution_id: &str,
     allowed_patterns: &[String],
+    create_patterns: &[String],
     base_sha: &str,
 ) -> Result<Option<String>, String> {
     // Check if the CLI executor already committed (HEAD != base_sha).
@@ -846,13 +848,18 @@ pub fn create_candidate_commit(
         return Ok(None); // No changes — no commit
     }
 
-    // Stage only allowed paths (for uncommitted changes; harmless if already committed)
+    // Stage only scope-authorized paths (for uncommitted changes; harmless if
+    // already committed). A brand-new file passes verify_changed_paths_in_scope
+    // via create_paths even when it matches no allowed_patterns pattern — the
+    // staging filter must honor the same rights union or creation-only work
+    // (docs/design deliverables) stages nothing and is misread as no_diff.
     let mut staged_any = false;
     for path in &changed {
-        let is_allowed = !is_control_plane_path(path)
+        let is_stageable = !is_control_plane_path(path)
             && !is_runner_internal_path(path)
-            && allowed_patterns.iter().any(|p| glob_match(p, path));
-        if is_allowed {
+            && (allowed_patterns.iter().any(|p| glob_match(p, path))
+                || create_patterns.iter().any(|p| glob_match(p, path)));
+        if is_stageable {
             let _ = Command::new("git")
                 .args(["-c", "core.quotePath=false", "add", path])
                 .current_dir(worktree_path)
@@ -1534,6 +1541,7 @@ mod tests {
             1,
             "exec_test",
             &["src.rs".to_string()],
+            &[],
             &base,
         );
         match result {
@@ -1558,6 +1566,76 @@ mod tests {
             Ok(None) => panic!("should have produced a candidate commit"),
             Err(e) => panic!("create_candidate_commit failed: {e}"),
         }
+    }
+
+    #[test]
+    fn candidate_commit_stages_creation_only_files() {
+        // Regression (2026-08-18 production incident): a step whose deliverable
+        // is a BRAND-NEW file authorized only via create_paths produced a real
+        // worktree change, passed the scope gate, then staged nothing (the old
+        // filter matched allowed_paths only) and was misreported as no_diff —
+        // blocking every design/docs step all morning. The staging filter must
+        // honor the same rights union as verify_changed_paths_in_scope.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        Command::new("git").arg("init").current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "base\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let base = read_head_sha(repo).unwrap();
+
+        // Executor writes ONE brand-new deliverable, untracked, uncommitted.
+        let deliverable = "_Manager/方案/量化/S0事实基线与契约冻结.md";
+        std::fs::create_dir_all(repo.join("_Manager/方案/量化")).unwrap();
+        std::fs::write(repo.join(deliverable), "# S0\n事实基线\n").unwrap();
+
+        // allowed_paths names a DIFFERENT file (the planned doc title); only
+        // create_paths' glob covers what was actually written.
+        let allowed = vec!["_Manager/方案/量化/统一治理_20260817.md".to_string()];
+        let create = vec!["_Manager/方案/量化/**".to_string()];
+
+        let result = create_candidate_commit(
+            repo,
+            "epic_test",
+            "step_test",
+            "pkg_test",
+            5,
+            "exec_test",
+            &allowed,
+            &create,
+            &base,
+        );
+        let sha = match result {
+            Ok(Some(sha)) => sha,
+            Ok(None) => panic!("creation-only deliverable must yield a candidate commit, not no_diff"),
+            Err(e) => panic!("create_candidate_commit failed: {e}"),
+        };
+
+        // The candidate commit must actually contain the new file.
+        let tree = Command::new("git")
+            .args(["-c", "core.quotepath=false", "ls-tree", "-r", "--name-only", &sha])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let files = String::from_utf8_lossy(&tree.stdout).to_string();
+        assert!(
+            files.lines().any(|l| l == deliverable),
+            "candidate tree should contain the creation-only deliverable; got:\n{files}"
+        );
     }
 }
 

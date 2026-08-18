@@ -1374,6 +1374,7 @@ impl Runner {
             pkg.plan_revision,
             &exec.id,
             &pkg.allowed_paths,
+            &pkg.create_paths,
             &pkg.base_sha,
         )?;
 
