@@ -326,15 +326,18 @@ impl Runner {
                     match final_status {
                         ExecutionStatus::Passed => {
                             execution_store::mark_package_status(&pkg.package_id, "passed")?;
-                            // Package acceptance IS the gate (user-directed
-                            // B mode): a passing execution advances the step
-                            // straight to observed, releasing dependent steps
-                            // without a human confirmation hop. Deviations
-                            // (blocked/failed) never reach here.
+                            // Acceptance passing == machine verification, which
+                            // is `verified` — enough for dependent steps to
+                            // build on (dependencies_ready gates on verified).
+                            // `observed` is the cross-session observation gate
+                            // (trading-day windows, human confirmation) and is
+                            // NEVER auto-granted by the Runner: an observation
+                            // window that has not elapsed must not display as
+                            // complete (2026-08-18 S8 incident).
                             Self::advance_step_stage(
                                 &pkg.project_path,
                                 &pkg.step_id,
-                                StepStage::Observed,
+                                StepStage::Verified,
                             );
                         }
                         ExecutionStatus::Cancelled => {
@@ -360,10 +363,12 @@ impl Runner {
                         match final_status {
                             ExecutionStatus::Passed => {
                                 execution_store::mark_package_status(&pkg.package_id, "passed")?;
+                                // Machine acceptance == verified; observed is
+                                // the human/observation-window gate only.
                                 Self::advance_step_stage(
                                     &pkg.project_path,
                                     &pkg.step_id,
-                                    StepStage::Observed,
+                                    StepStage::Verified,
                                 );
                             }
                             ExecutionStatus::Cancelled => {
@@ -2072,13 +2077,15 @@ impl Runner {
                 .iter()
                 .find(|candidate| candidate.id == dependency_id)
                 .map(|candidate| &candidate.stage);
-            // Unified with MCP actionableSteps: EVERY predecessor — order or
-            // explicit depends_on — must be observed. Passing acceptance
-            // auto-advances a step to observed (B mode), so healthy serial
-            // chains flow without human hops; but a step whose predecessor
-            // FAILED (stuck at coded or below) never releases its successor.
+            // A predecessor is buildable once its candidate PASSED acceptance
+            // (= verified). Requiring observed here would either stall every
+            // serial chain for the whole epic's observation window or — as the
+            // old "B mode" did — pressure the Runner into auto-granting
+            // observed, displaying un-elapsed observation windows as complete
+            // (2026-08-18 S8 incident). A predecessor that FAILED stays at
+            // coded or below and never releases its successor.
             let sufficient = dep_stage
-                .map(|stage| stage_rank(stage) >= stage_rank(&StepStage::Observed))
+                .map(|stage| stage_rank(stage) >= stage_rank(&StepStage::Verified))
                 .unwrap_or(false);
             if !sufficient {
                 return Ok(false);
@@ -2171,11 +2178,14 @@ impl Runner {
     ///
     /// Mapping:
     ///   candidate commit produced (but acceptance not yet verified) → coded
-    ///   acceptance passed → observed (package acceptance IS the gate —
-    ///     user-directed B mode; dependent steps release automatically)
+    ///   acceptance passed → verified (machine acceptance; dependent steps
+    ///     release on verified — see dependencies_ready)
     ///   CLI failed / scope violation / no diff → leave stage unchanged
     ///
-    /// Deviating outcomes never reach the observed advancement — they end
+    /// `observed` is never auto-granted: it is the cross-session observation
+    /// gate (trading-day windows, human confirmation) owned by the plan's
+    /// acceptance terms, not by the Runner.
+    /// Deviating outcomes never reach the verified advancement — they end
     /// blocked/failed and surface as DecisionRequests for a human.
     fn advance_step_stage(project_path: &str, step_id: &str, stage: StepStage) {
         let dir = PathBuf::from(project_path);
@@ -3802,7 +3812,17 @@ mod tests {
             !Runner::dependencies_ready(&pkg).unwrap(),
             "a coded (failed-acceptance) predecessor must not release the successor"
         );
-        // Acceptance auto-advance / human confirmation to observed → released.
+        // 2026-08-18 S8 incident regression: a predecessor whose acceptance
+        // PASSED sits at verified while its observation window is still
+        // running — the chain must keep flowing on verified. Requiring
+        // observed here forced the old Runner to auto-grant observed and
+        // display un-elapsed observation windows as complete.
+        write_lineage_epics(repo, &[("s1", 0, "verified"), ("s2", 1, "pending")]);
+        assert!(
+            Runner::dependencies_ready(&pkg).unwrap(),
+            "a verified (acceptance-passed) predecessor must release the successor"
+        );
+        // Human/observation-gate confirmed → still released, obviously.
         write_lineage_epics(repo, &[("s1", 0, "observed"), ("s2", 1, "pending")]);
         assert!(Runner::dependencies_ready(&pkg).unwrap());
     }
