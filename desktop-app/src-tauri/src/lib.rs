@@ -28,6 +28,7 @@ pub fn run() {
             projects: std::sync::Mutex::new(project_list),
         })
         .invoke_handler(tauri::generate_handler![
+            commands::diag_report_error,
             commands::get_projects,
             commands::get_todos,
             commands::update_todo,

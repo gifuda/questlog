@@ -2,10 +2,27 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
 import TimelinePanel from "./components/TimelinePanel";
 import i18n from "./i18n";
 import "./index.css";
+
+// Forward JS errors to the Rust stdout log via diag_report_error.
+// WKWebView console is invisible in release builds — without this bridge a
+// render-time crash shows up as a silent white panel (the arb-board
+// white-screen of 2026-08-31 took hours to diagnose for exactly this reason).
+window.addEventListener("error", (e) => {
+  void invoke("diag_report_error", {
+    msg: `${e.message} @ ${e.filename}:${e.lineno}:${e.colno}\n${e.error?.stack ?? "no stack"}`,
+  }).catch(() => {});
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const reason = e.reason as Error | string;
+  void invoke("diag_report_error", {
+    msg: `unhandled rejection: ${String(reason)}\n${(reason as Error)?.stack ?? "no stack"}`,
+  }).catch(() => {});
+});
 
 async function bootstrap() {
   const label = getCurrentWindow().label;

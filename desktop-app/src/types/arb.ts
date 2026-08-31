@@ -18,16 +18,19 @@ export interface ArbOpenHypothesis {
   hypothesis_id: string;
   title: string;
   status: "open";
-  /** 价差 = fair − observed，带符号，保留 4 位小数展示 */
-  price_diff: number;
+  /**
+   * 价差 = fair − observed。契约标 number，但实测 GROS 会出现 null
+   * （未做公允值估量的假设）——UI 渲染必须防 null，null 排序末位。
+   */
+  price_diff: number | null;
   /** 年化价差；null = 未填兑现窗口（排序排末位） */
   annualized: number | null;
   horizon_days: number | null;
-  age_days: number;
-  fair_value: number;
-  observed_value: number;
-  evidence: ArbEvidenceCounts;
-  falsification_triggers: string[];
+  age_days: number | null;
+  fair_value: number | null;
+  observed_value: number | null;
+  evidence: Partial<ArbEvidenceCounts> | null;
+  falsification_triggers: string[] | null;
   next_action: string;
   /** 完整的 gros settle 命令，复制即可执行 */
   settle_hint: string;
@@ -40,9 +43,9 @@ export interface ArbSettledHypothesis {
   hypothesis_id: string;
   title: string;
   outcome: ArbOutcome;
-  settled_at: string;
-  realized_value: number;
-  price_diff_at_settle: number;
+  settled_at: string | null;
+  realized_value: number | null;
+  price_diff_at_settle: number | null;
   close_reason: string;
 }
 

@@ -47,6 +47,14 @@ pub fn validate_project_path(
     Ok(canonical)
 }
 
+/// Forward webview JS errors to the stdout log. WKWebView console is
+/// invisible in release builds; this bridge makes render-time crashes
+/// diagnosable (see main.tsx error listeners).
+#[tauri::command]
+pub fn diag_report_error(msg: String) {
+    eprintln!("[webview-error] {msg}");
+}
+
 #[tauri::command]
 pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
     let projects = state.projects.lock().map_err(|e| e.to_string())?;

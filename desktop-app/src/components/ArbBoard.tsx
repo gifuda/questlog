@@ -17,22 +17,23 @@ export default function ArbBoard() {
   const [sort, setSort] = useState<ArbSort>("diff");
 
   const openItems = useMemo(() => {
-    const arr = [...(data?.open ?? [])];
+    const arr = [...(Array.isArray(data?.open) ? data!.open : [])];
+    // 数值兜底：null/缺失排末位（与年化排序规则一致）。
+    const abs = (v: number | null | undefined): number =>
+      typeof v === "number" && !Number.isNaN(v) ? Math.abs(v) : -1;
     // 需求 3.2：按价差 |price_diff| DESC；按年化时 null 排末位。
     if (sort === "diff") {
-      arr.sort((a, b) => Math.abs(b.price_diff) - Math.abs(a.price_diff));
+      arr.sort((a, b) => abs(b.price_diff) - abs(a.price_diff));
     } else {
-      arr.sort((a, b) => {
-        if (a.annualized === null && b.annualized === null) return 0;
-        if (a.annualized === null) return 1;
-        if (b.annualized === null) return -1;
-        return Math.abs(b.annualized) - Math.abs(a.annualized);
-      });
+      arr.sort((a, b) => abs(b.annualized) - abs(a.annualized));
     }
     return arr;
   }, [data, sort]);
 
-  const settledItems = useMemo(() => data?.settled ?? [], [data]);
+  const settledItems = useMemo(
+    () => (Array.isArray(data?.settled) ? data!.settled : []),
+    [data]
+  );
 
   if (loading && !data) {
     return <div className="flex items-center justify-center h-full text-faint text-sm">…</div>;
@@ -133,10 +134,21 @@ export default function ArbBoard() {
   );
 }
 
-/** +0.5500 带符号 4 位小数（需求 3.3）。 */
-function fmtSigned(v: number, digits: number): string {
+/**
+ * 数值显示兜底：board.json 是 GROS 的外部导出，任何数值字段都可能出现
+ * null/缺失（如实测中出现过 price_diff/fair_value 为 null 的假设）。
+ * 契约类型标 number 但运行时必须防 null——坏一个字段只显示 "—"，
+ * 绝不让整张卡片（进而整个面板）崩溃。
+ */
+function fmtSigned(v: number | null | undefined, digits = 4): string {
+  if (v === null || v === undefined || typeof v !== "number" || Number.isNaN(v)) return "—";
   const s = v.toFixed(digits);
   return v >= 0 ? `+${s}` : s;
+}
+
+function fmtNum(v: number | null | undefined, digits = 1): string {
+  if (v === null || v === undefined || typeof v !== "number" || Number.isNaN(v)) return "—";
+  return v.toFixed(digits);
 }
 
 // ══════════════════════════════════════════════
@@ -170,20 +182,20 @@ function OpenCard({ item }: { item: ArbOpenHypothesis }) {
         </div>
         <div className="mt-1.5 flex items-center gap-3 text-[10px] text-muted flex-wrap">
           <span title={t("arb.annualized")}>
-            {t("arb.annualizedShort")}: {item.annualized === null ? "—" : fmtSigned(item.annualized, 4)}
+            {t("arb.annualizedShort")}: {fmtSigned(item.annualized)}
           </span>
-          <span>{t("arb.ageDays", { days: item.age_days.toFixed(1) })}</span>
+          <span>{t("arb.ageDays", { days: fmtNum(item.age_days) })}</span>
           <span className="font-mono">
-            {t("arb.fairVsObserved", { fair: item.fair_value, observed: item.observed_value })}
+            {t("arb.fairVsObserved", { fair: fmtNum(item.fair_value, 2), observed: fmtNum(item.observed_value, 2) })}
           </span>
-          <span className="text-green-400/80">✓{item.evidence.support}</span>
-          <span className="text-red-400/80">✗{item.evidence.oppose}</span>
-          {item.horizon_days !== null && (
+          <span className="text-green-400/80">✓{item.evidence?.support ?? 0}</span>
+          <span className="text-red-400/80">✗{item.evidence?.oppose ?? 0}</span>
+          {item.horizon_days != null && (
             <span className="text-faint">{t("arb.horizonDays", { days: item.horizon_days })}</span>
           )}
         </div>
         {/* 证伪条件摘要（需求 3.3：截断） */}
-        {item.falsification_triggers.length > 0 && !expanded && (
+        {Array.isArray(item.falsification_triggers) && item.falsification_triggers.length > 0 && !expanded && (
           <div className="mt-1 text-[10px] text-faint truncate">
             ⚡ {item.falsification_triggers[0]}
           </div>
@@ -193,12 +205,14 @@ function OpenCard({ item }: { item: ArbOpenHypothesis }) {
       {expanded && (
         <div className="px-3 pb-3 border-t border-line/50 pt-2.5 flex flex-col gap-2">
           {/* 证伪条件全文 */}
-          <div>
-            <div className="text-[10px] text-faint mb-0.5">⚡ {t("arb.falsification")}</div>
-            {item.falsification_triggers.map((tr, i) => (
-              <div key={i} className="text-[11px] text-body leading-relaxed">· {tr}</div>
-            ))}
-          </div>
+          {Array.isArray(item.falsification_triggers) && item.falsification_triggers.length > 0 && (
+            <div>
+              <div className="text-[10px] text-faint mb-0.5">⚡ {t("arb.falsification")}</div>
+              {item.falsification_triggers.map((tr, i) => (
+                <div key={i} className="text-[11px] text-body leading-relaxed">· {tr}</div>
+              ))}
+            </div>
+          )}
           {/* 下一步 */}
           {item.next_action && (
             <div>
@@ -237,14 +251,16 @@ function SettledCard({ item }: { item: ArbSettledHypothesis }) {
   return (
     <div className="rounded-lg border border-line bg-surface/30 px-3 py-2 opacity-80">
       <div className="flex items-center gap-2">
-        <span className={`text-[9px] px-1.5 py-0.5 rounded shrink-0 ${outcomeBadge[item.outcome]}`}>
+        <span className={`text-[9px] px-1.5 py-0.5 rounded shrink-0 ${outcomeBadge[item.outcome] ?? "bg-gray-500/15 text-gray-400"}`}>
           {t(`arb.outcome_${item.outcome}`)}
         </span>
         <span className="text-xs flex-1 truncate text-muted line-through">{item.title}</span>
         <span className="text-[10px] font-mono text-faint shrink-0">
-          {t("arb.realized")}: {item.realized_value}
+          {t("arb.realized")}: {fmtNum(item.realized_value, 2)}
         </span>
-        <span className="text-[10px] text-faint shrink-0">{item.settled_at.slice(0, 10)}</span>
+        <span className="text-[10px] text-faint shrink-0">
+          {typeof item.settled_at === "string" ? item.settled_at.slice(0, 10) : "—"}
+        </span>
       </div>
       {item.close_reason && (
         <div className="mt-1 text-[10px] text-faint truncate">{item.close_reason}</div>
