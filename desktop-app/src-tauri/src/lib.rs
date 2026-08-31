@@ -51,6 +51,9 @@ pub fn run() {
             commands::add_step,
             commands::update_step,
             commands::delete_step,
+            // 套利机会栏 (Arb Board — GROS board.json 只读视图)
+            commands::get_arb_board,
+            commands::set_arb_board,
             // 执行状态模块 (G2 — Runner state)
             commands::get_executions,
             commands::get_current_execution,

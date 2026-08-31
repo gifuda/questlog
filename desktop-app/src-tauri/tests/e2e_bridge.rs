@@ -529,9 +529,10 @@ fn bridge_readonly_package_no_diff_counts_as_passed() {
                 .unwrap();
             assert_eq!(status, "passed", "read-only package must be passed");
 
-            // Step advances straight to observed — package acceptance IS the
-            // gate (B mode): a passing execution releases dependent steps
-            // without a human confirmation hop.
+            // Step advances to verified — machine acceptance == verified.
+            // The old "B mode" auto-granted observed, which displayed
+            // un-elapsed observation windows as complete (2026-08-18 S8
+            // incident); observed is now the human/observation-window gate.
             let epics_json = std::fs::read_to_string(repo_dir.path().join(".epics.json")).unwrap();
             let epics_data: serde_json::Value = serde_json::from_str(&epics_json).unwrap();
             let stage = epics_data["steps"]
@@ -542,7 +543,7 @@ fn bridge_readonly_package_no_diff_counts_as_passed() {
                 .unwrap()["stage"]
                 .as_str()
                 .unwrap();
-            assert_eq!(stage, "observed", "step must advance to observed (B mode)");
+            assert_eq!(stage, "verified", "step must advance to verified (observed is human-gated)");
         }
         Err(e) => {
             panic!("Runner crashed: {}", e);

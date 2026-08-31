@@ -9,6 +9,7 @@ const EPICS_FILENAME: &str = ".epics.json";
 const REGISTRY_FILENAME: &str = ".todo-board.json";
 const EXECUTIONS_FILENAME: &str = "executions.json";
 const PACKAGES_FILENAME: &str = "packages.json";
+const BOARD_FILENAME: &str = "board.json";
 
 pub fn start_watching(app: &AppHandle) {
     let state = app.state::<AppState>();
@@ -44,6 +45,23 @@ pub fn start_watching(app: &AppHandle) {
             log::warn!("failed to watch parent dir for {name}: {e}");
         } else {
             log::info!("watching {name}: {}", path.display());
+        }
+    }
+
+    // 套利机会栏: watch each enabled project's board.json PARENT directory.
+    // board.json usually lives in a subdirectory (e.g. gros/exports/), which
+    // the NonRecursive project-root watch above cannot see, so it needs its
+    // own watch. Config changes (enable + path) take effect on next app start.
+    for (project_path, board_rel) in discovery::enabled_arb_boards() {
+        let board = std::path::Path::new(&project_path).join(&board_rel);
+        let parent = match board.parent() {
+            Some(p) if p.exists() => p.to_path_buf(),
+            _ => continue,
+        };
+        if let Err(e) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
+            log::warn!("failed to watch arb board dir {parent:?}: {e}");
+        } else {
+            log::info!("watching arb board dir: {}", parent.display());
         }
     }
 
@@ -135,6 +153,13 @@ pub fn start_watching(app: &AppHandle) {
                         // This lets the ExecutionPanel UI refresh when the Runner updates state.
                         if fname == EXECUTIONS_FILENAME || fname == PACKAGES_FILENAME {
                             let _ = app_handle.emit("executions-changed", ());
+                        }
+
+                        // board.json changed → emit arb-changed (套利机会栏刷新).
+                        // GROS's board-export rewrites the file atomically-ish;
+                        // any create/modify/remove triggers a panel refresh.
+                        if fname == BOARD_FILENAME {
+                            let _ = app_handle.emit("arb-changed", ());
                         }
                     }
                 }

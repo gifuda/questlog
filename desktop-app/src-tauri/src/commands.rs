@@ -89,11 +89,16 @@ pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, St
             .max()
             .unwrap_or("")
             .to_string();
+        // 套利机会栏 tab 只在显式开启的项目显示（需求 3.1）。
+        let arb_enabled = discovery::get_arb_board_config(&path.to_string_lossy())
+            .map(|c| c.enabled)
+            .unwrap_or(false);
         result.push(serde_json::json!({
             "name": name,
             "path": path.to_string_lossy(),
             "counts": { "knowhow": knowhow, "todo": todo, "idea": idea },
             "active_epics": active_epics,
+            "arb_enabled": arb_enabled,
             "last_active_at": last_active_at
         }));
     }
@@ -731,6 +736,82 @@ pub fn delete_step(
         Ok(())
     })?;
     Ok(epics_to_json(&data, &project_path))
+}
+
+// ════════════════════════════════════════════════════════════
+// 套利机会栏 (Arb Board) — GROS board.json 的只读视图
+// 纯只读：SQLite 是 GROS 的真相源，app 不提供任何写操作。
+// ════════════════════════════════════════════════════════════
+
+/// Read the project's GROS board export (exports/board.json or the user-
+/// configured path). Read-only. Returns a status envelope so the frontend
+/// can distinguish "off" / "file missing" / "parse error" / "ok" without
+/// guessing — an absent or broken file must degrade to a friendly empty
+/// state, never break the panel.
+#[tauri::command]
+pub fn get_arb_board(
+    project_path: String,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let path = validate_project_path(&project_path, &state)?;
+    let config = match discovery::get_arb_board_config(&path.to_string_lossy()) {
+        Some(c) => c,
+        None => {
+            return Ok(serde_json::json!({ "status": "off" }));
+        }
+    };
+    if !config.enabled {
+        return Ok(serde_json::json!({ "status": "off" }));
+    }
+
+    let board_path = if std::path::Path::new(&config.board_path).is_absolute() {
+        std::path::PathBuf::from(&config.board_path)
+    } else {
+        path.join(&config.board_path)
+    };
+    if !board_path.exists() {
+        return Ok(serde_json::json!({
+            "status": "missing",
+            "board_path": config.board_path,
+        }));
+    }
+    let raw = std::fs::read_to_string(&board_path).map_err(|e| format!("read error: {e}"))?;
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(mut data) => {
+            // Attach the path so the frontend can show where data came from.
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert("status".into(), serde_json::Value::String("ok".into()));
+                obj.insert(
+                    "board_path".into(),
+                    serde_json::Value::String(config.board_path.clone()),
+                );
+            }
+            Ok(data)
+        }
+        Err(e) => Ok(serde_json::json!({
+            "status": "parse_error",
+            "board_path": config.board_path,
+            "error": e.to_string(),
+        })),
+    }
+}
+
+/// Enable/disable the 套利机会栏 for a project and set the board.json path
+/// (relative to project root unless absolute). This writes ONLY to the app's
+/// own registry — it never touches GROS data.
+#[tauri::command]
+pub fn set_arb_board(
+    project_path: String,
+    state: State<AppState>,
+    enabled: bool,
+    board_path: Option<String>,
+) -> Result<(), String> {
+    let path = validate_project_path(&project_path, &state)?;
+    discovery::set_arb_board_config(
+        &path.to_string_lossy(),
+        enabled,
+        board_path.as_deref().unwrap_or("exports/board.json"),
+    )
 }
 
 /// Render the epics file as the JSON shape the frontend consumes.

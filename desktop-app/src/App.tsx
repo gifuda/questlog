@@ -7,11 +7,12 @@ import { useTheme } from "./hooks/useTheme";
 import { useUndo } from "./hooks/useUndo";
 import KanbanBoard from "./components/KanbanBoard";
 import EpicBoard from "./components/EpicBoard";
+import ArbBoard from "./components/ArbBoard";
 import Logo from "./components/Logo";
 import Settings from "./components/Settings";
 import ConfirmButton from "./components/ConfirmButton";
 
-type ModuleTab = "todos" | "epics";
+type ModuleTab = "todos" | "epics" | "arb";
 
 function App() {
   const { t } = useTranslation();
@@ -120,6 +121,17 @@ function App() {
             >
               {t("app.planTab")}
             </button>
+            {/* 套利机会栏：仅显式开启的项目显示（需求 3.1 项目级开关） */}
+            {activeProject?.arb_enabled && (
+              <button
+                className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
+                  activeTab === "arb" ? "bg-surface text-heading" : "text-faint hover:text-body"
+                }`}
+                onClick={() => setActiveTab("arb")}
+              >
+                {t("app.arbTab")}
+              </button>
+            )}
           </div>
         </div>
         {activeProject && activeTab === "todos" && (
@@ -129,7 +141,12 @@ function App() {
             <span>💡 {activeProject.counts.idea}</span>
           </div>
         )}
-        <Settings theme={theme} onThemeChange={setTheme} />
+        <Settings
+          theme={theme}
+          onThemeChange={setTheme}
+          activeProject={activeProject ? { name: activeProject.name, path: activeProject.path, arb_enabled: activeProject.arb_enabled } : null}
+          onProjectsChanged={refresh}
+        />
       </div>
 
       {/* Board */}
@@ -137,8 +154,12 @@ function App() {
         {activeProject ? (
           activeTab === "todos" ? (
             <KanbanBoard projectPath={activeProject.path} />
-          ) : (
+          ) : activeTab === "epics" ? (
             <EpicBoard projectPath={activeProject.path} />
+          ) : activeProject.arb_enabled ? (
+            <ArbBoard projectPath={activeProject.path} />
+          ) : (
+            <KanbanBoard projectPath={activeProject.path} />
           )
         ) : (
           <div className="flex items-center justify-center h-full text-faint">
@@ -158,15 +179,21 @@ function App() {
                     ? "bg-surface text-heading shadow-sm"
                     : "text-faint hover:text-body hover:bg-surface"
                 }`}
-                onClick={() => setSelected(p.name)}
+                onClick={() => { setSelected(p.name); if (activeTab === "arb" && !p.arb_enabled) setActiveTab("todos"); }}
                 onContextMenu={(e) => handleContextMenu(e, p.name)}
               >
                 {p.name}
-                {p.counts.todo > 0 && (
-                  <span className="ml-1 bg-danger text-white text-[9px] px-1 rounded-full">
-                    {p.counts.todo}
-                  </span>
-                )}
+                {activeTab === "todos"
+                  ? p.counts.todo > 0 && (
+                      <span className="ml-1 bg-danger text-white text-[10px] px-1 rounded-full">
+                        {p.counts.todo}
+                      </span>
+                    )
+                  : p.active_epics > 0 && (
+                      <span className="ml-1 bg-accent-bg text-accent text-[10px] px-1 rounded-full">
+                        {p.active_epics}
+                      </span>
+                    )}
               </button>
               <span className="absolute -top-1 -right-1 opacity-0 group-hover/tab:opacity-100 transition-opacity">
                 <ConfirmButton
