@@ -48,20 +48,21 @@ pub fn start_watching(app: &AppHandle) {
         }
     }
 
-    // 套利机会栏: watch each enabled project's board.json PARENT directory.
-    // board.json usually lives in a subdirectory (e.g. gros/exports/), which
-    // the NonRecursive project-root watch above cannot see, so it needs its
-    // own watch. Config changes (enable + path) take effect on next app start.
-    for (project_path, board_rel) in discovery::enabled_arb_boards() {
-        let board = std::path::Path::new(&project_path).join(&board_rel);
-        let parent = match board.parent() {
-            Some(p) if p.exists() => p.to_path_buf(),
-            _ => continue,
-        };
-        if let Err(e) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
-            log::warn!("failed to watch arb board dir {parent:?}: {e}");
-        } else {
-            log::info!("watching arb board dir: {}", parent.display());
+    // 套利机会栏: watch the global board.json PARENT directory. board.json
+    // usually lives in a subdirectory of the GROS project, which no project-
+    // root watch covers, so it needs its own watch. Config changes (enable +
+    // path) take effect on next app start.
+    if let Some(board_path) = discovery::enabled_arb_board_path() {
+        let board = std::path::PathBuf::from(&board_path);
+        match board.parent() {
+            Some(parent) if parent.exists() => {
+                if let Err(e) = watcher.watch(parent, RecursiveMode::NonRecursive) {
+                    log::warn!("failed to watch arb board dir {parent:?}: {e}");
+                } else {
+                    log::info!("watching arb board dir: {}", parent.display());
+                }
+            }
+            _ => log::warn!("arb board parent dir missing for {board_path}"),
         }
     }
 

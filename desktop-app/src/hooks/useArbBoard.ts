@@ -4,23 +4,22 @@ import { listen } from "@tauri-apps/api/event";
 import type { ArbBoardFile } from "../types/arb";
 
 /**
- * 套利机会栏数据 hook — 读 GROS board.json 导出（只读）。
- * 监听 arb-changed 事件（watcher 对 board.json 父目录的监听）实时刷新。
+ * 套利机会栏数据 hook — 全局功能（不按项目区分）。
+ * 读 GROS board.json 导出（只读），监听 arb-changed 事件实时刷新。
  */
-export function useArbBoard(projectPath: string | null) {
+export function useArbBoard() {
   const [data, setData] = useState<ArbBoardFile | null>(null);
   const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(async () => {
-    if (!projectPath) return;
     setLoading(true);
     try {
-      const file = await invoke<ArbBoardFile>("get_arb_board", { projectPath });
+      const file = await invoke<ArbBoardFile>("get_arb_board");
       setData(file);
     } finally {
       setLoading(false);
     }
-  }, [projectPath]);
+  }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -32,7 +31,7 @@ export function useArbBoard(projectPath: string | null) {
   return { data, loading, refresh };
 }
 
-/** 开/关项目的套利机会栏（写 app 自己的注册表，不碰 GROS 数据）。 */
-export async function setArbBoard(projectPath: string, enabled: boolean, boardPath: string): Promise<void> {
-  await invoke("set_arb_board", { projectPath, enabled, boardPath });
+/** 开/关全局套利机会栏并设置 board.json 路径（写 app 自己的注册表，不碰 GROS 数据）。 */
+export async function setArbBoard(enabled: boolean, boardPath: string): Promise<void> {
+  await invoke("set_arb_board", { enabled, boardPath });
 }

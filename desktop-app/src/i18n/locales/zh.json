@@ -178,6 +178,8 @@
     "outcome_expired": "已过期",
     "noOpen": "暂无 open 假设",
     "noSettled": "暂无结算记录",
+    "offTitle": "套利机会栏未开启",
+    "offDesc": "在右上角设置里开启，并指定 GROS 导出的 board.json 路径",
     "emptyTitle": "套利机会栏未开启或无数据",
     "emptyMissing": "未找到 board 数据文件：{{path}}\n在项目目录运行 gros board-export 生成",
     "emptyParseError": "board 数据文件解析失败：{{path}}\n{{error}}",

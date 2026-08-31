@@ -29,7 +29,5 @@ export interface ProjectInfo {
   counts: { knowhow: number; todo: number; idea: number };
   /** 未完成（非 done）的顶级方案数，方案追踪 tab 的徽标。 */
   active_epics: number;
-  /** 套利机会栏是否已为该项目开启（项目级开关，默认关）。 */
-  arb_enabled: boolean;
   last_active_at: string;
 }

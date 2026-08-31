@@ -121,17 +121,15 @@ function App() {
             >
               {t("app.planTab")}
             </button>
-            {/* 套利机会栏：仅显式开启的项目显示（需求 3.1 项目级开关） */}
-            {activeProject?.arb_enabled && (
-              <button
-                className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
-                  activeTab === "arb" ? "bg-surface text-heading" : "text-faint hover:text-body"
-                }`}
-                onClick={() => setActiveTab("arb")}
-              >
-                {t("app.arbTab")}
-              </button>
-            )}
+            {/* 套利机会栏：app 级全局功能，常驻（数据源全局配置，不按项目区分） */}
+            <button
+              className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
+                activeTab === "arb" ? "bg-surface text-heading" : "text-faint hover:text-body"
+              }`}
+              onClick={() => setActiveTab("arb")}
+            >
+              {t("app.arbTab")}
+            </button>
           </div>
         </div>
         {activeProject && activeTab === "todos" && (
@@ -141,25 +139,19 @@ function App() {
             <span>💡 {activeProject.counts.idea}</span>
           </div>
         )}
-        <Settings
-          theme={theme}
-          onThemeChange={setTheme}
-          activeProject={activeProject ? { name: activeProject.name, path: activeProject.path, arb_enabled: activeProject.arb_enabled } : null}
-          onProjectsChanged={refresh}
-        />
+        <Settings theme={theme} onThemeChange={setTheme} />
       </div>
 
       {/* Board */}
       <div className="flex-1 overflow-hidden">
-        {activeProject ? (
+        {activeTab === "arb" ? (
+          /* 套利机会栏：全局功能，不依赖选中项目 */
+          <ArbBoard />
+        ) : activeProject ? (
           activeTab === "todos" ? (
             <KanbanBoard projectPath={activeProject.path} />
-          ) : activeTab === "epics" ? (
-            <EpicBoard projectPath={activeProject.path} />
-          ) : activeProject.arb_enabled ? (
-            <ArbBoard projectPath={activeProject.path} />
           ) : (
-            <KanbanBoard projectPath={activeProject.path} />
+            <EpicBoard projectPath={activeProject.path} />
           )
         ) : (
           <div className="flex items-center justify-center h-full text-faint">
@@ -179,7 +171,7 @@ function App() {
                     ? "bg-surface text-heading shadow-sm"
                     : "text-faint hover:text-body hover:bg-surface"
                 }`}
-                onClick={() => { setSelected(p.name); if (activeTab === "arb" && !p.arb_enabled) setActiveTab("todos"); }}
+                onClick={() => setSelected(p.name)}
                 onContextMenu={(e) => handleContextMenu(e, p.name)}
               >
                 {p.name}

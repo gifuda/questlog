@@ -6,17 +6,13 @@ import type { ArbOpenHypothesis, ArbSettledHypothesis, ArbOutcome } from "../typ
 type ArbFilter = "all" | "open" | "settled";
 type ArbSort = "diff" | "annualized";
 
-interface ArbBoardProps {
-  projectPath: string;
-}
-
 /**
- * 套利机会栏 — GROS 假设库机会面的只读视图。
+ * 套利机会栏 — GROS 假设库机会面的只读视图（app 级全局功能，不按项目区分）。
  * 纯只读：状态变更只能经 GROS CLI（复制 settle_hint 到终端执行）。
  */
-export default function ArbBoard({ projectPath }: ArbBoardProps) {
+export default function ArbBoard() {
   const { t } = useTranslation();
-  const { data, loading, refresh } = useArbBoard(projectPath);
+  const { data, loading, refresh } = useArbBoard();
   const [filter, setFilter] = useState<ArbFilter>("all");
   const [sort, setSort] = useState<ArbSort>("diff");
 
@@ -43,13 +39,21 @@ export default function ArbBoard({ projectPath }: ArbBoardProps) {
   }
 
   // ── 空态（需求 4.2）：off / missing / parse_error 都友好降级 ──
-  if (!data || data.status === "off") return null;
+  if (!data || data.status === "off") {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-faint gap-2 px-6 text-center">
+        <span className="text-3xl">📈</span>
+        <span className="text-sm">{t("arb.offTitle")}</span>
+        <span className="text-[11px] leading-relaxed">{t("arb.offDesc")}</span>
+      </div>
+    );
+  }
   if (data.status === "missing" || data.status === "parse_error") {
     return (
       <div className="flex flex-col items-center justify-center h-full text-faint gap-2 px-6 text-center">
         <span className="text-3xl">📈</span>
         <span className="text-sm">{t("arb.emptyTitle")}</span>
-        <span className="text-[11px] leading-relaxed">
+        <span className="text-[11px] leading-relaxed whitespace-pre-line">
           {data.status === "missing"
             ? t("arb.emptyMissing", { path: data.board_path ?? "exports/board.json" })
             : t("arb.emptyParseError", { path: data.board_path ?? "", error: data.error ?? "" })}

@@ -178,6 +178,8 @@
     "outcome_expired": "expired",
     "noOpen": "No open hypotheses",
     "noSettled": "No settled records",
+    "offTitle": "Arb board is off",
+    "offDesc": "Enable it in Settings (top-right) and point it at the GROS board.json export",
     "emptyTitle": "Arb board off or no data",
     "emptyMissing": "Board file not found: {{path}}\nRun gros board-export in the project directory",
     "emptyParseError": "Board file failed to parse: {{path}}\n{{error}}",

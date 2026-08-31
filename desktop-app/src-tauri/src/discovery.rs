@@ -28,15 +28,15 @@ pub struct ProjectFeedback {
     pub archived_soon: u64,
 }
 
-/// 套利机会栏 per-project config: opt-in switch + board.json path (relative
-/// to the project root unless absolute). The board itself is GROS's read-only
-/// export — this config only controls whether the app shows the panel.
+/// 套利机会栏 global config: the board is an app-level feature (NOT scoped to
+/// any project folder) pointing at a GROS board.json export anywhere on disk.
+/// The board itself is GROS's read-only export — this config only records
+/// where it lives and whether the panel is shown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArbBoardConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// board.json path; relative to project root by default
-    /// (e.g. "exports/board.json" or "gros/exports/board.json").
+    /// Absolute path to the GROS board.json export.
     #[serde(default = "default_board_path")]
     pub board_path: String,
 }
@@ -54,8 +54,12 @@ struct Registry {
     trash: Vec<TrashEntry>,
     #[serde(default)]
     feedback: std::collections::HashMap<String, ProjectFeedback>,
-    /// 套利机会栏 per-project switches, keyed by canonical project path.
-    #[serde(default)]
+    /// 套利机会栏全局配置（app 级功能，不按项目区分）。旧版 per-project 的
+    /// arb_boards map 已废弃；读取时兜底迁移（见 get_arb_board_config）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    arb_board: Option<ArbBoardConfig>,
+    /// Deprecated per-project map (legacy) — read for migration only.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     arb_boards: std::collections::HashMap<String, ArbBoardConfig>,
 }
 
@@ -241,61 +245,51 @@ pub fn reorder_projects(names: &[String]) -> Result<(), String> {
     write_registry(&reg)
 }
 
-/// Get the 套利机会栏 config for a project (None = never configured).
-pub fn get_arb_board_config(project_path: &str) -> Option<ArbBoardConfig> {
-    read_registry().arb_boards.get(project_path).cloned()
+/// Get the global 套利机会栏 config (None = never configured). Falls back to
+/// the legacy per-project map: if the new global field is absent but exactly
+/// one legacy entry exists, it is promoted (migrated) to the global config.
+pub fn get_arb_board_config() -> Option<ArbBoardConfig> {
+    let mut reg = read_registry();
+    if let Some(cfg) = reg.arb_board.take() {
+        return Some(cfg);
+    }
+    // Legacy migration: promote the single per-project entry (if any).
+    if reg.arb_boards.len() == 1 {
+        let migrated = reg.arb_boards.values().next().unwrap().clone();
+        reg.arb_board = Some(migrated.clone());
+        reg.arb_boards.clear();
+        if write_registry(&reg).is_ok() {
+            return Some(migrated.clone());
+        }
+        return Some(migrated);
+    }
+    None
 }
 
-/// Set (or remove when enabled=false and path is default) the 套利机会栏
-/// config for a project. Keys by the given path string — callers pass the
-/// same canonical project path the registry uses.
-pub fn set_arb_board_config(
-    project_path: &str,
-    enabled: bool,
-    board_path: &str,
-) -> Result<(), String> {
+/// Set the global 套利机会栏 config. When disabling, the board_path is kept
+/// so re-enabling remembers the user's choice.
+pub fn set_arb_board_config(enabled: bool, board_path: &str) -> Result<(), String> {
     let mut reg = read_registry();
     let path = board_path.trim();
-    if !enabled {
-        // Keep the entry (preserving a custom path) but mark disabled, so
-        // re-enabling remembers the path the user chose.
-        if let Some(cfg) = reg.arb_boards.get_mut(project_path) {
-            cfg.enabled = false;
-            if !path.is_empty() {
-                cfg.board_path = path.to_string();
-            }
-        } else if !path.is_empty() {
-            reg.arb_boards.insert(
-                project_path.to_string(),
-                ArbBoardConfig {
-                    enabled: false,
-                    board_path: path.to_string(),
-                },
-            );
-        }
-        return write_registry(&reg);
+    let mut cfg = reg.arb_board.take().unwrap_or(ArbBoardConfig {
+        enabled: false,
+        board_path: default_board_path(),
+    });
+    cfg.enabled = enabled;
+    if !path.is_empty() {
+        cfg.board_path = path.to_string();
     }
-    let cfg = ArbBoardConfig {
-        enabled: true,
-        board_path: if path.is_empty() {
-            default_board_path()
-        } else {
-            path.to_string()
-        },
-    };
-    reg.arb_boards.insert(project_path.to_string(), cfg);
+    // Clear any legacy per-project entries — global config supersedes them.
+    reg.arb_boards.clear();
+    reg.arb_board = Some(cfg);
     write_registry(&reg)
 }
 
-/// All enabled arb-board entries: (project_path, board_path). Used by the
-/// watcher to decide which board.json parent dirs to watch.
-pub fn enabled_arb_boards() -> Vec<(String, String)> {
-    read_registry()
-        .arb_boards
-        .into_iter()
-        .filter(|(_, cfg)| cfg.enabled)
-        .map(|(path, cfg)| (path, cfg.board_path))
-        .collect()
+/// The enabled global board path, if any. Used by the watcher to decide which
+/// board.json parent dir to watch.
+pub fn enabled_arb_board_path() -> Option<String> {
+    let cfg = get_arb_board_config()?;
+    cfg.enabled.then(|| cfg.board_path)
 }
 
 #[cfg(test)]
