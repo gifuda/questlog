@@ -57,9 +57,14 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { status: projectStatus, loading: projectLoading, toggle: toggleProjectRunner, toggleGlobal } = useProjectRunner(projectPath);
   const { status: runnerStatus, lastPollSecsAgo } = useRunnerStatus();
   const [showNewEpic, setShowNewEpic] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const lang = i18n.resolvedLanguage ?? "zh";
 
   const sorted = sortEpics(epics);
+  // 自动归档：done 的方案沉到归档折叠区，主列表只留在办方案。
+  // 归档是展示层派生行为——用户把状态改回非 done 即自动回到主列表。
+  const activeEpics = sorted.filter((e) => e.status !== "done");
+  const archivedEpics = sorted.filter((e) => e.status === "done");
 
   return (
     <div className="flex flex-col h-full">
@@ -142,7 +147,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
               <span>{t("epic.colFocus")}</span>
             </div>
 
-            {sorted.map((epic) => (
+            {activeEpics.map((epic) => (
               <Fragment key={epic.id}>
                 <EpicRow
                   epic={epic}
@@ -178,6 +183,59 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                 ))}
               </Fragment>
             ))}
+
+            {/* 已归档区 — done 方案自动沉到这里，可展开查看/操作 */}
+            {archivedEpics.length > 0 && (
+              <>
+                <button
+                  className={`${GRID} w-full h-9 border-b border-line/60 text-left text-[11px] text-faint hover:text-muted hover:bg-surface/40 transition-colors`}
+                  onClick={() => setShowArchived(!showArchived)}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span className={`inline-block transition-transform ${showArchived ? "rotate-90" : ""}`}>▸</span>
+                    🗂 {t("epic.archived")}（{archivedEpics.length}）
+                  </span>
+                  <span className="col-span-3 text-[10px] text-faint/70">{t("epic.archivedHint")}</span>
+                </button>
+                {showArchived &&
+                  archivedEpics.map((epic) => (
+                    <Fragment key={epic.id}>
+                      <EpicRow
+                        epic={epic}
+                        depth={0}
+                        allEpics={epics}
+                        lang={lang}
+                        onUpdate={(id, patch) => updateEpic(id, patch)}
+                        onDelete={(id) => deleteEpic(id)}
+                        onAddStep={(id, title, desc, dependsOn) => addStep(id, title, desc, dependsOn)}
+                        onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
+                        onDeleteStep={(stepId) => deleteStep(stepId)}
+                        onAddChild={(id, title, opts) => addEpic(title, { ...opts, parentId: id })}
+                        projectPath={projectPath}
+                        globalEnabled={projectStatus?.global_enabled}
+                        projectEnabled={projectStatus?.project_enabled}
+                      />
+                      {sortEpics(epic.children ?? []).map((child) => (
+                        <EpicRow
+                          key={child.id}
+                          epic={child}
+                          depth={1}
+                          allEpics={epics}
+                          lang={lang}
+                          onUpdate={(id, patch) => updateEpic(id, patch)}
+                          onDelete={(id) => deleteEpic(id)}
+                          onAddStep={(id, title, desc, dependsOn) => addStep(id, title, desc, dependsOn)}
+                          onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
+                          onDeleteStep={(stepId) => deleteStep(stepId)}
+                          projectPath={projectPath}
+                          globalEnabled={projectStatus?.global_enabled}
+                          projectEnabled={projectStatus?.project_enabled}
+                        />
+                      ))}
+                    </Fragment>
+                  ))}
+              </>
+            )}
 
             {/* 新建方案 */}
             {showNewEpic && (

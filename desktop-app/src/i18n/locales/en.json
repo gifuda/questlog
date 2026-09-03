@@ -147,7 +147,9 @@
     "sumActive": "Active",
     "sumObserving": "Observing",
     "sumBlocked": "Blocked",
-    "sumDone": "Done"
+    "sumDone": "Done",
+    "archived": "Archived plans",
+    "archivedHint": "Done plans are auto-archived; set status back to restore"
   },
   "arb": {
     "title": "Arb Opportunities",
