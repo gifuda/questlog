@@ -807,6 +807,74 @@ pub fn set_arb_board(enabled: bool, board_path: Option<String>) -> Result<(), St
     )
 }
 
+/// Submit an automation-control parameter card (契约 v3 B 控制区).
+///
+/// The card goes through the local thin-shell gros CLI into the ledger
+/// (`chat-archive --conversation-id gros-config`); the collector-side
+/// config-sync consumes it and the change echoes back via the next
+/// board.json export. The app NEVER writes board.json itself — the control
+/// section's echo is the single source of truth (anti-loop, 契约 v3).
+///
+/// Security: param is whitelist-mapped to the card text; values are validated
+/// and only ever land in an argv slot (std::process::Command, no shell) —
+/// model names come from board.json (external data) and must never reach a
+/// shell string.
+#[tauri::command]
+pub fn submit_arb_control(param: String, value: String) -> Result<(), String> {
+    let note = match param.as_str() {
+        "current_model" => {
+            if value.is_empty() || value.len() > 64 || value.contains(['\n', '\r', '|', '=']) {
+                return Err(format!("非法模型名: {value:?}"));
+            }
+            format!("[gros-config] 雷达模型 = {value}")
+        }
+        "autonomy" => {
+            let v = match value.as_str() {
+                "true" | "1" => "开",
+                "false" | "0" => "关",
+                other => return Err(format!("非法总闸值: {other:?}")),
+            };
+            format!("[gros-config] 总闸 = {v}")
+        }
+        "leads_per_run" => {
+            let n: u32 = value
+                .parse()
+                .map_err(|_| format!("线索上限必须是数字: {value:?}"))?;
+            if !(1..=20).contains(&n) {
+                return Err(format!("线索上限超出范围 1..=20: {n}"));
+            }
+            format!("[gros-config] 线索上限 = {n}")
+        }
+        "research_quota_per_week" => {
+            let n: u32 = value
+                .parse()
+                .map_err(|_| format!("配额必须是数字: {value:?}"))?;
+            if n > 50 {
+                return Err(format!("每周配额超出范围 0..=50: {n}"));
+            }
+            format!("[gros-config] 自动研究配额 = {n}/周")
+        }
+        other => return Err(format!("未知参数: {other}")),
+    };
+
+    let home = dirs::home_dir().ok_or("no home dir")?;
+    let gros = home.join(".local/bin/gros");
+    if !gros.exists() {
+        return Err(format!("gros CLI 不存在: {}", gros.display()));
+    }
+    let out = std::process::Command::new(&gros)
+        .args(["chat-archive", "--conversation-id", "gros-config", "--note", &note])
+        .output()
+        .map_err(|e| format!("执行 gros 失败: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "gros chat-archive 失败: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 /// Render the epics file as the JSON shape the frontend consumes.
 /// Each epic carries its derived progress + step list + summary.
 fn epics_to_json(data: &crate::models::EpicsFile, project_path: &str) -> serde_json::Value {

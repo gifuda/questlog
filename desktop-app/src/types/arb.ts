@@ -11,6 +11,33 @@ export interface ArbEvidenceCounts {
   oppose: number;
 }
 
+/** 侦察线索（契约 v3 A 段，2026-09-05 GROS 侧冻结）。 */
+export type ArbLeadStatus = "open" | "promoted" | "dismissed";
+
+export interface ArbLead {
+  id: string;
+  /** 自由探索模式为 null */
+  domain: string | null;
+  date: string | null;
+  phenomenon: string | null;
+  cognitive_gap: string | null;
+  data_point: string | null;
+  priority: "high" | "medium" | "low" | null;
+  source_conversation_id: string | null;
+  status: ArbLeadStatus;
+  promoted_hypothesis_id: string | null;
+}
+
+/** 自动化控制区当前状态（契约 v3 B 段，已冻结；config-sync 回显，UI 唯一真值）。 */
+export interface ArbControl {
+  models: string[];
+  current_model: string | null;
+  autonomy: boolean | null;
+  leads_per_run: number | null;
+  research_quota_per_week: number | null;
+  updated_at: string | null;
+}
+
 export interface ArbOpenHypothesis {
   /** 8 位短 id（展示用） */
   id: string;
@@ -72,4 +99,10 @@ interface ArbSummaryShape {
   summary?: ArbSummary;
   open?: ArbOpenHypothesis[];
   settled?: ArbSettledHypothesis[];
+  /**
+   * 契约 v3 增量段。undefined = GROS-01 增量 #2 未落地（UI 置灰）；
+   * [] / {} = 已落地但为空。全字段允许 null（渲染 "—"，不许崩溃）。
+   */
+  leads?: ArbLead[];
+  control?: ArbControl;
 }

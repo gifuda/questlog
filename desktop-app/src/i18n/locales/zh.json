@@ -187,7 +187,19 @@
     "emptyParseError": "board 数据文件解析失败：{{path}}\n{{error}}",
     "retry": "重试",
     "toggleHint": "为此项目开启/关闭套利机会栏",
-    "pathHint": "board.json 路径（相对项目根，如 gros/exports/board.json）"
+    "pathHint": "board.json 路径（相对项目根，如 gros/exports/board.json）",
+    "controlTitle": "自动化控制",
+    "controlPending": "待 GROS-01 增量 #2 落地",
+    "controlModel": "雷达模型",
+    "controlAutonomy": "自动探索",
+    "controlAutonomyHint": "总闸：采集机雷达/研究自动作业的启停",
+    "controlLeadsPerRun": "线索上限",
+    "controlQuota": "周配额",
+    "controlSubmitted": "✓ 已提交 → 账房，待采集机应用",
+    "leadsTitle": "侦察线索",
+    "leadsHint": "线索 ≠ 假设 · 放行走审核流",
+    "noLeads": "暂无线索",
+    "leadPromoted": "已放行"
   },
   "execution": {
     "title": "执行记录",

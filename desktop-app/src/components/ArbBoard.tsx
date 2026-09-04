@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { useArbBoard } from "../hooks/useArbBoard";
-import type { ArbOpenHypothesis, ArbSettledHypothesis, ArbOutcome } from "../types/arb";
+import { useArbBoard, submitArbControl } from "../hooks/useArbBoard";
+import type { ArbOpenHypothesis, ArbSettledHypothesis, ArbOutcome, ArbControl, ArbLead } from "../types/arb";
 
 type ArbFilter = "all" | "open" | "settled";
 type ArbSort = "diff" | "annualized";
@@ -86,6 +86,9 @@ export default function ArbBoard() {
         <span className="text-faint ml-auto">{t("arb.readOnlyHint")}</span>
       </div>
 
+      {/* 自动化控制条（契约 v3 B 控制区；GROS-01 增量 #2 未落地时置灰） */}
+      <ControlBar control={data.control} />
+
       {/* 过滤 + 排序 */}
       <div className="px-4 py-2 border-b border-line flex items-center gap-2">
         {(["all", "open", "settled"] as ArbFilter[]).map((f) => (
@@ -114,6 +117,9 @@ export default function ArbBoard() {
           ))}
         </div>
       </div>
+
+      {/* 侦察线索（契约 v3 A 线索段；GROS-01 增量 #2 未落地时置灰） */}
+      <LeadsSection leads={data.leads} />
 
       {/* 卡片列表 */}
       <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
@@ -265,6 +271,215 @@ function SettledCard({ item }: { item: ArbSettledHypothesis }) {
       {item.close_reason && (
         <div className="mt-1 text-[10px] text-faint truncate">{item.close_reason}</div>
       )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+// ControlBar — 自动化控制条（契约 v3 B 控制区）
+// 渲染值 = board.json control 段回显（唯一真值）。
+// 控件变更 → 参数卡经薄壳入账房 → 采集机 config-sync 应用 →
+// 下一轮导出回显。UI 显示"已提交"但不本地改值（防环，契约 v3）。
+// ══════════════════════════════════════════════
+function ControlBar({ control }: { control?: ArbControl }) {
+  const { t } = useTranslation();
+  const [submitted, setSubmitted] = useState<string | null>(null);
+
+  if (!control) {
+    // undefined = GROS-01 增量 #2 未落地 → 按约定置灰
+    return (
+      <div className="px-4 py-1.5 border-b border-line/50 text-[10px] text-faint/70 flex items-center gap-2">
+        <span>🎛 {t("arb.controlTitle")}</span>
+        <span className="px-1.5 py-px rounded bg-elevated text-faint/70">{t("arb.controlPending")}</span>
+      </div>
+    );
+  }
+
+  async function submit(param: string, value: string) {
+    try {
+      await submitArbControl(param, value);
+      setSubmitted(param);
+      setTimeout(() => setSubmitted((s) => (s === param ? null : s)), 4000);
+    } catch (e) {
+      // 薄壳写入失败（gros 缺失/账房错误）——把错误顶到标题提示，2.5s 恢复
+      setSubmitted(`__error__:${String(e)}`);
+      setTimeout(() => setSubmitted(null), 6000);
+    }
+  }
+
+  const model = control.current_model ?? "";
+  const models = Array.isArray(control.models) ? control.models : [];
+  const quota = control.research_quota_per_week ?? 0;
+  const step = (param: string, cur: number, delta: number, lo: number, hi: number) =>
+    submit(param, String(Math.min(hi, Math.max(lo, cur + delta))));
+
+  return (
+    <div className="px-4 py-1.5 border-b border-line/50 flex items-center gap-3 text-[11px] flex-wrap">
+      <span className="text-faint shrink-0">🎛 {t("arb.controlTitle")}</span>
+
+      {/* 雷达模型 */}
+      <label className="flex items-center gap-1 shrink-0">
+        <span className="text-muted">{t("arb.controlModel")}</span>
+        <select
+          className="bg-elevated text-body rounded px-1.5 py-0.5 text-[11px] focus:outline-none disabled:opacity-40"
+          value={model}
+          disabled={models.length === 0}
+          onChange={(e) => submit("current_model", e.target.value)}
+        >
+          {models.length === 0 && <option value="">—</option>}
+          {models.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+      </label>
+
+      {/* 自动探索（总闸） */}
+      <button
+        className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+          control.autonomy
+            ? "bg-success/15 text-success hover:bg-success/25"
+            : "bg-danger/15 text-danger hover:bg-danger/25"
+        }`}
+        onClick={() => submit("autonomy", control.autonomy ? "false" : "true")}
+        title={t("arb.controlAutonomyHint")}
+      >
+        {control.autonomy ? "▶" : "⏸"} {t("arb.controlAutonomy")} {control.autonomy ? "ON" : "OFF"}
+      </button>
+
+      {/* 线索上限步进器（1..=20，契约硬上限） */}
+      <label className="flex items-center gap-1 shrink-0">
+        <span className="text-muted">{t("arb.controlLeadsPerRun")}</span>
+        <Stepper value={control.leads_per_run ?? 3} lo={1} hi={20}
+          onStep={(d) => step("leads_per_run", control.leads_per_run ?? 3, d, 1, 20)} />
+      </label>
+
+      {/* 每周自动深研配额步进器（0..=50） */}
+      <label className="flex items-center gap-1 shrink-0">
+        <span className="text-muted">{t("arb.controlQuota")}</span>
+        <Stepper value={quota} lo={0} hi={50}
+          onStep={(d) => step("research_quota_per_week", quota, d, 0, 50)} />
+      </label>
+
+      {/* 提交反馈 */}
+      {submitted?.startsWith("__error__") ? (
+        <span className="text-danger ml-auto text-[10px] truncate max-w-[280px]" title={submitted.slice(10)}>
+          ✗ {submitted.slice(10)}
+        </span>
+      ) : submitted ? (
+        <span className="text-success ml-auto text-[10px] shrink-0">{t("arb.controlSubmitted")}</span>
+      ) : (
+        control.updated_at && (
+          <span className="text-faint/70 ml-auto text-[10px] shrink-0">{control.updated_at.replace("T", " ").slice(0, 16)}</span>
+        )
+      )}
+    </div>
+  );
+}
+
+/** 小步进器：− N ＋，点击即提交。 */
+function Stepper({ value, lo, hi, onStep }: {
+  value: number; lo: number; hi: number; onStep: (delta: number) => void;
+}) {
+  return (
+    <span className="inline-flex items-center gap-0.5">
+      <button
+        className="w-4 h-4 rounded bg-elevated text-faint hover:text-body hover:bg-line-hover disabled:opacity-30"
+        disabled={value <= lo}
+        onClick={() => onStep(-1)}
+      >−</button>
+      <span className="w-6 text-center font-mono tabular-nums text-body">{value}</span>
+      <button
+        className="w-4 h-4 rounded bg-elevated text-faint hover:text-body hover:bg-line-hover disabled:opacity-30"
+        disabled={value >= hi}
+        onClick={() => onStep(1)}
+      >＋</button>
+    </span>
+  );
+}
+
+// ══════════════════════════════════════════════
+// LeadsSection — 侦察线索（契约 v3 A 线索段）
+// 只读：放行经既有审核流（gros research），app 不写线索状态。
+// dismissed 默认隐藏（契约）；promoted 显示"已放行"徽章。
+// ══════════════════════════════════════════════
+function LeadsSection({ leads }: { leads?: ArbLead[] }) {
+  const { t } = useTranslation();
+
+  // hooks 规则：必须在 early return（置灰分支）之前调用
+  const visible = useMemo(() => {
+    if (!leads) return [];
+    const arr = leads.filter((l) => l.status !== "dismissed");
+    // 契约：按 date DESC；null 排末位（防御性排序，导出已排）
+    return [...arr].sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""));
+  }, [leads]);
+
+  if (leads === undefined) {
+    // undefined = GROS-01 增量 #2 未落地 → 按约定置灰
+    return (
+      <div className="px-4 py-2 border-b border-line/50 text-[10px] text-faint/70 flex items-center gap-2 shrink-0">
+        <span>🛰 {t("arb.leadsTitle")}</span>
+        <span className="px-1.5 py-px rounded bg-elevated text-faint/70">{t("arb.controlPending")}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-3 pt-2.5 pb-1 shrink-0">
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="text-[11px] font-medium text-heading">🛰 {t("arb.leadsTitle")}</span>
+        <span className="text-[10px] text-faint">{visible.length}</span>
+        <span className="text-[9px] text-faint/70 ml-auto">{t("arb.leadsHint")}</span>
+      </div>
+      {visible.length === 0 ? (
+        <div className="text-[10px] text-faint py-1">{t("arb.noLeads")}</div>
+      ) : (
+        <div className="flex flex-col gap-1.5 max-h-56 overflow-y-auto">
+          {visible.map((lead) => (
+            <LeadCard key={lead.id} lead={lead} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LeadCard({ lead }: { lead: ArbLead }) {
+  const { t } = useTranslation();
+  const prioBadge =
+    lead.priority === "high" ? "bg-red-500/15 text-red-300"
+    : lead.priority === "medium" ? "bg-yellow-500/15 text-yellow-300"
+    : "bg-gray-500/15 text-gray-400";
+
+  return (
+    <div className="rounded-lg border border-line bg-surface/40 px-2.5 py-1.5">
+      <div className="flex items-center gap-2">
+        {lead.status === "promoted" ? (
+          <span className="text-[9px] px-1.5 py-px rounded bg-success/15 text-success shrink-0">
+            ✓ {t("arb.leadPromoted")}
+          </span>
+        ) : (
+          <span className={`text-[9px] px-1.5 py-px rounded shrink-0 ${prioBadge}`}>
+            {lead.priority ?? "?"}
+          </span>
+        )}
+        <span className="text-[11px] flex-1 truncate text-body" title={lead.phenomenon ?? ""}>
+          {lead.phenomenon ?? "—"}
+        </span>
+        {lead.domain && (
+          <span className="text-[9px] px-1.5 py-px rounded bg-accent/10 text-accent shrink-0">
+            {lead.domain}
+          </span>
+        )}
+        <span className="text-[9px] text-faint shrink-0">{lead.date ?? "—"}</span>
+      </div>
+      <div className="mt-0.5 flex items-center gap-3 text-[10px] text-muted flex-wrap">
+        <span title={t("arb.leadCognitiveGap")}>
+          💡 {lead.cognitive_gap ?? "—"}
+        </span>
+        <span className="font-mono text-faint" title={t("arb.leadDataPoint")}>
+          📌 {lead.data_point ?? "—"}
+        </span>
+      </div>
     </div>
   );
 }

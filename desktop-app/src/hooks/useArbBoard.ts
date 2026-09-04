@@ -35,3 +35,12 @@ export function useArbBoard() {
 export async function setArbBoard(enabled: boolean, boardPath: string): Promise<void> {
   await invoke("set_arb_board", { enabled, boardPath });
 }
+
+/**
+ * 提交自动化控制参数卡（契约 v3 B 控制区）。
+ * 走本地薄壳 gros chat-archive → 账房 → 采集机 config-sync 应用 →
+ * 下一轮 board.json control 段回显。UI 不本地改值——回显是唯一真值。
+ */
+export async function submitArbControl(param: string, value: string): Promise<void> {
+  await invoke("submit_arb_control", { param, value });
+}

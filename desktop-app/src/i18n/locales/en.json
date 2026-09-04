@@ -187,7 +187,19 @@
     "emptyParseError": "Board file failed to parse: {{path}}\n{{error}}",
     "retry": "Retry",
     "toggleHint": "Enable/disable the arb board for this project",
-    "pathHint": "board.json path (relative to project root, e.g. gros/exports/board.json)"
+    "pathHint": "board.json path (relative to project root, e.g. gros/exports/board.json)",
+    "controlTitle": "Automation",
+    "controlPending": "awaiting GROS-01 increment #2",
+    "controlModel": "Radar model",
+    "controlAutonomy": "Auto explore",
+    "controlAutonomyHint": "Master switch: collector radar/research jobs",
+    "controlLeadsPerRun": "Leads/run",
+    "controlQuota": "Weekly quota",
+    "controlSubmitted": "✓ submitted → ledger, applying on collector",
+    "leadsTitle": "Scout leads",
+    "leadsHint": "leads ≠ hypotheses · promote via review flow",
+    "noLeads": "No leads",
+    "leadPromoted": "promoted"
   },
   "execution": {
     "title": "Execution",
