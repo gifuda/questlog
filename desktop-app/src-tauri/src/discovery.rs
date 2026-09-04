@@ -289,7 +289,7 @@ pub fn set_arb_board_config(enabled: bool, board_path: &str) -> Result<(), Strin
 /// board.json parent dir to watch.
 pub fn enabled_arb_board_path() -> Option<String> {
     let cfg = get_arb_board_config()?;
-    cfg.enabled.then(|| cfg.board_path)
+    cfg.enabled.then_some(cfg.board_path)
 }
 
 #[cfg(test)]
