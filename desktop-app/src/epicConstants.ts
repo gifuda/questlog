@@ -1,15 +1,15 @@
 /** 方案追踪模块的共享常量。 */
 import type { EpicStatus, StepStage } from "./types/epics";
 
-/** 方案状态 → 徽章颜色（Tailwind class fragments）。 */
+/** 方案状态 → 徽章颜色（语义 token，颜色定义在 index.css @theme）。 */
 export const epicStatusBadge: Record<EpicStatus, { dot: string; text: string; bg: string; label: string }> = {
-  draft:    { dot: "bg-gray-400",   text: "text-gray-300",   bg: "bg-gray-500/15",  label: "草稿" },
-  active:   { dot: "bg-blue-500",   text: "text-blue-300",   bg: "bg-blue-500/15",  label: "进行中" },
-  verifying:{ dot: "bg-cyan-500",   text: "text-cyan-300",   bg: "bg-cyan-500/15",  label: "验证中" },
-  observing:{ dot: "bg-yellow-500", text: "text-yellow-300", bg: "bg-yellow-500/15", label: "观察窗" },
-  done:     { dot: "bg-green-500",  text: "text-green-300",  bg: "bg-green-500/15", label: "已完成" },
-  blocked:  { dot: "bg-red-500",    text: "text-red-300",    bg: "bg-red-500/15",   label: "阻塞" },
-  paused:   { dot: "bg-gray-500",   text: "text-gray-400",   bg: "bg-gray-500/15",  label: "暂停" },
+  draft:    { dot: "bg-faint",        text: "text-muted",    bg: "bg-elevated",      label: "草稿" },
+  active:   { dot: "bg-accent",       text: "text-accent",   bg: "bg-accent-bg",     label: "进行中" },
+  verifying:{ dot: "bg-cyan-500",     text: "text-cyan-300", bg: "bg-cyan-500/15",   label: "验证中" },
+  observing:{ dot: "bg-amber",        text: "text-amber",    bg: "bg-amber-bg",      label: "观察窗" },
+  done:     { dot: "bg-success",      text: "text-success",  bg: "bg-success/10",    label: "已完成" },
+  blocked:  { dot: "bg-danger",       text: "text-danger",   bg: "bg-danger/10",     label: "阻塞" },
+  paused:   { dot: "bg-faint",        text: "text-faint",    bg: "bg-elevated",      label: "暂停" },
 };
 
 /** 步骤阶段顺序与颜色。 */

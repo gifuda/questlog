@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuestLog · 方案追踪总表布局稿</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --page:      #0b0e14;
+    --surface:   #12161f;
+    --elevated:  #1a2030;
+    --chip:      #1c2333;
+    --line:      #232b3d;
+    --line-soft: #1a2130;
+
+    --heading:   #e8ecf4;
+    --body:      #b9c1d1;
+    --muted:     #7d879c;
+    --faint:     #4d566b;
+
+    --accent:    #5ea2ff;
+    --accent-bg: rgba(94,162,255,.12);
+    --amber:     #f0b45a;
+    --amber-bg:  rgba(240,180,90,.10);
+    --success:   #57c98a;
+    --danger:    #e56c6c;
+
+    --fs-micro:  11px;
+    --fs-meta:   12px;
+    --fs-body:   13px;
+    --fs-title:  14px;
+    --fs-panel:  16px;
+    --fs-hero:   20px;
+
+    --font-ui:   "Space Grotesk", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #05070b;
+    font-family: var(--font-ui);
+    font-size: var(--fs-body);
+    padding: 32px 20px 72px;
+    -webkit-font-smoothing: antialiased;
+    color: var(--body);
+  }
+  .caption {
+    max-width: 1180px; margin: 0 auto 14px;
+    color: var(--muted); font-size: var(--fs-meta);
+  }
+  .caption b { color: var(--heading); font-weight: 600; }
+
+  /* ═══ 窗口外壳 ═══ */
+  .window {
+    max-width: 1180px; margin: 0 auto;
+    background: var(--page);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,.5);
+  }
+
+  /* ── 顶栏：模块切换 ── */
+  .titlebar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; height: 46px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .titlebar-left { display: flex; align-items: center; gap: 14px; }
+  .logo { display: flex; align-items: center; gap: 8px; color: var(--heading); font-weight: 600; font-size: var(--fs-title); }
+  .logo-mark {
+    width: 18px; height: 18px; border-radius: 5px;
+    background: linear-gradient(135deg, var(--accent), #7c5eff);
+    display: inline-block;
+  }
+  .module-tabs { display: flex; gap: 2px; background: var(--surface); border-radius: 8px; padding: 3px; }
+  .module-tab {
+    font-size: var(--fs-body); color: var(--faint);
+    padding: 4px 14px; border-radius: 6px; border: none; background: none;
+    cursor: pointer; font-family: var(--font-ui); transition: all .12s;
+  }
+  .module-tab:hover { color: var(--body); }
+  .module-tab.on { background: var(--elevated); color: var(--heading); font-weight: 500; }
+  .titlebar-right { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: var(--fs-meta); }
+
+  /* ── 摘要条 ── */
+  .summary {
+    display: flex; align-items: center; gap: 26px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--surface);
+  }
+  .metric { display: flex; align-items: baseline; gap: 7px; }
+  .metric .num {
+    font-family: var(--font-mono); font-weight: 600;
+    font-size: var(--fs-hero); color: var(--heading);
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .metric .lbl { font-size: var(--fs-meta); color: var(--muted); }
+  .metric.c-active .num { color: var(--accent); }
+  .metric.c-obs    .num { color: var(--amber); }
+  .metric.c-block  .num { color: var(--danger); }
+  .metric.c-done   .num { color: var(--success); }
+  .summary-right {
+    margin-left: auto; display: flex; align-items: center; gap: 8px;
+    font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--muted);
+  }
+  .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--success); animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  /* ── 总表 ── */
+  .table-head, .row {
+    display: grid;
+    grid-template-columns: minmax(220px, 1.7fr) 108px 150px minmax(150px, 1.2fr) minmax(130px, 1fr) minmax(150px, 1.2fr);
+    align-items: center; gap: 12px;
+    padding: 0 20px;
+  }
+  .table-head {
+    height: 34px;
+    font-family: var(--font-mono); font-size: var(--fs-micro);
+    color: var(--faint); letter-spacing: .12em; text-transform: uppercase;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .row {
+    min-height: 52px; padding-top: 9px; padding-bottom: 9px;
+    border-bottom: 1px solid var(--line-soft);
+    cursor: pointer; transition: background .1s;
+  }
+  .row:hover { background: var(--surface); }
+  .row.child { background: rgba(255,255,255,.012); }
+  .row.child:hover { background: var(--surface); }
+  .row.blocked-row { opacity: .68; }
+
+  /* 方案名列 */
+  .cell-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .chev {
+    width: 16px; flex-shrink: 0; color: var(--faint);
+    font-size: 10px; transition: transform .15s; text-align: center;
+  }
+  .chev.open { transform: rotate(90deg); }
+  .chev.leaf { visibility: hidden; }
+  .tree-indent { width: 25px; flex-shrink: 0; position: relative; }
+  .tree-indent::before {
+    content: ""; position: absolute; left: 8px; top: -14px; bottom: 50%;
+    width: 10px; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    border-bottom-left-radius: 5px;
+  }
+  .name-main { min-width: 0; }
+  .name-title {
+    font-size: var(--fs-title); font-weight: 600; color: var(--heading);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .row.child .name-title { font-size: var(--fs-body); font-weight: 500; }
+  .name-sub {
+    font-size: var(--fs-meta); color: var(--faint);
+    font-family: var(--font-mono); margin-top: 1px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .prio-badge {
+    font-family: var(--font-mono); font-size: var(--fs-micro);
+    padding: 1px 6px; border-radius: 4px; flex-shrink: 0;
+    letter-spacing: .04em;
+  }
+  .prio-p0 { background: rgba(229,108,108,.14); color: var(--danger); }
+  .prio-p1 { background: var(--amber-bg); color: var(--amber); }
+  .prio-p2 { background: var(--chip); color: var(--muted); }
+
+  /* 状态列 */
+  .status-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono); font-size: var(--fs-micro);
+    padding: 3px 9px; border-radius: 4px; letter-spacing: .05em;
+    width: fit-content;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .st-active    { background: var(--accent-bg); color: var(--accent); }
+  .st-active .dot { background: var(--accent); }
+  .st-observing { background: var(--amber-bg); color: var(--amber); }
+  .st-observing .dot { background: var(--amber); }
+  .st-blocked   { background: rgba(229,108,108,.13); color: var(--danger); }
+  .st-blocked .dot { background: var(--danger); }
+  .st-done      { background: rgba(87,201,138,.12); color: var(--success); }
+  .st-done .dot { background: var(--success); }
+  .st-draft     { background: var(--chip); color: var(--muted); }
+  .st-draft .dot { background: var(--faint); }
+
+  /* 进度列 */
+  .cell-progress { display: flex; align-items: center; gap: 10px; }
+  .bar {
+    flex: 1; max-width: 76px; height: 4px; border-radius: 2px;
+    background: var(--line); overflow: hidden;
+  }
+  .bar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+  .bar.obs i { background: var(--amber); }
+  .bar.done i { background: var(--success); }
+  .bar.blocked i { background: var(--danger); }
+  .pct {
+    font-family: var(--font-mono); font-size: var(--fs-meta);
+    color: var(--muted); font-variant-numeric: tabular-nums;
+    min-width: 36px;
+  }
+  .row.child .pct { color: var(--faint); }
+
+  /* 在办 / 堵点 / 下一步列 */
+  .cell-text {
+    font-size: var(--fs-body); color: var(--body);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cell-text .stage-tag {
+    font-family: var(--font-mono); font-size: var(--fs-micro);
+    color: var(--accent); margin-right: 6px;
+  }
+  .cell-blocker { color: var(--danger); font-size: var(--fs-body); display: flex; align-items: center; gap: 6px; }
+  .cell-blocker.none { color: var(--faint); font-family: var(--font-mono); font-size: var(--fs-meta); }
+  .cell-next { color: var(--muted); font-size: var(--fs-body); display: flex; align-items: center; gap: 6px; }
+  .cell-next b { color: var(--body); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .next-arrow { color: var(--faint); flex-shrink: 0; }
+
+  /* 展开的步骤区 */
+  .steps-wrap {
+    grid-column: 1 / -1;
+    margin: 4px 0 6px 41px;
+    border: 1px solid var(--line-soft); border-radius: 8px;
+    background: rgba(255,255,255,.014);
+    padding: 6px;
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .step {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 10px; border-radius: 6px; font-size: var(--fs-body);
+  }
+  .step:hover { background: var(--elevated); }
+  .stage-track { display: flex; gap: 3px; flex-shrink: 0; }
+  .seg { width: 13px; height: 4px; border-radius: 2px; background: var(--line); }
+  .seg.on { background: var(--accent); }
+  .step.done .seg.on { background: var(--success); }
+  .step-name { color: var(--body); }
+  .step.done .step-name { color: var(--faint); }
+  .step-stage { margin-left: auto; font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--faint); }
+  .step.current .step-stage { color: var(--accent); }
+  .step-pkg {
+    font-family: var(--font-mono); font-size: var(--fs-micro);
+    color: var(--amber); background: var(--amber-bg);
+    padding: 1px 6px; border-radius: 4px;
+  }
+
+  /* ── 底部项目选择 ── */
+  .project-bar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 9px 14px;
+    border-top: 1px solid var(--line-soft);
+    overflow-x: auto;
+  }
+  .proj-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: var(--fs-body); color: var(--faint);
+    padding: 5px 13px; border-radius: 999px;
+    background: none; border: none; cursor: pointer;
+    font-family: var(--font-ui); white-space: nowrap; transition: all .12s;
+  }
+  .proj-pill:hover { color: var(--body); background: var(--surface); }
+  .proj-pill.on { background: var(--surface); color: var(--heading); font-weight: 500; box-shadow: inset 0 0 0 1px var(--line); }
+  .proj-count {
+    font-family: var(--font-mono); font-size: var(--fs-micro);
+    background: var(--chip); color: var(--muted);
+    padding: 0 6px; border-radius: 999px; line-height: 16px;
+  }
+  .proj-pill.on .proj-count { background: var(--elevated); color: var(--body); }
+  .proj-add { color: var(--faint); font-size: 15px; padding: 4px 8px; }
+
+  /* 图例 */
+  .legend {
+    max-width: 1180px; margin: 18px auto 0;
+    display: flex; gap: 26px; flex-wrap: wrap;
+    font-size: var(--fs-meta); color: var(--faint);
+  }
+  .legend span { display: flex; align-items: center; gap: 7px; }
+</style>
+</head>
+<body>
+
+<p class="caption"><b>方案追踪 · 总表布局稿</b> —— 顶部平级双模块切换（待办事项 / 方案追踪），底部项目文件夹 pill 保留。总表六列：方案层级、状态、进度、在办、堵点、下一步。行可展开看步骤。</p>
+
+<div class="window">
+
+  <!-- 顶栏 -->
+  <div class="titlebar">
+    <div class="titlebar-left">
+      <span class="logo"><span class="logo-mark"></span>QuestLog</span>
+      <div class="module-tabs">
+        <button class="module-tab">待办事项</button>
+        <button class="module-tab on">方案追踪</button>
+      </div>
+    </div>
+    <div class="titlebar-right">⚙</div>
+  </div>
+
+  <!-- 摘要条 -->
+  <div class="summary">
+    <div class="metric"><span class="num">7</span><span class="lbl">方案</span></div>
+    <div class="metric c-active"><span class="num">3</span><span class="lbl">进行</span></div>
+    <div class="metric c-obs"><span class="num">1</span><span class="lbl">观察</span></div>
+    <div class="metric c-block"><span class="num">1</span><span class="lbl">阻塞</span></div>
+    <div class="metric c-done"><span class="num">2</span><span class="lbl">完成</span></div>
+    <div class="summary-right"><span class="pulse"></span>RUNNER IDLE · 4s · 2 SEALED</div>
+  </div>
+
+  <!-- 总表 -->
+  <div class="table-head">
+    <span>方案</span><span>状态</span><span>进度</span><span>在办</span><span>堵点</span><span>下一步</span>
+  </div>
+
+  <!-- 父方案（展开） -->
+  <div class="row">
+    <div class="cell-name">
+      <span class="chev open">▶</span>
+      <div class="name-main">
+        <div class="name-title">受控执行管线闭环</div>
+        <div class="name-sub">2 子方案 · 更新于 2h 前</div>
+      </div>
+      <span class="prio-badge prio-p0">P0</span>
+    </div>
+    <div><span class="status-chip st-active"><span class="dot"></span>ACTIVE</span></div>
+    <div class="cell-progress"><span class="bar"><i style="width:62%"></i></span><span class="pct">62%</span></div>
+    <div class="cell-text"><span class="stage-tag">CODED</span>G2 Runner 自动领取</div>
+    <div class="cell-blocker none">—</div>
+    <div class="cell-next"><span class="next-arrow">→</span><b>G2 实跑验证三项目同步</b></div>
+  </div>
+  <div class="row">
+    <div class="steps-wrap">
+      <div class="step done">
+        <span class="stage-track"><span class="seg on"></span><span class="seg on"></span><span class="seg on"></span><span class="seg on"></span><span class="seg on"></span></span>
+        <span class="step-name">G0 存储安全与封包冻结</span>
+        <span class="step-stage">OBSERVED</span>
+      </div>
+      <div class="step done">
+        <span class="stage-track"><span class="seg on"></span><span class="seg on"></span><span class="seg on"></span><span class="seg on"></span><span class="seg on"></span></span>
+        <span class="step-name">G1 验收命令注册表</span>
+        <span class="step-stage">OBSERVED</span>
+      </div>
+      <div class="step current">
+        <span class="stage-track"><span class="seg on"></span><span class="seg on"></span><span class="seg on"></span><span class="seg"></span><span class="seg"></span></span>
+        <span class="step-name">G2 Runner 自动领取与重试</span>
+        <span class="step-pkg">SEALED ×2</span>
+        <span class="step-stage">CODED</span>
+      </div>
+      <div class="step">
+        <span class="stage-track"><span class="seg"></span><span class="seg"></span><span class="seg"></span><span class="seg"></span><span class="seg"></span></span>
+        <span class="step-name">G3 观察期复盘与归档</span>
+        <span class="step-stage">PENDING</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 子方案行（缩进） -->
+  <div class="row child">
+    <div class="cell-name">
+      <span class="tree-indent"></span>
+      <span class="chev leaf">▶</span>
+      <div class="name-main">
+        <div class="name-title">G4 多机执行授权</div>
+        <div class="name-sub">3 步骤 · 更新于 1d 前</div>
+      </div>
+      <span class="prio-badge prio-p1">P1</span>
+    </div>
+    <div><span class="status-chip st-blocked"><span class="dot"></span>BLOCKED</span></div>
+    <div class="cell-progress"><span class="bar blocked"><i style="width:25%"></i></span><span class="pct">25%</span></div>
+    <div class="cell-text" style="color:var(--faint)">— 未启动</div>
+    <div class="cell-blocker">⚠ 等「G2」observed</div>
+    <div class="cell-next"><span class="next-arrow">→</span><b>需用户显式授权</b></div>
+  </div>
+
+  <!-- 普通方案行 -->
+  <div class="row">
+    <div class="cell-name">
+      <span class="chev">▶</span>
+      <div class="name-main">
+        <div class="name-title">面板 UI 字号与层级重构</div>
+        <div class="name-sub">4 步骤 · 更新于 20m 前</div>
+      </div>
+      <span class="prio-badge prio-p1">P1</span>
+    </div>
+    <div><span class="status-chip st-active"><span class="dot"></span>ACTIVE</span></div>
+    <div class="cell-progress"><span class="bar"><i style="width:25%"></i></span><span class="pct">25%</span></div>
+    <div class="cell-text"><span class="stage-tag">DESIGNED</span>设计 token 定稿</div>
+    <div class="cell-blocker none">—</div>
+    <div class="cell-next"><span class="next-arrow">→</span><b>替换 5 组件硬编码字号</b></div>
+  </div>
+
+  <!-- 观察期方案 -->
+  <div class="row">
+    <div class="cell-name">
+      <span class="chev">▶</span>
+      <div class="name-main">
+        <div class="name-title">采集机路径修复</div>
+        <div class="name-sub">2 步骤 · 更新于 3d 前</div>
+      </div>
+      <span class="prio-badge prio-p2">P2</span>
+    </div>
+    <div><span class="status-chip st-observing"><span class="dot"></span>OBSERVING</span></div>
+    <div class="cell-progress"><span class="bar obs"><i style="width:75%"></i></span><span class="pct">75%</span></div>
+    <div class="cell-text"><span class="stage-tag" style="color:var(--amber)">VERIFIED</span>symlink 统一解析</div>
+    <div class="cell-blocker none">—</div>
+    <div class="cell-next"><span class="next-arrow">→</span><b>观察到 8/17 无复发</b></div>
+  </div>
+
+  <!-- 完成方案（降明度） -->
+  <div class="row" style="opacity:.5">
+    <div class="cell-name">
+      <span class="chev">▶</span>
+      <div class="name-main">
+        <div class="name-title">MCP 注册路由修复</div>
+        <div class="name-sub">1 步骤 · 完成于 8/10</div>
+      </div>
+      <span class="prio-badge prio-p2">P2</span>
+    </div>
+    <div><span class="status-chip st-done"><span class="dot"></span>DONE</span></div>
+    <div class="cell-progress"><span class="bar done"><i style="width:100%"></i></span><span class="pct">100%</span></div>
+    <div class="cell-text" style="color:var(--faint)">—</div>
+    <div class="cell-blocker none">—</div>
+    <div class="cell-next" style="color:var(--faint)">已闭环</div>
+  </div>
+
+  <!-- 底部项目选择 -->
+  <div class="project-bar">
+    <button class="proj-pill on">桌面清单贴 <span class="proj-count">3</span></button>
+    <button class="proj-pill">ymos <span class="proj-count">5</span></button>
+    <button class="proj-pill">投资雷达</button>
+    <button class="proj-pill">自动机</button>
+    <span class="proj-add">＋</span>
+  </div>
+
+</div>
+
+<div class="legend">
+  <span><span class="status-chip st-active"><span class="dot"></span>ACTIVE</span> 有步骤在推进</span>
+  <span><span class="status-chip st-blocked"><span class="dot"></span>BLOCKED</span> 依赖未满足，整行降明度 + 堵点列红字</span>
+  <span><span class="status-chip st-observing"><span class="dot"></span>OBSERVING</span> 验证通过，等观察期</span>
+  <span><span class="prio-badge prio-p0">P0</span> 优先级徽标跟在标题后</span>
+</div>
+
+</body>
+</html>

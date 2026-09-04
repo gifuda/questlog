@@ -13,27 +13,37 @@
   --color-faint: var(--c-faint);
   --color-accent: var(--c-accent);
   --color-accent-bg: var(--c-accent-bg);
+  --color-amber: var(--c-amber);
+  --color-amber-bg: var(--c-amber-bg);
   --color-success: var(--c-success);
   --color-danger: var(--c-danger);
+
+  /* 科技风字体栈：UI 用系统无衬线（中文 PingFang/Noto 回退），
+     数字/ID/阶段名用等宽并开 tabular-nums */
+  --font-sans: -apple-system, "SF Pro Text", "PingFang SC", "Segoe UI", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
-/* ── Dark (default) ── */
+/* ── Dark (default) · 中性色带蓝相，无纯黑纯白 ── */
 :root {
   background: transparent;
-  --c-page: #030712;
-  --c-surface: #1f2937;
-  --c-elevated: #374151;
-  --c-chip: #374151;
-  --c-line: #1f2937;
-  --c-line-hover: #6b7280;
-  --c-heading: #f3f4f6;
-  --c-body: #d1d5db;
-  --c-muted: #9ca3af;
-  --c-faint: #6b7280;
-  --c-accent: #60a5fa;
-  --c-accent-bg: rgba(30, 58, 138, 0.4);
-  --c-success: #4ade80;
-  --c-danger: #f87171;
+  --c-page: #0b0e14;
+  --c-surface: #12161f;
+  --c-elevated: #1a2030;
+  --c-chip: #1c2333;
+  --c-line: #232b3d;
+  --c-line-hover: #46537a;
+  --c-heading: #e8ecf4;
+  --c-body: #b9c1d1;
+  --c-muted: #7d879c;
+  --c-faint: #4d566b;
+  --c-accent: #5ea2ff;
+  --c-accent-bg: rgba(94, 162, 255, 0.12);
+  /* 警示双色拉开色相：琥珀偏黄（等待/注意），红偏品红（阻塞/危险） */
+  --c-amber: #f5cd47;
+  --c-amber-bg: rgba(245, 205, 71, 0.1);
+  --c-success: #57c98a;
+  --c-danger: #e5484d;
 }
 
 /* ── Light ── */
@@ -50,6 +60,8 @@
   --c-faint: #9ca3af;
   --c-accent: #3b82f6;
   --c-accent-bg: #eff6ff;
+  --c-amber: #854d0e;
+  --c-amber-bg: #fef9c3;
   --c-success: #16a34a;
   --c-danger: #dc2626;
 }
