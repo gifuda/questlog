@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useArbBoard, submitArbControl } from "../hooks/useArbBoard";
 import type { ArbOpenHypothesis, ArbSettledHypothesis, ArbOutcome, ArbControl, ArbLead } from "../types/arb";
@@ -279,11 +279,40 @@ function SettledCard({ item }: { item: ArbSettledHypothesis }) {
 // ControlBar — 自动化控制条（契约 v3 B 控制区）
 // 渲染值 = board.json control 段回显（唯一真值）。
 // 控件变更 → 参数卡经薄壳入账房 → 采集机 config-sync 应用 →
-// 下一轮导出回显。UI 显示"已提交"但不本地改值（防环，契约 v3）。
+// 下一轮导出回显。防环纪律：UI 不以本地值覆盖回显——提交后进入
+// pending 过渡态（显示「回显值 → 提交值 ⏳」），config-sync 应用后
+// 回显追上，pending 自动清除；若采集机拒绝/未消费，pending 持续
+// 显示「待应用」——那是真实的未生效状态，不是 UI 假成功。
+// 连点防抖：同参数 1.2s 内只发最后一张卡（账房免噪音）。
 // ══════════════════════════════════════════════
 function ControlBar({ control }: { control?: ArbControl }) {
   const { t } = useTranslation();
-  const [submitted, setSubmitted] = useState<string | null>(null);
+  /** param → 已提交待回显的值（显示层 pending，非真值） */
+  const [pending, setPending] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+  const debounceRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  // 回显追上 → 清对应 pending（effect 依赖 control 各字段值）
+  useEffect(() => {
+    if (!control) return;
+    setPending((p) => {
+      const echoed: Record<string, string> = {
+        current_model: control.current_model ?? "",
+        autonomy: control.autonomy === true || control.autonomy === "on" ? "true" : "false",
+        leads_per_run: String(control.leads_per_run ?? ""),
+        research_quota_per_week: String(control.research_quota_per_week ?? ""),
+      };
+      const next = { ...p };
+      let changed = false;
+      for (const k of Object.keys(next)) {
+        if (echoed[k] === next[k]) {
+          delete next[k];
+          changed = true;
+        }
+      }
+      return changed ? next : p;
+    });
+  }, [control?.current_model, control?.autonomy, control?.leads_per_run, control?.research_quota_per_week]);
 
   if (!control) {
     // undefined = GROS-01 增量 #2 未落地 → 按约定置灰
@@ -295,21 +324,42 @@ function ControlBar({ control }: { control?: ArbControl }) {
     );
   }
 
-  async function submit(param: string, value: string) {
-    try {
-      await submitArbControl(param, value);
-      setSubmitted(param);
-      setTimeout(() => setSubmitted((s) => (s === param ? null : s)), 4000);
-    } catch (e) {
-      // 薄壳写入失败（gros 缺失/账房错误）——把错误顶到标题提示，2.5s 恢复
-      setSubmitted(`__error__:${String(e)}`);
-      setTimeout(() => setSubmitted(null), 6000);
-    }
+  function submit(param: string, value: string) {
+    // 乐观 pending：立即显示目标值（仅显示层；防环纪律不破坏）
+    setPending((p) => ({ ...p, [param]: value }));
+    // 同参数防抖：连点只发最后一张卡
+    clearTimeout(debounceRef.current[param]);
+    debounceRef.current[param] = setTimeout(async () => {
+      try {
+        await submitArbControl(param, value);
+        setError(null);
+      } catch (e) {
+        // 薄壳写入失败 → 撤 pending、顶错误提示（6s 恢复）
+        setPending((p) => {
+          const n = { ...p };
+          delete n[param];
+          return n;
+        });
+        setError(String(e));
+        setTimeout(() => setError(null), 6000);
+      }
+    }, 1200);
   }
 
-  const model = control.current_model ?? "";
+  /** 显示值：有 pending 显示提交值（⏳ 样式由调用方判断），否则显示回显真值 */
+  const disp = (param: string, echoed: string) => pending[param] ?? echoed;
+  const isPending = (param: string) => param in pending;
+
   const models = Array.isArray(control.models) ? control.models : [];
-  const quota = control.research_quota_per_week ?? 0;
+  const echoedAutonomyOn = control.autonomy === true || control.autonomy === "on";
+  const autonomyOn = disp("autonomy", echoedAutonomyOn ? "true" : "false") === "true";
+  const autonomyPending = isPending("autonomy");
+  const leadsVal = Number(disp("leads_per_run", String(control.leads_per_run ?? 3)));
+  const quotaVal = Number(disp("research_quota_per_week", String(control.research_quota_per_week ?? 0)));
+  const leadsPending = isPending("leads_per_run");
+  const quotaPending = isPending("research_quota_per_week");
+  const anyPending = Object.keys(pending).length > 0;
+
   const step = (param: string, cur: number, delta: number, lo: number, hi: number) =>
     submit(param, String(Math.min(hi, Math.max(lo, cur + delta))));
 
@@ -321,8 +371,10 @@ function ControlBar({ control }: { control?: ArbControl }) {
       <label className="flex items-center gap-1 shrink-0">
         <span className="text-muted">{t("arb.controlModel")}</span>
         <select
-          className="bg-elevated text-body rounded px-1.5 py-0.5 text-[11px] focus:outline-none disabled:opacity-40"
-          value={model}
+          className={`bg-elevated text-body rounded px-1.5 py-0.5 text-[11px] focus:outline-none disabled:opacity-40 ${
+            isPending("current_model") ? "text-amber" : ""
+          }`}
+          value={disp("current_model", control.current_model ?? "")}
           disabled={models.length === 0}
           onChange={(e) => submit("current_model", e.target.value)}
         >
@@ -333,43 +385,42 @@ function ControlBar({ control }: { control?: ArbControl }) {
         </select>
       </label>
 
-      {/* 自动探索（总闸）—— autonomy 实测为 "on"/"off" 字符串，兼容 boolean */}
-      {(() => {
-        const on = control.autonomy === true || control.autonomy === "on";
-        return (
-          <button
-            className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
-              on ? "bg-success/15 text-success hover:bg-success/25" : "bg-danger/15 text-danger hover:bg-danger/25"
-            }`}
-            onClick={() => submit("autonomy", on ? "false" : "true")}
-            title={t("arb.controlAutonomyHint")}
-          >
-            {on ? "▶" : "⏸"} {t("arb.controlAutonomy")} {on ? "ON" : "OFF"}
-          </button>
-        );
-      })()}
+      {/* 自动探索（总闸）—— pending 时加 ⏳ 与琥珀色 */}
+      <button
+        className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+          autonomyPending
+            ? "bg-amber/15 text-amber"
+            : autonomyOn
+              ? "bg-success/15 text-success hover:bg-success/25"
+              : "bg-danger/15 text-danger hover:bg-danger/25"
+        }`}
+        onClick={() => submit("autonomy", autonomyOn ? "false" : "true")}
+        title={t("arb.controlAutonomyHint")}
+      >
+        {autonomyPending ? "⏳" : autonomyOn ? "▶" : "⏸"} {t("arb.controlAutonomy")} {autonomyOn ? "ON" : "OFF"}
+      </button>
 
-      {/* 线索上限步进器（1..=20，契约硬上限） */}
+      {/* 线索上限步进器（1..=20，契约硬上限；pending 基准连点累加） */}
       <label className="flex items-center gap-1 shrink-0">
         <span className="text-muted">{t("arb.controlLeadsPerRun")}</span>
-        <Stepper value={control.leads_per_run ?? 3} lo={1} hi={20}
-          onStep={(d) => step("leads_per_run", control.leads_per_run ?? 3, d, 1, 20)} />
+        <Stepper value={leadsVal} lo={1} hi={20} pending={leadsPending}
+          onStep={(d) => step("leads_per_run", leadsVal, d, 1, 20)} />
       </label>
 
       {/* 每周自动深研配额步进器（0..=50） */}
       <label className="flex items-center gap-1 shrink-0">
         <span className="text-muted">{t("arb.controlQuota")}</span>
-        <Stepper value={quota} lo={0} hi={50}
-          onStep={(d) => step("research_quota_per_week", quota, d, 0, 50)} />
+        <Stepper value={quotaVal} lo={0} hi={50} pending={quotaPending}
+          onStep={(d) => step("research_quota_per_week", quotaVal, d, 0, 50)} />
       </label>
 
-      {/* 提交反馈 */}
-      {submitted?.startsWith("__error__") ? (
-        <span className="text-danger ml-auto text-[10px] truncate max-w-[280px]" title={submitted.slice(10)}>
-          ✗ {submitted.slice(10)}
+      {/* 提交反馈：错误 > 待应用 > 最后更新时间 */}
+      {error ? (
+        <span className="text-danger ml-auto text-[10px] truncate max-w-[280px]" title={error}>
+          ✗ {error}
         </span>
-      ) : submitted ? (
-        <span className="text-success ml-auto text-[10px] shrink-0">{t("arb.controlSubmitted")}</span>
+      ) : anyPending ? (
+        <span className="text-amber ml-auto text-[10px] shrink-0">{t("arb.controlSubmitted")}</span>
       ) : (
         control.updated_at && (
           <span className="text-faint/70 ml-auto text-[10px] shrink-0">{control.updated_at.replace("T", " ").slice(0, 16)}</span>
@@ -379,9 +430,9 @@ function ControlBar({ control }: { control?: ArbControl }) {
   );
 }
 
-/** 小步进器：− N ＋，点击即提交。 */
-function Stepper({ value, lo, hi, onStep }: {
-  value: number; lo: number; hi: number; onStep: (delta: number) => void;
+/** 小步进器：− N ＋；pending 时数字琥珀色（已提交待回显）。 */
+function Stepper({ value, lo, hi, pending, onStep }: {
+  value: number; lo: number; hi: number; pending?: boolean; onStep: (delta: number) => void;
 }) {
   return (
     <span className="inline-flex items-center gap-0.5">
@@ -390,7 +441,9 @@ function Stepper({ value, lo, hi, onStep }: {
         disabled={value <= lo}
         onClick={() => onStep(-1)}
       >−</button>
-      <span className="w-6 text-center font-mono tabular-nums text-body">{value}</span>
+      <span className={`w-7 text-center font-mono tabular-nums ${pending ? "text-amber" : "text-body"}`}>
+        {value}{pending ? "⏳" : ""}
+      </span>
       <button
         className="w-4 h-4 rounded bg-elevated text-faint hover:text-body hover:bg-line-hover disabled:opacity-30"
         disabled={value >= hi}
