@@ -199,7 +199,11 @@
     "leadsTitle": "Scout leads",
     "leadsHint": "leads ≠ hypotheses · promote via review flow",
     "noLeads": "No leads",
-    "leadPromoted": "promoted"
+    "leadPromoted": "promoted",
+    "leadToResearch": "To research",
+    "leadToResearchHint": "Copy research prompt → paste into a GROS session (promote via review flow, no direct write)",
+    "leadCreatedAt": "Ledger created at",
+    "leadVerifiableData": "Verifiable data"
   },
   "execution": {
     "title": "Execution",

@@ -11,7 +11,10 @@ export interface ArbEvidenceCounts {
   oppose: number;
 }
 
-/** 侦察线索（契约 v3 A 段，2026-09-05 GROS 侧冻结）。 */
+/**
+ * 侦察线索（契约 v3 A 段，2026-09-05 GROS 侧冻结 + 对表裁定）。
+ * 字段以 GROS-02 实际导出为准：verifiable_data / conversation_id / created_at。
+ */
 export type ArbLeadStatus = "open" | "promoted" | "dismissed";
 
 export interface ArbLead {
@@ -21,18 +24,24 @@ export interface ArbLead {
   date: string | null;
   phenomenon: string | null;
   cognitive_gap: string | null;
-  data_point: string | null;
-  priority: "high" | "medium" | "low" | null;
-  source_conversation_id: string | null;
+  verifiable_data: string | null;
+  /** 实测为中文"高/中/低"（GROS-02 导出），契约初稿的英文枚举不成立 */
+  priority: string | null;
+  conversation_id: string | null;
   status: ArbLeadStatus;
+  /** 账房落库时间 */
+  created_at: string | null;
   promoted_hypothesis_id: string | null;
 }
 
-/** 自动化控制区当前状态（契约 v3 B 段，已冻结；config-sync 回显，UI 唯一真值）。 */
+/**
+ * 自动化控制区当前状态（契约 v3 B 段，已冻结；config-sync 回显，UI 唯一真值）。
+ * autonomy 实测为 "on"/"off" 字符串（GROS-02 导出），兼容 boolean。
+ */
 export interface ArbControl {
   models: string[];
   current_model: string | null;
-  autonomy: boolean | null;
+  autonomy: boolean | string | null;
   leads_per_run: number | null;
   research_quota_per_week: number | null;
   updated_at: string | null;

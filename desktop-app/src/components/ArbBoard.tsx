@@ -333,18 +333,21 @@ function ControlBar({ control }: { control?: ArbControl }) {
         </select>
       </label>
 
-      {/* 自动探索（总闸） */}
-      <button
-        className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
-          control.autonomy
-            ? "bg-success/15 text-success hover:bg-success/25"
-            : "bg-danger/15 text-danger hover:bg-danger/25"
-        }`}
-        onClick={() => submit("autonomy", control.autonomy ? "false" : "true")}
-        title={t("arb.controlAutonomyHint")}
-      >
-        {control.autonomy ? "▶" : "⏸"} {t("arb.controlAutonomy")} {control.autonomy ? "ON" : "OFF"}
-      </button>
+      {/* 自动探索（总闸）—— autonomy 实测为 "on"/"off" 字符串，兼容 boolean */}
+      {(() => {
+        const on = control.autonomy === true || control.autonomy === "on";
+        return (
+          <button
+            className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+              on ? "bg-success/15 text-success hover:bg-success/25" : "bg-danger/15 text-danger hover:bg-danger/25"
+            }`}
+            onClick={() => submit("autonomy", on ? "false" : "true")}
+            title={t("arb.controlAutonomyHint")}
+          >
+            {on ? "▶" : "⏸"} {t("arb.controlAutonomy")} {on ? "ON" : "OFF"}
+          </button>
+        );
+      })()}
 
       {/* 线索上限步进器（1..=20，契约硬上限） */}
       <label className="flex items-center gap-1 shrink-0">
@@ -445,16 +448,38 @@ function LeadsSection({ leads }: { leads?: ArbLead[] }) {
 
 function LeadCard({ lead }: { lead: ArbLead }) {
   const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  // 优先级徽章：GROS-02 实测导出为中文"高/中/低"，兼容契约初稿英文枚举
+  const p = lead.priority;
   const prioBadge =
-    lead.priority === "high" ? "bg-red-500/15 text-red-300"
-    : lead.priority === "medium" ? "bg-yellow-500/15 text-yellow-300"
+    p === "high" || p === "高" ? "bg-red-500/15 text-red-300"
+    : p === "medium" || p === "中" ? "bg-yellow-500/15 text-yellow-300"
     : "bg-gray-500/15 text-gray-400";
+
+  /** "转研究"：复制一段可直接粘贴到 GROS 会话的研究请求（不直接写库，
+   *  放行仍走既有审核流——gros research 由用户在会话内发起）。 */
+  async function copyResearchPrompt() {
+    const lines = [
+      `请对以下侦察线索发起研究（gros research 流程）：`,
+      `· 现象：${lead.phenomenon ?? "—"}`,
+      `· 认知差：${lead.cognitive_gap ?? "—"}`,
+      `· 可核数据：${lead.verifiable_data ?? "—"}`,
+      `· 域：${lead.domain ?? "自由探索"}（来源 ${lead.conversation_id ?? "—"}，线索id ${lead.id.slice(0, 8)}）`,
+      `请先 gros search 查重，再取证起草公允值/现值与证伪条件，落 hypothesis 前等我确认。`,
+    ];
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard unavailable */ }
+  }
 
   return (
     <div className="rounded-lg border border-line bg-surface/40 px-2.5 py-1.5">
       <div className="flex items-center gap-2">
         {lead.status === "promoted" ? (
-          <span className="text-[9px] px-1.5 py-px rounded bg-success/15 text-success shrink-0">
+          <span className="text-[9px] px-1.5 py-px rounded bg-success/15 text-success shrink-0"
+            title={lead.promoted_hypothesis_id ? `${t("arb.leadPromoted")}: ${lead.promoted_hypothesis_id}` : t("arb.leadPromoted")}>
             ✓ {t("arb.leadPromoted")}
           </span>
         ) : (
@@ -470,15 +495,27 @@ function LeadCard({ lead }: { lead: ArbLead }) {
             {lead.domain}
           </span>
         )}
-        <span className="text-[9px] text-faint shrink-0">{lead.date ?? "—"}</span>
+        <span className="text-[9px] text-faint shrink-0"
+          title={`${t("arb.leadCreatedAt")}: ${lead.created_at ?? "—"}\n${lead.conversation_id ?? ""}`}>
+          {lead.date ?? "—"}
+        </span>
       </div>
       <div className="mt-0.5 flex items-center gap-3 text-[10px] text-muted flex-wrap">
         <span title={t("arb.leadCognitiveGap")}>
           💡 {lead.cognitive_gap ?? "—"}
         </span>
-        <span className="font-mono text-faint" title={t("arb.leadDataPoint")}>
-          📌 {lead.data_point ?? "—"}
+        <span className="font-mono text-faint" title={t("arb.leadVerifiableData")}>
+          📌 {lead.verifiable_data ?? "—"}
         </span>
+        {lead.status === "open" && (
+          <button
+            className="ml-auto text-[10px] px-1.5 py-px rounded bg-accent/15 text-accent hover:bg-accent/25 shrink-0"
+            onClick={copyResearchPrompt}
+            title={t("arb.leadToResearchHint")}
+          >
+            {copied ? t("arb.copied") : t("arb.leadToResearch")}
+          </button>
+        )}
       </div>
     </div>
   );

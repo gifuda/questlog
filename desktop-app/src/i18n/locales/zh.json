@@ -199,7 +199,11 @@
     "leadsTitle": "侦察线索",
     "leadsHint": "线索 ≠ 假设 · 放行走审核流",
     "noLeads": "暂无线索",
-    "leadPromoted": "已放行"
+    "leadPromoted": "已放行",
+    "leadToResearch": "转研究",
+    "leadToResearchHint": "复制研究请求 → 粘贴到 GROS 会话发起（放行走审核流，app 不写库）",
+    "leadCreatedAt": "账房落库时间",
+    "leadVerifiableData": "可核数据"
   },
   "execution": {
     "title": "执行记录",
