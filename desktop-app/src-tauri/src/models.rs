@@ -142,6 +142,11 @@ pub struct TodoItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodosFile {
+    /// Display metadata, not a safety invariant. Legacy files written before
+    /// this field existed carry no `version` — the strict reader must accept
+    /// them (default 1) instead of blocking the whole tenant (G5 drill
+    /// finding: real boards lack it, only the salvage path tolerated that).
+    #[serde(default = "default_todos_version")]
     pub version: u32,
     pub project: String,
     pub items: Vec<TodoItem>,
@@ -149,6 +154,10 @@ pub struct TodosFile {
     /// Old files without this field default to 0 (serde default).
     #[serde(default)]
     pub revision: u64,
+}
+
+fn default_todos_version() -> u32 {
+    1
 }
 
 impl Default for TodosFile {

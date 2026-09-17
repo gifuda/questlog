@@ -12,6 +12,8 @@ import re
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
+# 平台租户恒为 questlog（TaskSpec.tenant）；投递消息里的 tenant_id 是经理机
+# 项目名（信息性字段，进 receipt 取证），不参与平台租户判定。
 TENANT = "questlog"
 
 MAX_OBJECTIVE_BYTES = 32 * 1024
@@ -51,9 +53,7 @@ def validate_delivery(msg: dict) -> dict:
         raise DeliveryError("package_hash must be 64 lowercase hex chars")
     if not SHA1.match(str(msg["base_sha"])):
         raise DeliveryError("base_sha must be 40 lowercase hex chars")
-    if str(msg["tenant_id"]) != TENANT:
-        raise DeliveryError(f"tenant_id must be {TENANT!r}")
-    for field in ("todo_id", "package_id", "repo_root"):
+    for field in ("tenant_id", "todo_id", "package_id", "repo_root"):
         value = str(msg[field])
         if not value or "\x00" in value:
             raise DeliveryError(f"{field} must be a non-empty safe string")

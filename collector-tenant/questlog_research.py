@@ -26,7 +26,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 STUB_REPORT = """```json
@@ -78,12 +77,17 @@ def run_zcode(zcode_bin: str, prompt: str, repo_dir: str, task_key: str, report_
     if probe.returncode != 0:
         print(f"zcode probe failed: {probe.stderr.strip()}", file=sys.stderr)
         return 5
-    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as tmp:
-        tmp.write(prompt)
-        prompt_file = tmp.name
     try:
         proc = subprocess.run(
-            [zcode_bin, "--prompt", prompt_file, "--cwd", repo_dir, "--mode", "yolo"],
+            [
+                zcode_bin,
+                "--prompt", prompt,
+                "--cwd", repo_dir,
+                "--mode", "yolo",
+                # 只读研究在 CLI 层的硬约束：拒绝一切写工具（双保险，
+                # 与平台 read_only side_effect_class 互补）
+                "--disallowedTools", "Bash Edit Write MultiEdit NotebookEdit WebFetch",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -92,8 +96,6 @@ def run_zcode(zcode_bin: str, prompt: str, repo_dir: str, task_key: str, report_
     except subprocess.TimeoutExpired:
         print("zcode timed out", file=sys.stderr)
         return 124
-    finally:
-        os.unlink(prompt_file)
     write_report(proc.stdout or "", task_key, report_file)
     return proc.returncode
 

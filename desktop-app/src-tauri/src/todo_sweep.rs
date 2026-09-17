@@ -714,3 +714,4 @@ fn package_current_status(package_id: &str) -> Option<String> {
     }
     best.map(|(_, s)| s)
 }
+

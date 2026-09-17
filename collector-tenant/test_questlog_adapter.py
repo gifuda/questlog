@@ -53,9 +53,11 @@ def test_rejects_bad_task_key():
     assert raises(m)
 
 
-def test_rejects_wrong_tenant():
-    m = valid_delivery(); m["tenant_id"] = "ymos"
-    assert raises(m)
+def test_tenant_id_is_informational():
+    # 投递消息的 tenant_id 是经理机项目名——任意安全字符串（平台租户恒为
+    # questlog，由 TaskSpec 构造决定），不参与校验。
+    m = valid_delivery(); m["tenant_id"] = "任意项目名"
+    assert validate_delivery(m) is not None
 
 
 def test_rejects_bad_sha():
@@ -90,7 +92,7 @@ def test_clamp_timeout():
     assert clamp_timeout("x") == 60
 
 
-def test_research_stub_produces_report(tmp_path=None):
+def test_research_stub_produces_report(tmp_path):
     import os
 
     os.environ["QUESTLOG_RESEARCH_STUB"] = "1"
@@ -125,7 +127,7 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             try:
                 with tempfile.TemporaryDirectory() as tmp:
-                    fn(tmp) if fn.__code__.co_argcount else fn()
+                    fn(Path(tmp)) if fn.__code__.co_argcount else fn()
                 print(f"PASS {name}")
             except AssertionError as e:
                 failures += 1
