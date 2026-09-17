@@ -11,6 +11,9 @@ mod models;
 pub mod runner;
 pub mod runner_config;
 pub mod runner_git;
+pub mod todo_finalization;
+pub mod todo_ledger;
+pub mod todo_sweep;
 mod store;
 mod tray;
 mod watcher;
@@ -69,6 +72,8 @@ pub fn run() {
             commands::get_runner_runtime_status,
             commands::get_executor_options,
             commands::set_executor_model,
+            commands::set_todo_schedule,
+            commands::get_todo_status,
             commands::set_executor_thinking,
             commands::get_runner_project_status,
             commands::set_runner_project_enabled,
@@ -98,6 +103,11 @@ pub fn run() {
             } else {
                 log::info!("Runner: staying off (global switch off or no projects enabled)");
             }
+            // 待办租户 G4: the scheduler tick runs UNCONDITIONALLY (it idles
+            // cheaply with no schedule configured; its own checks gate every
+            // action) — its lifecycle must not depend on the Runner switches
+            // being ON at app start (audit B-3).
+            crate::todo_sweep::start_tick_thread();
 
             // Hide main window on close instead of quitting (tray keeps app alive)
             if let Some(main_win) = app.get_webview_window("main") {

@@ -120,6 +120,14 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
               {!dimmed && item.type === "todo" && item.processing && (
                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-accent-bg text-accent mr-1.5">{t("card.processing")}</span>
               )}
+              {!dimmed && item.type === "todo" && item.auto_process && !item.auto_result && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 mr-1.5" title={t("card.autoProcess")}>{t("card.autoProcess")}</span>
+              )}
+              {!dimmed && item.auto_result && (
+                <span className={`text-[9px] px-1.5 py-0.5 rounded mr-1.5 ${item.status === "completed" && item.auto_completed_at ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"}`}>
+                  {t(`card.autoOutcome.${item.auto_result.outcome}`, item.auto_result.outcome)}
+                </span>
+              )}
               {item.title}
             </h3>
           )}

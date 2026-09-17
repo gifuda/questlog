@@ -27,6 +27,61 @@ pub struct ProjectRunnerEntry {
     pub enabled: bool,
 }
 
+/// 待办租户 G4 (plan §6): nightly sweep schedule. `None` in the config =
+/// not configured = the sweep never runs (§10: no ambiguous second master
+/// switch — presence of a schedule does not replace the three-layer gates).
+///
+/// All times are evaluated on a FIXED +08:00 business timezone (Asia/
+/// Shanghai) — the business date does not follow transient system timezone
+/// changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoSchedule {
+    /// Window start, HHMM in +08:00 (default 0300 = 03:00).
+    #[serde(default = "default_start")]
+    pub start_hhmm: u32,
+    /// Window end, exclusive, HHMM in +08:00 (default 0600 = 06:00).
+    #[serde(default = "default_end")]
+    pub end_hhmm: u32,
+    /// Per-night task cap across all tenants (plan §6 default 6).
+    #[serde(default = "default_nightly_max")]
+    pub nightly_max_tasks: u32,
+    /// Per-night cap per tenant (plan §6 default 2).
+    #[serde(default = "default_per_tenant_max")]
+    pub per_tenant_max_tasks: u32,
+    /// Wall-clock timeout for ONE task execution on the collector (§6: 15min).
+    #[serde(default = "default_task_timeout")]
+    pub per_task_timeout_secs: u64,
+    /// Nightly cumulative execution budget (§6: 60min).
+    #[serde(default = "default_nightly_budget")]
+    pub nightly_budget_secs: u64,
+    /// Absolute path to the node binary (GUI PATH is minimal — a bare "node"
+    /// ENOENTs; the plan forbids relying on arbitrary PATH).
+    pub node_bin: String,
+    /// Absolute path to mcp-server/dist/todo-producer-cli.js.
+    pub producer_cli: String,
+    /// Absolute path to mcp-server/dist/todo-report-verify-cli.js.
+    pub verify_cli: String,
+}
+
+fn default_start() -> u32 {
+    300
+}
+fn default_end() -> u32 {
+    600
+}
+fn default_nightly_max() -> u32 {
+    6
+}
+fn default_per_tenant_max() -> u32 {
+    2
+}
+fn default_task_timeout() -> u64 {
+    900
+}
+fn default_nightly_budget() -> u64 {
+    3600
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerRuntimeConfig {
     pub version: u32,
@@ -44,6 +99,9 @@ pub struct RunnerRuntimeConfig {
     /// to the chosen level's params — decoupled from the model choice.
     #[serde(default)]
     pub executor_thinking: Option<String>,
+    /// 待办租户 G4: nightly sweep schedule. Absent = sweep disabled.
+    #[serde(default)]
+    pub todo_schedule: Option<TodoSchedule>,
     #[serde(default)]
     pub revision: u64,
 }
@@ -56,6 +114,7 @@ impl Default for RunnerRuntimeConfig {
             projects: HashMap::new(),
             executor_model: None,
             executor_thinking: None,
+            todo_schedule: None,
             revision: 0,
         }
     }
@@ -257,6 +316,18 @@ pub fn set_executor_model(model: Option<String>) -> Result<(), String> {
 /// defaults (no thinking params injected).
 pub fn get_executor_thinking() -> Option<String> {
     read_config().executor_thinking
+}
+
+/// 待办租户 G4: the nightly sweep schedule. None = not configured = the
+/// sweep never runs.
+pub fn get_todo_schedule() -> Option<TodoSchedule> {
+    read_config().todo_schedule
+}
+
+pub fn set_todo_schedule(schedule: Option<TodoSchedule>) -> Result<(), String> {
+    let mut config = read_config();
+    config.todo_schedule = schedule;
+    write_config(&mut config)
 }
 
 /// Set the executor thinking level. Takes effect on the next worktree.

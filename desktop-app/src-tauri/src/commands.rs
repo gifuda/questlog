@@ -1556,6 +1556,45 @@ pub fn set_executor_model(model: Option<String>) -> Result<(), String> {
     crate::runner_config::set_executor_model(model)
 }
 
+/// 待办租户 G4: set the nightly sweep schedule. None = not configured
+/// (the sweep never runs — §10: presence never replaces the three-layer gates).
+#[tauri::command]
+pub fn set_todo_schedule(
+    schedule: Option<crate::runner_config::TodoSchedule>,
+) -> Result<(), String> {
+    crate::runner_config::set_todo_schedule(schedule)
+}
+
+/// 待办租户 G4: pipeline status for the UI — schedule, last sweep, ledger
+/// entries, pending finalizations, outbox size.
+#[tauri::command]
+pub fn get_todo_status() -> Result<serde_json::Value, String> {
+    let schedule = crate::runner_config::get_todo_schedule();
+    let sweep_state = crate::todo_ledger::read_sweep_state();
+    let ledger = crate::todo_ledger::read_ledger()?;
+    let pending: Vec<serde_json::Value> = ledger
+        .entries
+        .values()
+        .filter(|e| {
+            e.finalization
+                .as_ref()
+                .map(|f| f.state == "pending")
+                .unwrap_or(false)
+        })
+        .map(|e| serde_json::json!({ "task_key": e.task_key, "attempt_id": e.finalization.as_ref().map(|f| f.attempt_id.clone()) }))
+        .collect();
+    let outbox = std::fs::read_dir(crate::todo_ledger::outbox_dir())
+        .map(|rd| rd.filter_map(|e| e.ok()).count())
+        .unwrap_or(0);
+    Ok(serde_json::json!({
+        "schedule": schedule,
+        "sweep_state": sweep_state,
+        "open_tasks": ledger.entries.values().filter(|e| crate::todo_ledger::entry_is_open(e)).count(),
+        "pending_finalizations": pending,
+        "outbox": outbox,
+    }))
+}
+
 /// Get the Runner status for a specific project (global + project + effective).
 #[tauri::command]
 pub fn get_runner_project_status(

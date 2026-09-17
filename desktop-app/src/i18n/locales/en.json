@@ -57,7 +57,19 @@
     "done": "Done",
     "convert": "To todo",
     "archive": "Archive",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "autoProcess": "Nightly auto",
+    "autoOutcome": {
+      "accepted_report": "Machine-verified",
+      "cannot_auto": "Cannot auto-process",
+      "needs_review": "Report needs review",
+      "execution_failed": "Auto execution failed",
+      "timed_out": "Auto execution timed out",
+      "result_pending_writeback": "Writeback pending",
+      "stale": "Result stale",
+      "cancelled": "Cancelled",
+      "preflight_blocked": "Preflight blocked"
+    }
   },
   "column": {
     "add": "Add",

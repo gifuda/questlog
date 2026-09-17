@@ -2297,7 +2297,7 @@ impl Runner {
     /// acceptance terms, not by the Runner.
     /// Deviating outcomes never reach the verified advancement — they end
     /// blocked/failed and surface as DecisionRequests for a human.
-    fn advance_step_stage(project_path: &str, step_id: &str, stage: StepStage) {
+    pub(crate) fn advance_step_stage(project_path: &str, step_id: &str, stage: StepStage) {
         let dir = PathBuf::from(project_path);
         match crate::epic_store::mutate_epics(&dir, |data| {
             let step = data.steps.iter_mut().find(|s| s.id == step_id);

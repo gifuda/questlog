@@ -57,7 +57,19 @@
     "move": "移到",
     "done": "完成",
     "convert": "转待办",
-    "archive": "归档"
+    "archive": "归档",
+    "autoProcess": "夜间自动处理",
+    "autoOutcome": {
+      "accepted_report": "机器验收完成",
+      "cannot_auto": "无法自动处理",
+      "needs_review": "报告待复核",
+      "execution_failed": "自动执行失败",
+      "timed_out": "自动执行超时",
+      "result_pending_writeback": "待写回",
+      "stale": "结果过期",
+      "cancelled": "已取消",
+      "preflight_blocked": "前置阻断"
+    }
   },
   "column": {
     "add": "新增",
