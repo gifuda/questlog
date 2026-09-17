@@ -77,6 +77,8 @@ def test_rejects_timeout_out_of_bounds():
     assert raises(m)
     m = valid_delivery(); m["timeout_seconds"] = 9999
     assert raises(m)
+    m = valid_delivery(); m["timeout_seconds"] = 3600
+    assert validate_delivery(m) is not None  # 大任务上限内合法
 
 
 def test_sanitize_segment():
@@ -87,8 +89,9 @@ def test_sanitize_segment():
 
 def test_clamp_timeout():
     assert clamp_timeout(10) == 60
-    assert clamp_timeout(99999) == 900
+    assert clamp_timeout(99999) == 3600
     assert clamp_timeout(300) == 300
+    assert clamp_timeout(3600) == 3600
     assert clamp_timeout("x") == 60
 
 

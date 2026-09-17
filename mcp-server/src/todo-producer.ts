@@ -39,6 +39,10 @@ export interface ProduceOptions {
   acceptance_criteria?: string;
   /** Frozen input scope; frozen into task_revision when provided. */
   input_scope?: string;
+  /** Per-task execution wall-clock budget (clamped 60–3600s; default 900).
+   *  Large research tasks need more than the default — the schedule config's
+   *  per_task_timeout_secs flows through here. */
+  timeout_seconds?: number;
 }
 
 export type ProduceResult =
@@ -387,7 +391,7 @@ export async function produceTodoPackage(
       max_changed_files: 0,
       executor_preferred: "manual",
       executor_sandbox: "read-only",
-      executor_timeout_seconds: 900,
+      executor_timeout_seconds: opts.timeout_seconds ?? 900,
       executor_max_attempts: 1,
       acceptance_command_ids: ["verify:readonly"],
       acceptance_verifier_ids: ["todo:report"],

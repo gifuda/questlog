@@ -142,8 +142,12 @@ pub fn produce_via_cli(
     project_dir: &str,
     todo_id: &str,
 ) -> ProduceOutcome {
-    let payload = serde_json::json!({ "project_dir": project_dir, "todo_id": todo_id });
-    match run_cli_with_timeout(&cfg.node_bin, &cfg.producer_cli, &payload, 120) {
+    let payload = serde_json::json!({
+        "project_dir": project_dir,
+        "todo_id": todo_id,
+        "timeout_seconds": cfg.per_task_timeout_secs,
+    });
+    match run_cli_with_timeout(&cfg.node_bin, &cfg.producer_cli, &payload, 180) {
         Ok((true, stdout, _)) => match serde_json::from_str::<serde_json::Value>(&stdout) {
             Ok(v) if v.get("ok").and_then(|b| b.as_bool()) == Some(true) => {
                 ProduceOutcome::Produced {
@@ -258,7 +262,20 @@ pub fn sweep_once(
         SweepDecision::Run => {}
     }
 
-    let tenants: Vec<(String, PathBuf)> = tenants_in.to_vec();
+    // Folder-scope selection (§D-user): the allowlist intersects the enabled
+    // tenants; absent = every enabled project. Master authorization (project
+    // switch) is unaffected.
+    let tenants: Vec<(String, PathBuf)> = match &cfg.projects {
+        Some(allowed) => tenants_in
+            .iter()
+            .filter(|(name, path)| {
+                let p = path.to_string_lossy();
+                allowed.iter().any(|a| a == name || a == &p)
+            })
+            .cloned()
+            .collect(),
+        None => tenants_in.to_vec(),
+    };
     // Tenant rotation: rotate the registry order by day-of-year so every
     // tenant reaches the front across nights (plan §6: 租户轮转).
     let day_of_year = now.ordinal();
@@ -438,7 +455,37 @@ mod tests {
             node_bin: "/nonexistent".into(),
             producer_cli: "/nonexistent".into(),
             verify_cli: "/nonexistent".into(),
+            projects: None,
         }
+    }
+
+    /// Folder-scope selection: the allowlist intersects the enabled tenants;
+    /// a non-listed project never produces even when its switch is on.
+    #[test]
+    fn sweep_projects_allowlist_scopes_tenants() {
+        let (_dir, _guard) = setup_runtime();
+        let t_in = tenant_dir("alpha", vec![todo_json("a1", "high", true)]);
+        let t_out = tenant_dir("beta", vec![todo_json("b1", "high", true)]);
+        let mut called: Vec<String> = Vec::new();
+        let mut cfg = schedule();
+        cfg.start_hhmm = 0;
+        cfg.end_hhmm = 2359;
+        cfg.projects = Some(vec!["alpha".to_string()]);
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 9, 17)
+            .unwrap()
+            .and_hms_opt(4, 0, 0)
+            .unwrap()
+            .and_local_timezone(business_tz())
+            .unwrap();
+        let mut produce = |dir: &str, id: &str| -> ProduceOutcome {
+            called.push(format!("{}/{}", dir.rsplit('/').next().unwrap_or(dir), id));
+            ProduceOutcome::Produced { task_key: format!("k_{id}"), package_id: "pkg_a1".into() }
+        };
+        let round = sweep_once(&[t_in, t_out], &mut produce, now, Some(&cfg), true);
+        assert_eq!(round.outcome, "ran");
+        assert!(round.scanned_tenants.contains(&"alpha".to_string()));
+        assert!(!round.scanned_tenants.contains(&"beta".to_string()), "allowlist must exclude beta");
+        assert_eq!(called.len(), 1, "exactly the allowlisted tenant produces: {called:?}");
     }
 
     #[test]

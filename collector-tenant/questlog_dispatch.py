@@ -147,7 +147,12 @@ def write_receipt(row: sqlite3.Row, outbox_name: str | None) -> bool:
             changes_detected = False
     report_stdout = ""
     if report_path.exists():
-        report_stdout = report_path.read_text(encoding="utf-8", errors="replace")[: 2 * 1024 * 1024]
+        raw = report_path.read_text(encoding="utf-8", errors="replace")
+        cap = 2 * 1024 * 1024
+        # Keep HEAD 8KiB + TAIL (cap-8KiB): the structured report block lives
+        # at the END of stdout — a plain head-cap would cut it off on large
+        # reports and the verifier would see no report at all.
+        report_stdout = raw if len(raw) <= cap else raw[:8192] + "\n…[truncated]…\n" + raw[8192 - cap:]
     receipt = {
         "version": 1,
         "task_key": task_key,

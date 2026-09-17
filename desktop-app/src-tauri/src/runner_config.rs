@@ -61,6 +61,12 @@ pub struct TodoSchedule {
     pub producer_cli: String,
     /// Absolute path to mcp-server/dist/todo-report-verify-cli.js.
     pub verify_cli: String,
+    /// Folder-scope selection (user decision): when present, the sweep only
+    /// covers tenants whose registry name OR path matches an entry. Absent =
+    /// every enabled project. The project runner switch remains the master
+    /// authorization either way.
+    #[serde(default)]
+    pub projects: Option<Vec<String>>,
 }
 
 fn default_start() -> u32 {

@@ -18,6 +18,7 @@ interface CliInput {
   todo_id: string;
   acceptance_criteria?: string;
   input_scope?: string;
+  timeout_seconds?: number;
 }
 
 async function main(): Promise<number> {
@@ -42,6 +43,7 @@ async function main(): Promise<number> {
   const result = await produceTodoPackage(input.project_dir, input.todo_id, {
     acceptance_criteria: input.acceptance_criteria,
     input_scope: input.input_scope,
+    timeout_seconds: input.timeout_seconds,
   });
   process.stdout.write(JSON.stringify(result));
   return result.ok ? 0 : 1;

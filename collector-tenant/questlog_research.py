@@ -71,7 +71,7 @@ def run_stub(task_key: str, report_file: Path) -> None:
     write_report(STUB_REPORT.format(task_key=task_key), task_key, report_file)
 
 
-def run_zcode(zcode_bin: str, prompt: str, repo_dir: str, task_key: str, report_file: Path) -> int:
+def run_zcode(zcode_bin: str, prompt: str, repo_dir: str, task_key: str, report_file: Path, timeout_secs: int = 840) -> int:
     # 探针：CLI 必须可用（只读 --version）
     probe = subprocess.run([zcode_bin, "--version"], capture_output=True, text=True, check=False)
     if probe.returncode != 0:
@@ -125,7 +125,9 @@ def main(argv: list[str]) -> int:
             zcode_bin = bin_file.read_text(encoding="utf-8").strip()
     if zcode_bin and not Path(zcode_bin).exists():
         zcode_bin = ""
-    if stub and not zcode_bin:
+    if stub:
+        # Explicit stub intent (env or marker file) ALWAYS wins — shadow
+        # drill/联调 must be deterministic even when zcode is configured.
         run_stub(task_key, report_file)
         return 0
     if not zcode_bin:
@@ -133,7 +135,15 @@ def main(argv: list[str]) -> int:
         return 5
 
     prompt = ENVELOPE.format(objective=str(msg.get("objective", "")), task_key=task_key)
-    rc = run_zcode(zcode_bin, prompt, repo_dir, task_key, report_file)
+    # Inner timeout tracks the task's own budget (delivery timeout_seconds),
+    # leaving 60s of headroom for report writing — the platform's wall-clock
+    # kill remains the outer authority.
+    try:
+        budget = int(msg.get("timeout_seconds", 900))
+    except (TypeError, ValueError):
+        budget = 900
+    budget = max(120, min(3600, budget))
+    rc = run_zcode(zcode_bin, prompt, repo_dir, task_key, report_file, budget - 60)
     if rc != 0:
         print(f"zcode exited {rc}", file=sys.stderr)
         return rc
