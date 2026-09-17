@@ -4,11 +4,19 @@
 桩）→ 报告 stdout 落 report_dir/<task_key>/report.md。
 
 调用形态：TaskSpec parameters.args = [delivery_path, repo_dir, report_dir]
-（逐字 execve，无 shell）。zcode 二进制路径取环境变量 QUESTLOG_ZCODE_BIN；
-缺失时若 QUESTLOG_RESEARCH_STUB=1 走桩模式（产出固定 NEEDS_REVIEW 报告，
-用于 shadow 全链联调），否则干净失败（exit 5）。
+（逐字 execve，无 shell）。
 
-红线：不写 repo_dir 内任何文件；报告只落 report_dir。
+配置注入面（D3 裁定：租户数据目录配置文件，环境变量仅作手动覆盖）：
+  /Users/Shared/CollectorData/tenants/questlog/zcode.bin   —— zcode 可执行文件绝对路径
+  /Users/Shared/CollectorData/tenants/questlog/stub.mode   —— 存在即桩模式
+                                                             （固定 NEEDS_REVIEW 报告，shadow 联调用）
+两者缺省时：无 zcode.bin 且无 stub.mode → 干净失败（exit 5）。
+
+平台产物契约：spec.outputs 的 logical_uri basename（=<task_key>）必须出现在
+平台注入的 COLLECTER_OUTPUT_DIR——那是产物登记与 sha256 复算的管辖面；
+report_dir/<task_key>/report.md 是租户侧持久副本（回执取证用）。
+
+红线：不写 repo_dir 内任何文件；写面仅上述两处。
 """
 
 from __future__ import annotations
@@ -49,9 +57,19 @@ ENVELOPE = """{objective}
 """
 
 
-def run_stub(task_key: str, report_file: Path) -> None:
+def write_report(content: str, task_key: str, report_file: Path) -> None:
+    """双落点：平台输出目录（basename=task_key，产物登记面）+ 租户持久副本。"""
+    output_dir = os.environ.get("COLLECTOR_OUTPUT_DIR", "")
+    if output_dir:
+        od = Path(output_dir)
+        od.mkdir(parents=True, exist_ok=True)
+        (od / task_key).write_text(content, encoding="utf-8")
     report_file.parent.mkdir(parents=True, exist_ok=True)
-    report_file.write_text(STUB_REPORT.format(task_key=task_key), encoding="utf-8")
+    report_file.write_text(content, encoding="utf-8")
+
+
+def run_stub(task_key: str, report_file: Path) -> None:
+    write_report(STUB_REPORT.format(task_key=task_key), task_key, report_file)
 
 
 def run_zcode(zcode_bin: str, prompt: str, repo_dir: str, task_key: str, report_file: Path) -> int:
@@ -76,8 +94,7 @@ def run_zcode(zcode_bin: str, prompt: str, repo_dir: str, task_key: str, report_
         return 124
     finally:
         os.unlink(prompt_file)
-    report_file.parent.mkdir(parents=True, exist_ok=True)
-    report_file.write_text(proc.stdout or "", encoding="utf-8")
+    write_report(proc.stdout or "", task_key, report_file)
     return proc.returncode
 
 
@@ -97,14 +114,20 @@ def main(argv: list[str]) -> int:
         return 2
     report_file = Path(report_dir) / task_key / "report.md"
 
-    zcode_bin = os.environ.get("QUESTLOG_ZCODE_BIN", "")
-    if zcode_bin and shutil.which(zcode_bin) is None and not Path(zcode_bin).exists():
-        zcode_bin = ""
+    tenant_cfg = Path("/Users/Shared/CollectorData/tenants/questlog")
+    stub = os.environ.get("QUESTLOG_RESEARCH_STUB") == "1" or (tenant_cfg / "stub.mode").exists()
+    zcode_bin = os.environ.get("QUESTLOG_ZCODE_BIN", "").strip()
     if not zcode_bin:
-        if os.environ.get("QUESTLOG_RESEARCH_STUB") == "1":
-            run_stub(task_key, report_file)
-            return 0
-        print("zcode unavailable and stub mode off (QUESTLOG_ZCODE_BIN / QUESTLOG_RESEARCH_STUB)", file=sys.stderr)
+        bin_file = tenant_cfg / "zcode.bin"
+        if bin_file.exists():
+            zcode_bin = bin_file.read_text(encoding="utf-8").strip()
+    if zcode_bin and not Path(zcode_bin).exists():
+        zcode_bin = ""
+    if stub and not zcode_bin:
+        run_stub(task_key, report_file)
+        return 0
+    if not zcode_bin:
+        print("zcode unavailable (tenants/questlog/zcode.bin) and stub mode off", file=sys.stderr)
         return 5
 
     prompt = ENVELOPE.format(objective=str(msg.get("objective", "")), task_key=task_key)

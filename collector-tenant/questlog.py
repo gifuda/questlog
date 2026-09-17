@@ -85,7 +85,17 @@ def sanitize_segment(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", value)[:80]
 
 
-def build_task_spec(msg: dict, *, task_id: str, parameters: dict) -> "object":
+def build_args(msg: dict) -> list[str]:
+    """research 脚本的 argv（执行器参数白名单只认 {script, args}）。"""
+    reports = "/Users/Shared/CollectorData/tenants/questlog/reports"
+    repo_dir = (
+        "/Users/Shared/CollectorData/tenants/questlog/repos/"
+        f"{sanitize_segment(str(msg['repo_root']))}/{str(msg['base_sha'])[:12]}"
+    )
+    return [f"{reports}/{msg['task_key']}.delivery.json", repo_dir, reports]
+
+
+def build_task_spec(msg: dict, *, task_id: str, args: list[str]) -> "object":
     """构造平台 TaskSpec（惰性 import 平台契约——仅采集机侧可调用）。"""
     from collector_node.contracts import (
         Acceptance,
@@ -105,13 +115,16 @@ def build_task_spec(msg: dict, *, task_id: str, parameters: dict) -> "object":
         task_type="todo_research",
         executor=ExecutorRef(kind="python", name="questlog-research"),
         inputs=[
-            InputRef(logical_uri=f"questlog://delivery/{msg['task_key']}", sha256=None),
-            InputRef(logical_uri=f"questlog://snapshot/{sanitize_segment(str(msg['repo_root']))}", sha256=str(msg["base_sha"])),
+            InputRef(logical_uri=f"questlog://delivery/{msg['task_key']}", sha256=str(msg["package_hash"])),
+            InputRef(
+                logical_uri=f"questlog://snapshot/{sanitize_segment(str(msg['repo_root']))}@{msg['base_sha']}",
+                sha256=None,
+            ),
         ],
         outputs=[
             OutputRef(logical_uri=f"questlog://report/{msg['task_key']}", content_type="text/markdown"),
         ],
-        parameters=parameters,
+        parameters={"args": args},
         resource_budget=ResourceBudget(
             max_wall_seconds=clamp_timeout(msg["timeout_seconds"]),
             max_cpu_seconds=None,

@@ -50,7 +50,14 @@ def _ssh(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
 
 
 def in_dispatch_window(now: datetime | None = None) -> bool:
-    """03:00–06:00 +08:00 == 19:00–21:00 UTC（派发窗口与经理机 sweep 同窗）。"""
+    """03:00–06:00 +08:00 == 19:00–21:00 UTC（派发窗口与经理机 sweep 同窗）。
+
+    QUESTLOG_DISPATCH_FORCE=1 仅限手动运维/影子联调旁路窗口——launchd 调度
+    环境不携带该变量，窗口语义不受影响。"""
+    import os
+
+    if os.environ.get("QUESTLOG_DISPATCH_FORCE") == "1":
+        return True
     utc_hour = (now or datetime.now(timezone.utc)).hour
     return 19 <= utc_hour < 21
 
@@ -101,12 +108,7 @@ def ensure_snapshot(repo_root: str, base_sha: str) -> Path | None:
 
 def submit_delivery(conn: sqlite3.Connection, msg: dict) -> str | None:
     task_id = f"questlog-{adapter.sanitize_segment(str(msg['task_key']))[:40]}"
-    parameters = {
-        "delivery_path": str(REPORTS_ROOT / f"{msg['task_key']}.delivery.json"),
-        "repo_dir": str(REPOS_ROOT / adapter.sanitize_segment(str(msg['repo_root'])) / str(msg["base_sha"])[:12]),
-        "report_dir": str(REPORTS_ROOT),
-    }
-    spec: TaskSpec = adapter.build_task_spec(msg, task_id=task_id, parameters=parameters)
+    spec: TaskSpec = adapter.build_task_spec(msg, task_id=task_id, args=adapter.build_args(msg))
     result = platform_queue.submit(conn, spec)
     print(f"[questlog-dispatch] submit {task_id}: created={result.created} status={result.status}")
     return result.task_id
@@ -124,13 +126,25 @@ def terminal_questlog_tasks(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def write_receipt(row: sqlite3.Row, outbox_name: str | None) -> bool:
     task_key = row["idempotency_key"]
     report_path = REPORTS_ROOT / task_key / "report.md"
-    repo_dir = REPORTS_ROOT.parent / "repos"  # changes check uses the delivery's repo snapshot
-    # Repo cleanliness: any dirt under repos/ means a read-only violation.
-    dirty = subprocess.run(
-        ["git", "-C", str(repo_dir), "status", "--porcelain"],
-        capture_output=True, text=True, check=False,
-    )
-    changes_detected = bool(dirty.returncode == 0 and dirty.stdout.strip())
+    # Repo cleanliness: the delivery's OWN snapshot must be pristine — any
+    # dirt is a read-only violation (the only write surface is report_dir).
+    changes_detected = False
+    delivery_file = REPORTS_ROOT / f"{task_key}.delivery.json"
+    if delivery_file.exists():
+        try:
+            delivery = json.loads(delivery_file.read_text(encoding="utf-8"))
+            snapshot = (
+                REPOS_ROOT
+                / adapter.sanitize_segment(str(delivery.get("repo_root", "")))
+                / str(delivery.get("base_sha", ""))[:12]
+            )
+            dirty = subprocess.run(
+                ["git", "-C", str(snapshot), "status", "--porcelain"],
+                capture_output=True, text=True, check=False,
+            )
+            changes_detected = bool(dirty.returncode == 0 and dirty.stdout.strip())
+        except (OSError, json.JSONDecodeError):
+            changes_detected = False
     report_stdout = ""
     if report_path.exists():
         report_stdout = report_path.read_text(encoding="utf-8", errors="replace")[: 2 * 1024 * 1024]
@@ -187,14 +201,14 @@ def main() -> int:
             dispatched.add(str(msg["task_key"]))
 
     # 回执半程（不受窗口限制）
+    outbox_now = set(list_outbox())
     for row in terminal_questlog_tasks(conn):
         task_key = row["idempotency_key"]
         outbox_name = f"{task_key}.json"
-        # 只有「回执尚未写过」的任务才写：outbox 条目还在（未归档）即视为新终态
-        listed = [n for n in list_outbox() if n == outbox_name]
-        if not listed and task_key not in dispatched:
-            continue  # 已归档的任务不重复回执
-        write_receipt(row, outbox_name if listed else None)
+        # 只有「回执尚未写过」的任务才写：outbox 条目还在（未归档）即视为待回执
+        if outbox_name not in outbox_now and task_key not in dispatched:
+            continue
+        write_receipt(row, outbox_name if outbox_name in outbox_now else None)
     return 0
 
 
