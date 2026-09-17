@@ -193,6 +193,21 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
           >
             {copied ? t("card.copied") : t("card.ref")}
           </button>
+          {item.type === "todo" && item.status === "active" && (
+            <button
+              className={`text-[10px] px-2 py-0.5 rounded transition-colors ${
+                item.auto_process
+                  ? "bg-blue-100 text-blue-700"
+                  : "text-muted hover:text-heading hover:bg-elevated"
+              }`}
+              onClick={() =>
+                updateItem(projectPath, item.id, { auto_process: !item.auto_process }).then(onRefresh)
+              }
+              title={t("card.autoToggleTitle")}
+            >
+              {item.auto_process ? t("card.autoOn") : t("card.autoOff")}
+            </button>
+          )}
           <div className="relative" ref={moveRef}>
             <button
               className="text-[10px] px-2 py-0.5 text-muted hover:text-heading hover:bg-elevated rounded transition-colors"

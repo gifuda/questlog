@@ -69,7 +69,10 @@
       "stale": "Result stale",
       "cancelled": "Cancelled",
       "preflight_blocked": "Preflight blocked"
-    }
+    },
+    "autoOn": "🌙 Nightly",
+    "autoOff": "Nightly",
+    "autoToggleTitle": "Toggle: allow the collector to auto-run this read-only research todo in the nightly window (03:00–06:00) and write back the result"
   },
   "column": {
     "add": "Add",

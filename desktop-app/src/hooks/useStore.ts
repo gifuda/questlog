@@ -94,7 +94,7 @@ export function useTodos(projectPath: string | null) {
 export async function updateItem(
   projectPath: string,
   id: string,
-  patch: { status?: ItemStatus; content?: string; tags?: string[]; priority?: string; title?: string; type?: string; processing?: boolean }
+  patch: { status?: ItemStatus; content?: string; tags?: string[]; priority?: string; title?: string; type?: string; processing?: boolean; auto_process?: boolean }
 ) {
   await invoke("update_todo", { projectPath, id, ...patch });
 }

@@ -69,7 +69,10 @@
       "stale": "结果过期",
       "cancelled": "已取消",
       "preflight_blocked": "前置阻断"
-    }
+    },
+    "autoOn": "🌙 夜间自动",
+    "autoOff": "夜间自动",
+    "autoToggleTitle": "开关：允许采集机在夜间窗口（03:00–06:00）自动执行这条只读研究待办并回写结果"
   },
   "column": {
     "add": "新增",

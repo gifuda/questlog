@@ -138,6 +138,7 @@ pub fn update_todo(
     title: Option<String>,
     item_type: Option<String>,
     processing: Option<bool>,
+    auto_process: Option<bool>,
 ) -> Result<(), String> {
     let path = validate_project_path(&project_path, &state)?;
     let mut archived_quickly = false;
@@ -186,6 +187,17 @@ pub fn update_todo(
         }
         if let Some(pr) = processing {
             typed.processing = pr;
+        }
+        // 夜间自动处理开关（待办租户 §2.2）：off→on 递增授权修订——旧结果
+        // 永不跨修订复用；开在非 todo 类型上直接拒绝（fail-closed）。
+        if let Some(ap) = auto_process {
+            if ap && typed.item_type != ItemType::Todo {
+                return Err("auto_process opt-in is only valid for type='todo' items".into());
+            }
+            if ap && !typed.auto_process {
+                typed.auto_process_revision = typed.auto_process_revision.saturating_add(1).max(1);
+            }
+            typed.auto_process = ap;
         }
 
         // Quality feedback: if an item gets archived within 48h of creation,
