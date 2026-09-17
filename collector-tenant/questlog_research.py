@@ -71,47 +71,111 @@ def run_stub(task_key: str, report_file: Path) -> None:
     write_report(STUB_REPORT.format(task_key=task_key), task_key, report_file)
 
 
+OFF_LEVELS = ("off", "nothink", "disabled", "none")
+
+
+def _budget_tokens(level: str) -> int:
+    return {"max": 32000, "high": 16000, "low": 8000}.get(level, 16000)
+
+
+def _native_thinking_options(level: str) -> dict:
+    if level in OFF_LEVELS:
+        return {"anthropic": {"thinking": {"type": "disabled"}}}
+    return {
+        "anthropic": {
+            "effort": level,
+            "thinking": {"budgetTokens": _budget_tokens(level), "type": "enabled"},
+        }
+    }
+
+
+def _thinking_levels(model_name: str, model_def: dict) -> list[str]:
+    import copy
+
+    r = (model_def or {}).get("reasoning") or {}
+    for key in ("levels", "variants"):
+        lv = r.get(key)
+        if isinstance(lv, list) and lv:
+            return [str(x) for x in lv]
+    lower = model_name.lower()
+    if "deepseek-v4" in lower:
+        return ["high", "max"]
+    if lower.startswith("glm-5.2"):
+        return ["max", "high", "nothink"]
+    return ["high", "max"]
+
+
+def _resolve_provider_def(provider_name: str) -> dict | None:
+    """v2 桌面配置优先，cli 兜底（与 manager runner_git 同序）。"""
+    import json as _json
+
+    home = Path.home()
+    for rel in (".zcode/v2/config.json", ".zcode/cli/config.json"):
+        try:
+            cfg = _json.loads((home / rel).read_text(encoding="utf-8"))
+            def_ = (cfg.get("provider") or {}).get(provider_name)
+            if def_:
+                return def_
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def provision_model_config(repo_dir: str, model: str, thinking: str | None) -> None:
-    """项目级 .zcode/config.json 注入（manager Runner 已验证手法）：
-    - 必须携带完整 provider 定义（项目配置不合并全局 provider 表，纯
-      model 字符串会 "provider is missing baseURL"）——从 ~/.zcode/cli/
-      config.json 逐字复制对应 provider 条目
-    - thinking 归一化：model def 的 providerOptionsByLevel 每档参数都改写
-      为所选档的参数（与 manager runner_git.rs 同语义）
-    - .git/info/exclude 隐身：不污染快照的 git status（changes_detected
-      判定保持干净）
-    失败不致命：打日志回退 CLI 默认模型。"""
-    import shutil
-    home_cfg = Path.home() / ".zcode" / "cli" / "config.json"
+    """项目级 .zcode/config.json 注入（manager Runner 已验证手法的 Python 复刻）：
+    - provider def 从 ~/.zcode/{v2,cli}/config.json 复制（项目配置不合并全局
+      provider 表，必须整份携带）
+    - models 为旧 list 形态时升级为 dict（模型名→{}），使思考档可注入
+    - thinking 归一化：模型 reasoning 的全部档位都改写为所选档参数（对齐
+      manager runner_git.rs 语义：effort + budgetTokens native 表，off 档
+      disabled；用户声明的 providerOptionsByLevel[level] 优先逐字复制）
+    - .git/info/exclude 隐身，不污染快照 git status
+    失败不致命：打日志回退 CLI 默认。"""
+    import copy
+    import json as _json
+
+    provider_name, _, model_name = model.partition("/")
+    if not provider_name or not model_name:
+        print(f"[questlog-research] model {model!r} not provider/model form; skip", file=sys.stderr)
+        return
     try:
-        import json as _json
-        global_cfg = _json.loads(home_cfg.read_text(encoding="utf-8"))
-        provider_name = model.split("/", 1)[0]
-        providers = global_cfg.get("provider") or {}
-        prov_def = providers.get(provider_name)
-        if not prov_def:
-            print(f"[questlog-research] provider {provider_name!r} not in global config; using default model", file=sys.stderr)
+        prov_def = _resolve_provider_def(provider_name)
+        if prov_def is None:
+            print(f"[questlog-research] provider {provider_name!r} not in zcode configs; default model", file=sys.stderr)
             return
-        proj: dict = {"provider": {provider_name: prov_def}, "model": {"main": model}}
+        prov_def = copy.deepcopy(prov_def)
+        models = prov_def.get("models")
+        if isinstance(models, list):
+            # 旧形态升级：list → dict（保留全部模型名）
+            prov_def["models"] = {m if isinstance(m, str) else str(m): {} for m in models}
+        entry = prov_def["models"].setdefault(model_name, {})
+        if not isinstance(entry, dict):
+            prov_def["models"][model_name] = entry = {}
         if thinking:
-            models = prov_def.get("models")
-            model_id = model.split("/", 1)[1] if "/" in model else model
-            povl = (prov_def.get("options") or {}).get("providerOptionsByLevel") if isinstance(prov_def, dict) else None
-            # providerOptionsByLevel 的位置按 zcode 配置惯例在 provider.options
-            if isinstance(povl, dict) and thinking in povl:
-                normalized = {k: povl[thinking] for k in povl}
-                prov_def.setdefault("options", {})["providerOptionsByLevel"] = normalized
+            levels = _thinking_levels(model_name, entry)
+            user_povl = ((entry.get("reasoning") or {}).get("providerOptionsByLevel") or {})
+            chosen = (
+                user_povl.get(thinking)
+                if isinstance(user_povl, dict) and isinstance(user_povl.get(thinking), dict)
+                else _native_thinking_options(thinking)
+            )
+            povl = {lv: chosen for lv in levels}
+            entry["reasoning"] = {
+                "enabled": True,
+                "levels": levels,
+                "defaultLevel": thinking,
+                "providerOptionsByLevel": povl,
+            }
+        proj = {"provider": {provider_name: prov_def}, "model": {"main": model}}
         zdir = Path(repo_dir) / ".zcode"
         zdir.mkdir(parents=True, exist_ok=True)
         (zdir / "config.json").write_text(_json.dumps(proj, ensure_ascii=False, indent=2), encoding="utf-8")
-        # 隐身：git status 不显示注入文件（只写 .git/info/exclude，不动工作树）
         git_info = Path(repo_dir) / ".git" / "info"
         git_info.mkdir(parents=True, exist_ok=True)
         excl = git_info / "exclude"
-        marker = ".zcode/"
         existing = excl.read_text() if excl.exists() else ""
-        if marker not in existing:
-            excl.write_text(existing + "\n" + marker + "\n")
+        if ".zcode/" not in existing:
+            excl.write_text(existing + "\n.zcode/\n")
     except Exception as e:  # noqa: BLE001 — 注入失败回退默认，不挡任务
         print(f"[questlog-research] model config injection skipped: {e}", file=sys.stderr)
 
