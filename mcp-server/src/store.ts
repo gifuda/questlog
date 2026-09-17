@@ -404,9 +404,17 @@ export function pushTodo(cwd: string, input: {
   tags?: string[];
   priority?: TodoItem["priority"];
   source_session?: string;
+  /** Nightly auto-process opt-in (explicit user request only, todo type only). */
+  auto_process?: boolean;
 }): { item: TodoItem } | { error: string } {
   const content = input.content?.trim() ?? "";
   const suggestion = input.suggestion?.trim() ?? "";
+
+  // The automated channel only processes research todos — an opt-in on
+  // knowhow/idea is an invalid authorization, rejected at the door.
+  if (input.auto_process && input.type !== "todo") {
+    return { error: "auto_process opt-in is only valid for type='todo' items" };
+  }
 
   // Format check (not a rejection): guide the AI to fill fields per template.
   // The user explicitly requested this push, so we never refuse — we only
@@ -431,6 +439,7 @@ export function pushTodo(cwd: string, input: {
     priority: input.priority ?? "medium",
     source_session: input.source_session ?? "",
     processing: false,
+    ...(input.auto_process ? { auto_process: true, auto_process_revision: 1 } : {}),
     created_at: now,
     updated_at: now,
   };
@@ -544,7 +553,7 @@ export async function searchTodos(keyword: string): Promise<(TodoItem & { projec
 export async function updateAndSave(
   cwd: string,
   id: string,
-  patch: Partial<Pick<TodoItem, "status" | "content" | "tags" | "priority" | "title" | "processing">>
+  patch: Partial<Pick<TodoItem, "status" | "content" | "tags" | "priority" | "title" | "processing" | "auto_process" | "auto_process_revision">>
 ): Promise<{ ok: true } | { error: string }> {
   const filePath = resolveTodoPath(cwd);
   return withFileLock(
@@ -563,6 +572,13 @@ export async function updateAndSave(
       const item = data.items.find((i) => i.id === id);
       if (!item) return { error: `item '${id}' not found` };
 
+      // Opt-in authorization guard: the automated channel only processes
+      // research todos — an opt-in on knowhow/idea is invalid.
+      const nextAuto = patch.auto_process !== undefined ? patch.auto_process : item.auto_process;
+      if (nextAuto && item.type !== "todo") {
+        return { error: "auto_process opt-in is only valid for type='todo' items" };
+      }
+
       if (patch.status) {
         const err = validateTransition(item.type, patch.status);
         if (err) return { error: err };
@@ -577,6 +593,25 @@ export async function updateAndSave(
       if (patch.priority !== undefined) item.priority = patch.priority;
       if (patch.title !== undefined) item.title = patch.title;
       if (patch.processing !== undefined) item.processing = patch.processing;
+
+      // Opt-in application: every false→true transition bumps
+      // auto_process_revision so results from a previous authorization are
+      // never reused (待办租户 plan §5.1). Turning OFF does not bump — the
+      // next explicit re-enable gets a fresh revision.
+      if (patch.auto_process !== undefined) {
+        if (patch.auto_process && !item.auto_process) {
+          item.auto_process_revision = (item.auto_process_revision ?? 0) + 1;
+        }
+        item.auto_process = patch.auto_process;
+      }
+      if (patch.auto_process_revision !== undefined) {
+        // Explicit re-authorization of the SAME on-state (rare): only ever
+        // moves forward, never backwards to reuse a closed result.
+        item.auto_process_revision = Math.max(
+          item.auto_process_revision ?? 0,
+          patch.auto_process_revision,
+        );
+      }
 
       item.updated_at = new Date().toISOString();
       await writeStore(filePath, data);

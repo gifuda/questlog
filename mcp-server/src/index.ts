@@ -121,6 +121,9 @@ server.tool(
     suggestion: z.string().optional().describe("One concrete next action step"),
     tags: z.array(z.string()).optional().describe("2-4 lowercase noun tags for grouping"),
     priority: z.enum(["high", "medium", "low"]).optional().describe("Priority — only meaningful for todo type"),
+    auto_process: z.boolean().optional().describe(
+      "Opt-in for nightly auto-processing by the collector (只读研究类). Set true ONLY when the user explicitly asked for 自动处理/夜间处理 and the item is a research-style todo (调查/盘点/分析 with verifiable report). Never set it on your own initiative.",
+    ),
     project_dir: z.string().optional().describe("Override auto-detection: absolute path of the target project directory"),
   },
   async (input) => {
@@ -279,6 +282,12 @@ server.tool(
     priority: z.enum(["high", "medium", "low"]).optional().describe("Updated priority"),
     title: z.string().optional().describe("Updated title"),
     processing: z.boolean().optional().describe("Mark the item as being processed (true when you start working on it)"),
+    auto_process: z.boolean().optional().describe(
+      "Nightly auto-process opt-in toggle (todo items only). Turning it on requires the user's explicit request; each off→on transition starts a fresh authorization revision.",
+    ),
+    auto_process_revision: z.number().int().optional().describe(
+      "Explicit re-authorization revision for auto_process (rare; moves forward only).",
+    ),
     project_dir: z.string().optional().describe("Absolute path of the target project directory. Defaults to process.cwd()"),
   },
   async (input) => {

@@ -114,6 +114,18 @@ pub fn get_todos(project_path: String, state: State<AppState>) -> Result<TodosFi
     store::read_todos(&path)
 }
 
+/// Retyping an opted-in item away from "todo" would strand an authorization
+/// flag on a non-todo item — rejected (G1 audit BLOCK-1). Mirrors the MCP-side
+/// guard in store.ts pushTodo/updateAndSave.
+fn ensure_type_change_allowed(auto_process: bool, new_type: &ItemType) -> Result<(), String> {
+    if auto_process && *new_type != ItemType::Todo {
+        return Err(
+            "cannot change type of an auto_process item — turn off auto_process first".into(),
+        );
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn update_todo(
     project_path: String,
@@ -128,50 +140,75 @@ pub fn update_todo(
     processing: Option<bool>,
 ) -> Result<(), String> {
     let path = validate_project_path(&project_path, &state)?;
-    let mut data = store::read_todos(&path)?;
+    let mut archived_quickly = false;
 
-    let item = data
-        .items
-        .iter_mut()
-        .find(|i| i.id == id)
-        .ok_or_else(|| format!("item '{}' not found", id))?;
+    // G1: every .todos.json write goes through mutate_todos — cross-process
+    // lock held for the whole read-modify-write, unknown fields preserved.
+    store::mutate_todos(&path, |root| {
+        let items = root
+            .get_mut("items")
+            .and_then(|v| v.as_array_mut())
+            .ok_or_else(|| "items is not an array".to_string())?;
+        let item_val = items
+            .iter_mut()
+            .find(|it| it.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+            .ok_or_else(|| format!("item '{}' not found", id))?;
 
-    if let Some(s) = status {
-        item.status = ItemStatus::from_str(&s)?;
-        // Completing/archiving clears the in-progress flag
-        if item.status != ItemStatus::Active {
-            item.processing = false;
+        // Typed view for validation. The WRITE path never coerces: an item
+        // that fails strict deserialization aborts the update instead of
+        // being silently repaired into the file on disk.
+        let mut typed: TodoItem = serde_json::from_value(item_val.clone())
+            .map_err(|e| format!("item '{}' failed strict parse: {e}", id))?;
+
+        if let Some(s) = &status {
+            typed.status = ItemStatus::from_str(s)?;
+            // Completing/archiving clears the in-progress flag
+            if typed.status != ItemStatus::Active {
+                typed.processing = false;
+            }
         }
-    }
-    if let Some(c) = content {
-        item.content = c;
-    }
-    if let Some(t) = tags {
-        item.tags = t;
-    }
-    if let Some(p) = priority {
-        item.priority = Priority::from_str(&p)?;
-    }
-    if let Some(t) = title {
-        item.title = t;
-    }
-    if let Some(ty) = item_type {
-        item.item_type = ItemType::from_str(&ty)?;
-    }
-    if let Some(pr) = processing {
-        item.processing = pr;
-    }
+        if let Some(c) = &content {
+            typed.content = c.clone();
+        }
+        if let Some(t) = &tags {
+            typed.tags = t.clone();
+        }
+        if let Some(p) = &priority {
+            typed.priority = Priority::from_str(p)?;
+        }
+        if let Some(t) = &title {
+            typed.title = t.clone();
+        }
+        if let Some(ty) = &item_type {
+            let new_type = ItemType::from_str(ty)?;
+            ensure_type_change_allowed(typed.auto_process, &new_type)?;
+            typed.item_type = new_type;
+        }
+        if let Some(pr) = processing {
+            typed.processing = pr;
+        }
 
-    // Quality feedback: if an item gets archived within 48h of creation,
-    // record it as a low-value push signal for the MCP side to read.
-    let archived_quickly = item.status == ItemStatus::Archived
-        && chrono::DateTime::parse_from_rfc3339(&item.created_at)
-            .map(|created| (chrono::Utc::now() - created.to_utc()).num_hours() < 48)
-            .unwrap_or(false);
+        // Quality feedback: if an item gets archived within 48h of creation,
+        // record it as a low-value push signal for the MCP side to read.
+        archived_quickly = typed.status == ItemStatus::Archived
+            && chrono::DateTime::parse_from_rfc3339(&typed.created_at)
+                .map(|created| (chrono::Utc::now() - created.to_utc()).num_hours() < 48)
+                .unwrap_or(false);
 
-    item.updated_at = chrono::Utc::now().to_rfc3339();
+        typed.updated_at = chrono::Utc::now().to_rfc3339();
 
-    store::write_todos(&path, &mut data)?;
+        // Patch ONLY the serialized known fields back onto the raw item
+        // object — every other key (unknown/future fields) survives as-is.
+        let patched =
+            serde_json::to_value(&typed).map_err(|e| format!("serialize error: {e}"))?;
+        let obj = item_val
+            .as_object_mut()
+            .ok_or_else(|| "item is not an object".to_string())?;
+        for (k, v) in patched.as_object().unwrap() {
+            obj.insert(k.clone(), v.clone());
+        }
+        Ok(())
+    })?;
 
     if archived_quickly {
         discovery::record_archived_soon(&project_path);
@@ -192,7 +229,6 @@ pub fn add_todo(
     priority: Option<String>,
 ) -> Result<TodoItem, String> {
     let path = validate_project_path(&project_path, &state)?;
-    let mut data = store::read_todos(&path)?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let item = TodoItem {
@@ -210,17 +246,32 @@ pub fn add_todo(
             .unwrap_or(Priority::Medium),
         source_session: String::new(),
         processing: false,
+        auto_process: false,
+        auto_process_revision: 0,
+        auto_result: None,
+        auto_completed_at: None,
         created_at: now.clone(),
         updated_at: now,
     };
 
-    data.items.push(item.clone());
-    data.project = path
+    let dir_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    store::write_todos(&path, &mut data)?;
+    store::mutate_todos(&path, |root| {
+        let items = root
+            .get_mut("items")
+            .and_then(|v| v.as_array_mut())
+            .ok_or_else(|| "items is not an array".to_string())?;
+        items.push(
+            serde_json::to_value(&item).map_err(|e| format!("serialize error: {e}"))?,
+        );
+        if let Some(obj) = root.as_object_mut() {
+            obj.insert("project".into(), serde_json::Value::String(dir_name.clone()));
+        }
+        Ok(())
+    })?;
     Ok(item)
 }
 
@@ -1990,5 +2041,16 @@ mod tests {
         );
         // Unknown model with no same-named match → no migration
         assert_eq!(migrate_executor_model("deepseek/ghost", &providers), None);
+    }
+
+    #[test]
+    fn type_change_guard_protects_auto_process_invariant() {
+        // Opted-in item: retyping to knowhow/idea rejected.
+        assert!(ensure_type_change_allowed(true, &ItemType::Knowhow).is_err());
+        assert!(ensure_type_change_allowed(true, &ItemType::Idea).is_err());
+        // Staying a todo is fine.
+        assert!(ensure_type_change_allowed(true, &ItemType::Todo).is_ok());
+        // Non-opted-in items can be retyped freely.
+        assert!(ensure_type_change_allowed(false, &ItemType::Knowhow).is_ok());
     }
 }

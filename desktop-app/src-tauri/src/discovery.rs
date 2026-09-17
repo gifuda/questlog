@@ -134,6 +134,19 @@ fn write_registry(reg: &Registry) -> Result<(), String> {
     atomic_write(&path, &json)
 }
 
+/// Lock-protected read-modify-write for the registry. The Node MCP server
+/// serializes its registry mutations with the same lock protocol (file-lock.ts
+/// mutateRegistry); Rust RMWs must hold it too or the two sides lose each
+/// other's updates (G1 / link-trace R8).
+fn mutate_registry<T>(f: impl FnOnce(&mut Registry) -> Result<T, String>) -> Result<T, String> {
+    let path = registry_path()?;
+    let _lock = crate::file_lock::FileLock::acquire(&path)?;
+    let mut reg = read_registry();
+    let out = f(&mut reg)?;
+    write_registry(&reg)?;
+    Ok(out)
+}
+
 /// Read projects from the central registry file (~/.todo-board.json).
 pub fn discover_projects() -> Vec<(String, PathBuf)> {
     read_registry()
@@ -146,47 +159,48 @@ pub fn discover_projects() -> Vec<(String, PathBuf)> {
 
 /// Soft-delete: move project from active list to trash.
 pub fn remove_project(name: &str) -> Result<(), String> {
-    let mut reg = read_registry();
-
-    let idx = reg.projects.iter().position(|e| e.name == name);
-    let removed = idx.map(|i| reg.projects.remove(i));
-
-    if let Some(entry) = removed {
-        reg.trash.push(TrashEntry {
-            entry,
-            deleted_at: Utc::now().to_rfc3339(),
-        });
-        write_registry(&reg)?;
-    }
-    Ok(())
+    mutate_registry(|reg| {
+        let idx = reg.projects.iter().position(|e| e.name == name);
+        let removed = idx.map(|i| reg.projects.remove(i));
+        if let Some(entry) = removed {
+            reg.trash.push(TrashEntry {
+                entry,
+                deleted_at: Utc::now().to_rfc3339(),
+            });
+        }
+        Ok(())
+    })
 }
 
 /// Restore: move project from trash back to active list.
 pub fn restore_project(name: &str) -> Result<(), String> {
-    let mut reg = read_registry();
-
-    let idx = reg.trash.iter().position(|t| t.entry.name == name);
-    let restored = idx.map(|i| reg.trash.remove(i).entry);
-
-    if let Some(entry) = restored {
-        reg.projects.push(entry);
-        write_registry(&reg)?;
-    }
-    Ok(())
+    mutate_registry(|reg| {
+        let idx = reg.trash.iter().position(|t| t.entry.name == name);
+        let restored = idx.map(|i| reg.trash.remove(i).entry);
+        if let Some(entry) = restored {
+            reg.projects.push(entry);
+        }
+        Ok(())
+    })
 }
 
 /// Permanent delete: remove from trash AND delete .todos.json.
 pub fn permanently_delete(name: &str) -> Result<(), String> {
-    let mut reg = read_registry();
-
-    let idx = reg.trash.iter().position(|t| t.entry.name == name);
-    if let Some(i) = idx {
-        let entry = reg.trash.remove(i);
-        let todos_path = PathBuf::from(&entry.entry.path).join(".todos.json");
-        let _ = std::fs::remove_file(todos_path);
-        write_registry(&reg)?;
-    }
-    Ok(())
+    mutate_registry(|reg| {
+        let idx = reg.trash.iter().position(|t| t.entry.name == name);
+        if let Some(i) = idx {
+            let entry = reg.trash.remove(i);
+            let todos_path = PathBuf::from(&entry.entry.path).join(".todos.json");
+            // Take the todos file's own lock before deleting it, so we never
+            // remove the file mid-write from another process (G1 / U3). A lock
+            // failure must abort the delete — silently discarding it would
+            // defeat the whole point (G1 audit BLOCK-2).
+            let _lock = crate::file_lock::FileLock::acquire(&todos_path)
+                .map_err(|e| format!("cannot lock todos file for delete: {e}"))?;
+            let _ = std::fs::remove_file(&todos_path);
+        }
+        Ok(())
+    })
 }
 
 /// List trash entries.
@@ -197,52 +211,51 @@ pub fn list_trash() -> Result<Vec<TrashEntry>, String> {
 /// Add a project back to the registry (for undo).
 /// Also cleans it from trash if present.
 pub fn add_project(name: &str, path: &str) -> Result<(), String> {
-    let mut reg = read_registry();
-
-    // Don't duplicate
-    if !reg.projects.iter().any(|e| e.name == name) {
-        reg.projects.push(RegistryEntry {
-            name: name.to_string(),
-            path: path.to_string(),
-        });
-    }
-
-    // Remove from trash if present
-    reg.trash.retain(|t| t.entry.name != name);
-
-    write_registry(&reg)
+    mutate_registry(|reg| {
+        // Don't duplicate
+        if !reg.projects.iter().any(|e| e.name == name) {
+            reg.projects.push(RegistryEntry {
+                name: name.to_string(),
+                path: path.to_string(),
+            });
+        }
+        // Remove from trash if present
+        reg.trash.retain(|t| t.entry.name != name);
+        Ok(())
+    })
 }
 
 /// Record that an item was archived quickly after creation (a low-value push signal).
 /// Keyed by project path in the registry's feedback map. Read by MCP list_todos.
 pub fn record_archived_soon(project_path: &str) {
-    let mut reg = read_registry();
-    let f = reg.feedback.entry(project_path.to_string()).or_default();
-    f.archived_soon += 1;
-    let _ = write_registry(&reg);
+    let _ = mutate_registry(|reg| {
+        let f = reg.feedback.entry(project_path.to_string()).or_default();
+        f.archived_soon += 1;
+        Ok(())
+    });
 }
 
 /// Reorder projects by the given name order.
 pub fn reorder_projects(names: &[String]) -> Result<(), String> {
-    let mut reg = read_registry();
+    mutate_registry(|reg| {
+        let existing = std::mem::take(&mut reg.projects);
+        let mut by_name: std::collections::HashMap<&str, RegistryEntry> = existing
+            .iter()
+            .map(|e| (e.name.as_str(), e.clone()))
+            .collect();
 
-    let existing = std::mem::take(&mut reg.projects);
-    let mut by_name: std::collections::HashMap<&str, RegistryEntry> = existing
-        .iter()
-        .map(|e| (e.name.as_str(), e.clone()))
-        .collect();
-
-    let mut reordered = Vec::new();
-    for name in names {
-        if let Some(entry) = by_name.remove(name.as_str()) {
-            reordered.push(entry);
+        let mut reordered = Vec::new();
+        for name in names {
+            if let Some(entry) = by_name.remove(name.as_str()) {
+                reordered.push(entry);
+            }
         }
-    }
-    // Append any remaining entries not in the reorder list
-    reordered.extend(by_name.into_values());
+        // Append any remaining entries not in the reorder list
+        reordered.extend(by_name.into_values());
 
-    reg.projects = reordered;
-    write_registry(&reg)
+        reg.projects = reordered;
+        Ok(())
+    })
 }
 
 /// Get the global 套利机会栏 config (None = never configured). Falls back to
@@ -256,11 +269,16 @@ pub fn get_arb_board_config() -> Option<ArbBoardConfig> {
     // Legacy migration: promote the single per-project entry (if any).
     if reg.arb_boards.len() == 1 {
         let migrated = reg.arb_boards.values().next().unwrap().clone();
-        reg.arb_board = Some(migrated.clone());
-        reg.arb_boards.clear();
-        if write_registry(&reg).is_ok() {
-            return Some(migrated.clone());
-        }
+        let migrated = match mutate_registry(|locked| {
+            if locked.arb_board.is_none() && locked.arb_boards.len() == 1 {
+                locked.arb_board = Some(migrated.clone());
+                locked.arb_boards.clear();
+            }
+            Ok(migrated.clone())
+        }) {
+            Ok(cfg) => cfg,
+            Err(_) => migrated,
+        };
         return Some(migrated);
     }
     None
@@ -269,20 +287,21 @@ pub fn get_arb_board_config() -> Option<ArbBoardConfig> {
 /// Set the global 套利机会栏 config. When disabling, the board_path is kept
 /// so re-enabling remembers the user's choice.
 pub fn set_arb_board_config(enabled: bool, board_path: &str) -> Result<(), String> {
-    let mut reg = read_registry();
-    let path = board_path.trim();
-    let mut cfg = reg.arb_board.take().unwrap_or(ArbBoardConfig {
-        enabled: false,
-        board_path: default_board_path(),
-    });
-    cfg.enabled = enabled;
-    if !path.is_empty() {
-        cfg.board_path = path.to_string();
-    }
-    // Clear any legacy per-project entries — global config supersedes them.
-    reg.arb_boards.clear();
-    reg.arb_board = Some(cfg);
-    write_registry(&reg)
+    mutate_registry(|reg| {
+        let path = board_path.trim();
+        let mut cfg = reg.arb_board.take().unwrap_or(ArbBoardConfig {
+            enabled: false,
+            board_path: default_board_path(),
+        });
+        cfg.enabled = enabled;
+        if !path.is_empty() {
+            cfg.board_path = path.to_string();
+        }
+        // Clear any legacy per-project entries — global config supersedes them.
+        reg.arb_boards.clear();
+        reg.arb_board = Some(cfg);
+        Ok(())
+    })
 }
 
 /// The enabled global board path, if any. Used by the watcher to decide which

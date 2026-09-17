@@ -8,6 +8,32 @@ export type ItemStatus =
 
 export type Priority = "high" | "medium" | "low";
 
+/**
+ * Closed outcome set for the nightly auto-process pipeline (待办租户 plan §5.3).
+ * Machine-written by the trusted write-back path only.
+ */
+export type AutoOutcome =
+  | "accepted_report"
+  | "cannot_auto"
+  | "needs_review"
+  | "execution_failed"
+  | "timed_out"
+  | "result_pending_writeback"
+  | "stale"
+  | "cancelled"
+  | "preflight_blocked";
+
+/** Structured result of the last automated attempt. */
+export interface AutoResult {
+  outcome: AutoOutcome;
+  attempt_id?: string;
+  report_ref?: string;
+  report_hash?: string;
+  finished_at?: string;
+  reason_code?: string;
+  verification_level?: string;
+}
+
 export interface TodoItem {
   id: string;
   type: ItemType;
@@ -20,6 +46,22 @@ export interface TodoItem {
   source_session: string;
   /** True when the user copied the reference to process it in a conversation. */
   processing?: boolean;
+  /**
+   * Nightly auto-process opt-in (collector tenant pipeline). Explicit user
+   * authorization only — defaults to false, never set by a model on its own
+   * initiative. Only meaningful for type="todo" items.
+   */
+  auto_process?: boolean;
+  /**
+   * Bumped on every explicit (re)authorization. A closed result never applies
+   * to a later revision: turning the opt-in off and back on must not reuse
+   * the old result.
+   */
+  auto_process_revision?: number;
+  /** Machine-written by the trusted write-back path only. */
+  auto_result?: AutoResult;
+  /** Written only when a CAS write-back actually completed active→completed. */
+  auto_completed_at?: string;
   created_at: string;
   updated_at: string;
 }

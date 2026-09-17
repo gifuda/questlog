@@ -75,6 +75,36 @@ impl Priority {
     }
 }
 
+/// Structured outcome of the last automated (collector-tenant) attempt.
+/// Machine-written by the trusted write-back path only; never inferred from
+/// free text. Outcome values are a closed set (see the 待办租户 plan §5.3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AutoResult {
+    /// accepted_report | cannot_auto | needs_review | execution_failed |
+    /// timed_out | result_pending_writeback | stale | cancelled | preflight_blocked
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_level: Option<String>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoItem {
     pub id: String,
@@ -90,6 +120,22 @@ pub struct TodoItem {
     /// True when the user copied the reference to process it in a conversation.
     #[serde(default)]
     pub processing: bool,
+    /// Nightly auto-process opt-in (collector tenant pipeline). Explicit user
+    /// authorization only — defaults to false, never inferred by a model.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_process: bool,
+    /// Bumped on every explicit (re)authorization. A closed result never
+    /// applies to a later revision: turning the opt-in off and back on must
+    /// not reuse the old result.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub auto_process_revision: u32,
+    /// Structured result of the last automated attempt, written by the
+    /// trusted write-back path only (generic UI/MCP updates cannot set it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_result: Option<AutoResult>,
+    /// Written only when a CAS write-back actually completed active→completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_completed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -451,6 +497,10 @@ mod tests {
             priority: Priority::Medium,
             source_session: "".into(),
             processing: false,
+            auto_process: false,
+            auto_process_revision: 0,
+            auto_result: None,
+            auto_completed_at: None,
             created_at: "2026".into(),
             updated_at: "2026".into(),
         };

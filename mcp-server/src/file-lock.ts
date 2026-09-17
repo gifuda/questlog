@@ -8,37 +8,74 @@
  * both write back.
  *
  * Solution:
- * 1. **Cross-process lock** — an advisory lockfile (`.lock` sibling) using
- *    O_EXCL atomic creation with a stale-lock timeout. This serializes
- *    read-modify-write across processes.
+ * 1. **Owner-safe cross-process lock** — an advisory lockfile (`.lock`
+ *    sibling) using O_EXCL atomic creation. The lock carries the holder's
+ *    identity (`{"v":2,"pid":…,"token":…,"created_ms":…}`). A leftover lock
+ *    is only reclaimed when its owner is PROVABLY dead (`kill(pid, 0)` →
+ *    ESRCH); age alone never justifies stealing — a live-but-slow holder
+ *    (paused process, laptop sleep) must not be robbed mid-critical-section.
+ *    Empty (0-byte) stale locks are reclaimed via age — the creator crashed
+ *    between create and writing its identity, so no owner can ever release
+ *    it. Non-empty unparseable locks are NEVER auto-removed; acquisition
+ *    times out with a "blocked" error for manual cleanup. Mirrors
+ *    file_lock.rs on the Rust side.
  * 2. **Revision / CAS** — each JSON file carries a monotonic `revision`
  *    counter. A writer reads with revision R, mutates, and writes back
  *    with revision R+1. If the on-disk revision is no longer R when the
  *    lock is acquired, another writer beat us — the caller must re-read
  *    and retry.
- *
- * The lock is best-effort on POSIX (O_EXCL is atomic on local filesystems).
- * On lock acquisition failure after retries, the mutation is rejected — it
- * never silently overwrites.
  */
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-/** Default lock timeout: 5 seconds. */
-const DEFAULT_TIMEOUT_MS = 5_000;
+/** Default lock timeout: 10 seconds (aligned with the Rust side's DEFAULT_TIMEOUT). */
+const DEFAULT_TIMEOUT_MS = 10_000;
 
 /** Retry interval between lock attempts: 50ms. */
 const RETRY_MS = 50;
 
-/** Maximum lock age before it's considered stale (10s). */
+/** Maximum age of an EMPTY lock before reclamation (creator crashed pre-identity). */
 const STALE_LOCK_MS = 10_000;
+
+/** Extract the holder pid from lock content (v2 JSON or legacy "pid-uuid"). */
+function parseOwnerPid(content: string): number | null {
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+  try {
+    const v = JSON.parse(trimmed) as { pid?: unknown };
+    const pid = v?.pid;
+    if (typeof pid === "number" && Number.isInteger(pid) && pid > 0 && pid <= 0x7fffffff) {
+      return pid;
+    }
+    return null;
+  } catch {
+    const dash = trimmed.indexOf("-");
+    if (dash > 0) {
+      const pid = Number.parseInt(trimmed.slice(0, dash), 10);
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    }
+    return null;
+  }
+}
+
+/** `kill(pid, 0)` liveness probe. ESRCH = provably dead; anything else = alive. */
+function ownerAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    return true; // EPERM / unknown → conservatively alive
+  }
+}
 
 /**
  * Acquire a cross-process advisory lock on a file path.
  * Uses O_EXCL atomic creation of a `.lock` sibling file.
- * Automatically cleans up stale locks older than STALE_LOCK_MS.
+ * Reclaims only provably-dead owners (see header).
  *
  * Returns a release function that removes the lock file.
  * Throws if the lock cannot be acquired within the timeout.
@@ -50,32 +87,60 @@ export async function withFileLock<T>(
 ): Promise<T> {
   const lockPath = dataPath + ".lock";
   const deadline = Date.now() + timeoutMs;
-  const lockId = `${process.pid}-${crypto.randomUUID()}`;
+  const token = crypto.randomUUID();
+  const lockContent = JSON.stringify({
+    v: 2,
+    pid: process.pid,
+    token,
+    created_ms: Date.now(),
+  });
 
   // Try to acquire the lock with retries.
   let acquired = false;
+  let lastObstacle: "unparseable" | "live-owner" = "live-owner";
   while (Date.now() < deadline) {
     try {
       // O_EXCL: fails if the file already exists.
       const fh = await fs.open(lockPath, "wx");
-      await fh.writeFile(lockId);
+      await fh.writeFile(lockContent);
       await fh.close();
       acquired = true;
       break;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "EEXIST") {
-        // Lock exists — check if it's stale.
+        let content = "";
         try {
-          const stat = await fs.stat(lockPath);
-          const age = Date.now() - stat.mtimeMs;
-          if (age > STALE_LOCK_MS) {
-            // Stale lock — remove and retry immediately.
+          content = await fs.readFile(lockPath, "utf-8");
+        } catch {
+          // Lock file vanished between EEXIST and read — loop retries.
+        }
+        const pid = parseOwnerPid(content);
+        if (pid !== null) {
+          if (!ownerAlive(pid)) {
+            // Owner provably dead — safe to reclaim.
             await fs.unlink(lockPath).catch(() => {});
             continue;
           }
-        } catch {
-          // Lock file disappeared between EEXIST and stat — retry.
+          // Live holder — wait for it below.
+          lastObstacle = "live-owner";
+        } else if (content.trim() === "") {
+          // Creator crashed before writing its identity. Age escape hatch:
+          // no owner can ever release this lock.
+          try {
+            const stat = await fs.stat(lockPath);
+            if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+              await fs.unlink(lockPath).catch(() => {});
+              continue;
+            }
+          } catch {
+            // vanished — loop retries
+          }
+          lastObstacle = "live-owner";
+        } else {
+          // Non-empty, unparseable — identity unknown. Never auto-remove;
+          // surface a blocked error at timeout for manual cleanup.
+          lastObstacle = "unparseable";
         }
         await sleep(RETRY_MS);
         continue;
@@ -86,7 +151,12 @@ export async function withFileLock<T>(
   }
 
   if (!acquired) {
-    throw new Error(`lock timeout: could not acquire ${lockPath} within ${timeoutMs}ms`);
+    if (lastObstacle === "unparseable") {
+      throw new Error(
+        `lock blocked: ${lockPath} is unreadable and no owner can be proven dead — manual cleanup required`,
+      );
+    }
+    throw new Error(`lock timeout: could not acquire ${lockPath} within ${timeoutMs}ms (live owner)`);
   }
 
   try {
@@ -95,7 +165,7 @@ export async function withFileLock<T>(
     // Only remove if we still own the lock (check content).
     try {
       const content = await fs.readFile(lockPath, "utf-8");
-      if (content === lockId) {
+      if (content.trim() === lockContent) {
         await fs.unlink(lockPath);
       }
       // If content doesn't match, someone else took over (shouldn't happen

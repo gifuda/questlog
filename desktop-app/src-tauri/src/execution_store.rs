@@ -1446,15 +1446,60 @@ pub fn count_claimable_by_status() -> Result<(usize, usize), String> {
     Ok((ready, sealed))
 }
 
+/// Recursively canonicalize a JSON value into the SAME byte form as Node's
+/// `computePackageHash` (task-package.ts): object keys sorted ascending,
+/// `status`/`package_hash` keys skipped at EVERY level, arrays kept in order.
+/// The key order must not depend on serde_json's map implementation — the
+/// `preserve_order` feature changes Value iteration order, so it is pinned
+/// here instead.
+///
+/// Byte-equivalence domain (matches the TaskPackage schema as of G1):
+/// ASCII field names and integer-valued numbers. Float formatting
+/// (Rust "1.0" vs JS "1") and non-BMP key ordering can diverge — if the
+/// schema ever gains such fields, both sides need shared fixtures.
+fn canonical_json_sorted(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
+            keys.sort();
+            out.push('{');
+            let mut first = true;
+            for k in keys {
+                if k == "status" || k == "package_hash" {
+                    continue;
+                }
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str(&serde_json::to_string(k).unwrap_or_default());
+                out.push(':');
+                canonical_json_sorted(&map[k], out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(arr) => {
+            out.push('[');
+            let mut first = true;
+            for v in arr {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                canonical_json_sorted(v, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&serde_json::to_string(scalar).unwrap_or_default()),
+    }
+}
+
 pub fn compute_package_hash(package: &serde_json::Value) -> Result<String, String> {
-    let mut hashable = package.clone();
-    let object = hashable
-        .as_object_mut()
-        .ok_or_else(|| "TaskPackage must be an object".to_string())?;
-    object.remove("status");
-    object.remove("package_hash");
-    let canonical =
-        serde_json::to_string(&hashable).map_err(|e| format!("canonicalize TaskPackage: {e}"))?;
+    if !package.is_object() {
+        return Err("TaskPackage must be an object".to_string());
+    }
+    let mut canonical = String::new();
+    canonical_json_sorted(package, &mut canonical);
     Ok(crate::attempt_bundle::sha256_hex(canonical.as_bytes()))
 }
 

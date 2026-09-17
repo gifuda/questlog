@@ -2,6 +2,28 @@ export type ItemType = "knowhow" | "todo" | "idea";
 export type ItemStatus = "active" | "completed" | "archived" | "converted";
 export type Priority = "high" | "medium" | "low";
 
+/** Closed outcome set for the nightly auto-process pipeline (待办租户 plan §5.3). */
+export type AutoOutcome =
+  | "accepted_report"
+  | "cannot_auto"
+  | "needs_review"
+  | "execution_failed"
+  | "timed_out"
+  | "result_pending_writeback"
+  | "stale"
+  | "cancelled"
+  | "preflight_blocked";
+
+export interface AutoResult {
+  outcome: AutoOutcome;
+  attempt_id?: string;
+  report_ref?: string;
+  report_hash?: string;
+  finished_at?: string;
+  reason_code?: string;
+  verification_level?: string;
+}
+
 export interface TodoItem {
   id: string;
   type: ItemType;
@@ -13,6 +35,14 @@ export interface TodoItem {
   priority: Priority;
   source_session: string;
   processing?: boolean;
+  /** Nightly auto-process opt-in (collector tenant pipeline), todo items only. */
+  auto_process?: boolean;
+  /** Bumped on every explicit (re)authorization; old results never reused. */
+  auto_process_revision?: number;
+  /** Machine-written by the trusted write-back path only. */
+  auto_result?: AutoResult;
+  /** Written only when a CAS write-back completed active→completed. */
+  auto_completed_at?: string;
   created_at: string;
   updated_at: string;
 }

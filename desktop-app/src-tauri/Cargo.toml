@@ -18,7 +18,7 @@ crate-type = ["cdylib", "rlib"]
 tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
@@ -30,6 +30,8 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 tauri-plugin-shell = "2.3.5"
 sha2 = "0.10"
+# kill(pid, 0) liveness probes for the owner-safe file lock (file_lock.rs).
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
