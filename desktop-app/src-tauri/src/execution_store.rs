@@ -1070,6 +1070,15 @@ pub struct TaskPackageSummary {
     /// (stable across plan revisions of the same package_id).
     #[serde(default)]
     pub display_no: Option<u32>,
+    /// Provenance (待办租户 G2): origin type of the source that authorized
+    /// this package. `Some("todo")` = todo-sourced — execution happens on the
+    /// collector platform, the local Runner must never claim it.
+    #[serde(default)]
+    pub origin_kind: Option<String>,
+    #[serde(default)]
+    pub origin_todo_id: Option<String>,
+    #[serde(default)]
+    pub origin_task_key: Option<String>,
     pub allowed_paths: Vec<String>,
     #[serde(default)]
     pub create_paths: Vec<String>,
@@ -1122,6 +1131,11 @@ pub struct RawTaskPackage {
     pub epic_id: String,
     pub step_id: String,
     pub plan_revision: u32,
+    #[serde(default)]
+    pub source_session: Option<String>,
+    /// Provenance binding (待办租户 G2) — mirrors Node's PackageOrigin.
+    #[serde(default)]
+    pub origin: Option<RawOrigin>,
     pub project_path: String,
     pub repo_root: String,
     pub base_sha: String,
@@ -1144,6 +1158,22 @@ pub struct RawTaskPackage {
     // Fields we don't yet consume but must tolerate during deserialization:
     // schema_version, source_session, context_refs, preconditions, authority,
     // stop_conditions, rollback, sealed_at — all #[serde(default)] or skipped.
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawOrigin {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub todo_id: String,
+    #[serde(default)]
+    pub task_revision: String,
+    #[serde(default)]
+    pub consent_revision: u64,
+    #[serde(default)]
+    pub task_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1232,6 +1262,9 @@ impl From<RawTaskPackage> for TaskPackageSummary {
             base_sha: raw.base_sha,
             objective: raw.objective,
             display_no: raw.display_no,
+            origin_kind: raw.origin.as_ref().map(|o| o.kind.clone()),
+            origin_todo_id: raw.origin.as_ref().map(|o| o.todo_id.clone()),
+            origin_task_key: raw.origin.as_ref().map(|o| o.task_key.clone()),
             allowed_paths: raw.scope.allowed_paths,
             create_paths: raw.scope.create_paths,
             forbidden_paths: raw.scope.forbidden_paths,
@@ -2258,5 +2291,69 @@ mod tests {
             compute_package_hash(&value).unwrap(),
             "5a0838288edf4a4f2df2106be08daed20d6b4e86ff9e17b00eee9df629cf22c9"
         );
+    }
+
+    /// 待办租户 G2: a todo-sourced package carries `origin` — it must parse
+    /// (unknown to old readers, known to us), project into the summary, and
+    /// keep the local Runner from ever claiming it (runner.rs origin skip).
+    #[test]
+    fn raw_package_with_todo_origin_parses_and_projects() {
+        let raw = serde_json::json!({
+            "package_id": "pkg_x",
+            "epic_id": "epic_1",
+            "step_id": "step_1",
+            "plan_revision": 1,
+            "origin": {
+                "type": "todo",
+                "tenant_id": "test-project",
+                "todo_id": "todo-1",
+                "task_revision": "abc123",
+                "consent_revision": 2,
+                "task_key": "key456"
+            },
+            "project_path": "/tmp/p",
+            "repo_root": "/tmp/p",
+            "base_sha": "deadbeef",
+            "objective": "研究任务",
+            "scope": {"allowed_paths": ["a/**"], "forbidden_paths": [], "max_changed_files": 1},
+            "executor": {"preferred": "manual", "fallbacks": [], "sandbox": "read-only", "timeout_seconds": 900, "max_attempts": 1},
+            "acceptance": [{"type": "command", "command_id": "verify:readonly"}],
+            "status": "sealed",
+            "package_hash": "h"
+        });
+        let parsed: RawTaskPackage = serde_json::from_value(raw).expect("origin must parse");
+        assert_eq!(parsed.origin.as_ref().unwrap().kind, "todo");
+        assert_eq!(parsed.origin.as_ref().unwrap().consent_revision, 2);
+
+        let summary: TaskPackageSummary = parsed.into();
+        assert_eq!(summary.origin_kind.as_deref(), Some("todo"));
+        assert_eq!(summary.origin_todo_id.as_deref(), Some("todo-1"));
+        assert_eq!(summary.origin_task_key.as_deref(), Some("key456"));
+        assert_eq!(summary.executor_preferred, "manual");
+        assert_eq!(summary.sandbox, "read-only");
+    }
+
+    /// Old packages without `origin` still parse — the field is additive.
+    #[test]
+    fn raw_package_without_origin_still_parses() {
+        let raw = serde_json::json!({
+            "package_id": "pkg_y",
+            "epic_id": "e",
+            "step_id": "s",
+            "plan_revision": 1,
+            "project_path": "/tmp/p",
+            "repo_root": "/tmp/p",
+            "base_sha": "beef",
+            "objective": "o",
+            "scope": {"allowed_paths": ["a/**"], "forbidden_paths": [], "max_changed_files": 1},
+            "executor": {"preferred": "zcode", "fallbacks": [], "sandbox": "workspace-write", "timeout_seconds": 60, "max_attempts": 2},
+            "acceptance": [],
+            "status": "sealed",
+            "package_hash": "h"
+        });
+        let parsed: RawTaskPackage = serde_json::from_value(raw).unwrap();
+        assert!(parsed.origin.is_none());
+        let summary: TaskPackageSummary = parsed.into();
+        assert!(summary.origin_kind.is_none());
     }
 }

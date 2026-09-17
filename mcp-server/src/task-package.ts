@@ -104,6 +104,26 @@ export type PackageStatus =
 export type StepStage = "pending" | "designed" | "coded" | "verified" | "observed";
 export type ExecutorKind = "codex" | "zcode" | "manual";
 
+/**
+ * Provenance of a package — what authorized its creation (待办租户 plan §4.2).
+ * Carried through the sealed hash so a package can never be re-attributed.
+ * `type` is a closed set: the Runner refuses automatic execution of packages
+ * with an unknown origin type.
+ */
+export interface PackageOrigin {
+  type: "todo";
+  /** Stable tenant identity (the registered project's canonical dir name). */
+  tenant_id: string;
+  todo_id: string;
+  /** SHA-256 of the frozen task content (task-key.ts computeTaskRevision). */
+  task_revision: string;
+  /** The auto_process_revision that authorized this task. */
+  consent_revision: number;
+  /** SHA-256(tenant_id, todo_id, task_revision, consent_revision) — one
+   *  authorization's one-shot work identity; terminal task_keys never re-run. */
+  task_key: string;
+}
+
 /** The full, sealed TaskPackage — stored only in local Runtime Store. */
 export interface TaskPackage {
   schema_version: typeof SCHEMA_VERSION;
@@ -116,6 +136,8 @@ export interface TaskPackage {
   /** Incremented on every field change; old revisions are superseded. */
   plan_revision: number;
   source_session?: string;
+  /** Provenance binding (待办租户): part of the sealed hash. */
+  origin?: PackageOrigin;
   /** Canonical absolute project path (resolved by server, not model). */
   project_path: string;
   /** Canonical absolute git repo root (resolved by server). */
@@ -293,6 +315,31 @@ export function validatePackageContent(pkg: Partial<TaskPackage>): ValidationIss
       if (check.type === "verifier" && !check.verifier_id) {
         issues.push({ field: "acceptance.verifier_id", message: "verifier checks require a verifier_id", severity: "error" });
       }
+    }
+  }
+
+  // Origin validation (待办租户 G2): provenance is optional on legacy
+  // packages, but when present it must be a COMPLETE, well-formed binding —
+  // a partial origin can never authorize anything and must not seal.
+  if (pkg.origin !== undefined) {
+    if (pkg.origin.type !== "todo") {
+      issues.push({
+        field: "origin.type",
+        message: `unknown origin type '${String(pkg.origin.type)}' — only 'todo' is a known source`,
+        severity: "error",
+      });
+    }
+    for (const key of ["tenant_id", "todo_id", "task_revision", "task_key"] as const) {
+      if (!String(pkg.origin[key] ?? "").trim()) {
+        issues.push({ field: `origin.${key}`, message: "origin requires a non-empty value", severity: "error" });
+      }
+    }
+    if (!(pkg.origin.consent_revision >= 1)) {
+      issues.push({
+        field: "origin.consent_revision",
+        message: "must be ≥ 1 (authorization revisions start at 1)",
+        severity: "error",
+      });
     }
   }
 

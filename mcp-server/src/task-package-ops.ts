@@ -40,6 +40,7 @@ import {
   defaultRollback,
   Authority,
   Rollback,
+  PackageOrigin,
   SCHEMA_VERSION,
 } from "./task-package.js";
 import {
@@ -84,6 +85,12 @@ export interface PrepareInput {
   authority?: Partial<Authority>;
   /** Rollback strategy override — must be a known strategy or prepare fails. */
   rollback?: Rollback;
+  /**
+   * Provenance binding (待办租户 G2): carried into the sealed package and
+   * its hash. Content-validated by validatePackageContent — a partial or
+   * unknown-type origin refuses to seal.
+   */
+  origin?: PackageOrigin;
   /** Working directory override — resolved by server if omitted. */
   project_dir?: string;
 }
@@ -205,6 +212,7 @@ export async function prepareTaskPackage(
     step_id: input.step_id,
     display_no: displayNo,
     plan_revision: 1,
+    ...(input.origin ? { origin: input.origin } : {}),
     project_path: projectPath,
     repo_root: repoRoot,
     base_sha: baseSha,

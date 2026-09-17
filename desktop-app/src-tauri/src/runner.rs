@@ -194,6 +194,15 @@ impl Runner {
             if !crate::runner_config::is_project_enabled(&pkg.project_path) {
                 continue;
             }
+            // Filter: todo-sourced packages (待办租户) NEVER execute locally —
+            // their execution happens on the collector platform via the
+            // delivery channel; the local package is tracking-only. This is a
+            // hard skip independent of the manual-executor quiet-skip below
+            // (belt and suspenders: either field alone must not leak a local
+            // claim).
+            if pkg.origin_kind.as_deref() == Some("todo") {
+                continue;
+            }
             // Filter: epic auto_execute must allow it
             match crate::runner_config::is_epic_auto_execute(&pkg.project_path, &pkg.epic_id) {
                 Ok(true) => {}
@@ -3246,6 +3255,9 @@ mod tests {
             base_sha: "abc".to_string(),
             objective: "test".to_string(),
             display_no: None,
+            origin_kind: None,
+            origin_todo_id: None,
+            origin_task_key: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3368,6 +3380,9 @@ mod tests {
             base_sha: "abc".to_string(),
             objective: "test".to_string(),
             display_no: None,
+            origin_kind: None,
+            origin_todo_id: None,
+            origin_task_key: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3607,6 +3622,9 @@ mod tests {
             base_sha: base_sha.to_string(),
             objective: "test".to_string(),
             display_no: None,
+            origin_kind: None,
+            origin_todo_id: None,
+            origin_task_key: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3882,6 +3900,9 @@ mod tests {
             base_sha: stale_sha,
             objective: "test".to_string(),
             display_no: None,
+            origin_kind: None,
+            origin_todo_id: None,
+            origin_task_key: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3967,6 +3988,9 @@ mod tests {
             base_sha: head_sha,
             objective: "test".to_string(),
             display_no: None,
+            origin_kind: None,
+            origin_todo_id: None,
+            origin_task_key: None,
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],

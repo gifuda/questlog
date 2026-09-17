@@ -346,6 +346,8 @@ export async function updateEpic(cwd: string, id: string, patch: {
   links_note?: string;
   acceptance?: string;
   close_reason?: string;
+  /** Runner 按方案粒度的自动执行开关（待办租户：opt-in 授权绑定到该 Epic）。 */
+  auto_execute?: boolean;
 }): Promise<{ ok: true } | { error: string }> {
   if (patch.status && !VALID_STATUSES.includes(patch.status)) {
     return { error: `invalid status: ${patch.status}` };
@@ -376,6 +378,7 @@ export async function updateEpic(cwd: string, id: string, patch: {
     if (patch.links_note !== undefined) epic.links.note = patch.links_note || undefined;
     if (patch.acceptance !== undefined) epic.acceptance = patch.acceptance;
     if (patch.close_reason !== undefined) epic.close_reason = patch.close_reason;
+    if (patch.auto_execute !== undefined) epic.auto_execute = patch.auto_execute;
     epic.updated_at = new Date().toISOString();
     return { ok: true as const };
   });
