@@ -1272,13 +1272,53 @@ impl Runner {
 
         // 5. Check for changes
         let changed = runner_git::get_changed_paths(&worktree_path, &pkg.base_sha)?;
+        // 待办租户 G3: a strict read-only package may not change ANYTHING —
+        // a non-empty diff is a policy violation that fails before the scope
+        // check and can never reach the candidate-commit branch.
+        if pkg.is_strict_read_only() && !changed.is_empty() {
+            // Evidence fail-closed (audit B8): the bundle's verifier trail
+            // must show WHAT was violated, not just that something was.
+            let policy_evidence = VerifierResult {
+                command_id: "policy:strict_read_only".to_string(),
+                command: format!(
+                    "strict read-only policy check ({} file(s) changed: {})",
+                    changed.len(),
+                    changed.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                ),
+                cwd: String::new(),
+                candidate_sha: None,
+                exit_code: 0,
+                started_at: 0,
+                finished_at: 0,
+                stdout_excerpt: String::new(),
+                stderr_excerpt: format!(
+                    "read-only policy violated: {} file(s) changed",
+                    changed.len()
+                ),
+                passed: false,
+            };
+            let result = RunResult::AcceptanceFailed {
+                execution_id: exec.id.clone(),
+                reason: format!("read-only policy violated: {} file(s) changed", changed.len()),
+            };
+            let result = self.seal_bundle(
+                &bundle_dir,
+                &mut manifest,
+                pkg,
+                result,
+                None,
+                &[policy_evidence],
+                Some(&worktree_path),
+            );
+            return Ok(result);
+        }
         if changed.is_empty() {
             // Read-only artifact contract: "no diff" only means "no code
             // change" — it is NOT acceptance. A read-only task must pass its
             // declared acceptance commands (run against the worktree as-is)
             // AND produce a non-empty stdout report before it may complete.
             if pkg.sandbox == "read-only" {
-                if pkg.acceptance_command_ids.is_empty() {
+                if pkg.acceptance_command_ids.is_empty() && pkg.acceptance_verifier_ids.is_empty() {
                     let result = RunResult::AcceptanceFailed {
                         execution_id: exec.id.clone(),
                         reason: "read-only task declared no acceptance commands — cannot verify the report"
@@ -1313,6 +1353,29 @@ impl Runner {
                         let result = RunResult::AcceptanceFailed {
                             execution_id: exec.id.clone(),
                             reason: format!("read-only acceptance command '{cmd_id}' failed"),
+                        };
+                        let result = self.seal_bundle(
+                            &bundle_dir,
+                            &mut manifest,
+                            pkg,
+                            result,
+                            None,
+                            &verifier_results,
+                            Some(&worktree_path),
+                        );
+                        return Ok(result);
+                    }
+                }
+                // 待办租户 G3: native verifier entries gate the read-only
+                // completion too — fail-closed on anything not natively
+                // executable here.
+                for verifier_id in &pkg.acceptance_verifier_ids {
+                    let vr = resolve_and_run_native_verifier(verifier_id);
+                    verifier_results.push(vr.clone());
+                    if !vr.passed {
+                        let result = RunResult::AcceptanceFailed {
+                            execution_id: exec.id.clone(),
+                            reason: format!("read-only verifier '{verifier_id}' failed: {}", vr.stderr_excerpt),
                         };
                         let result = self.seal_bundle(
                             &bundle_dir,
@@ -1522,6 +1585,28 @@ impl Runner {
                             cmd_id, vr.stderr_excerpt
                         )
                     },
+                };
+                let result = self.seal_bundle(
+                    &bundle_dir,
+                    &mut manifest,
+                    pkg,
+                    result,
+                    Some(&candidate_sha),
+                    &verifier_results,
+                    Some(&worktree_path),
+                );
+                return Ok(result);
+            }
+        }
+
+        // 待办租户 G3: native verifier entries gate the standard path too.
+        for verifier_id in &pkg.acceptance_verifier_ids {
+            let vr = resolve_and_run_native_verifier(verifier_id);
+            verifier_results.push(vr.clone());
+            if !vr.passed {
+                let result = RunResult::AcceptanceFailed {
+                    execution_id: exec.id.clone(),
+                    reason: format!("verifier '{verifier_id}' failed: {}", vr.stderr_excerpt),
                 };
                 let result = self.seal_bundle(
                     &bundle_dir,
@@ -1945,7 +2030,24 @@ impl Runner {
         if pkg.sealed_at.is_empty() {
             return Err("claimable package is missing sealed_at".to_string());
         }
-        if !pkg.auto_edit_worktree
+        // 待办租户 G3 (§4.3): policy dichotomy. Strict read-only packages
+        // carry NO write rights — the read scope is granted by read_paths,
+        // never by the write-semantics allowed_paths. Legacy shapes (both
+        // workspace-write and the old read-only report contract with default
+        // authority) keep the existing requirements unchanged.
+        if pkg.is_strict_read_only() {
+            if pkg.read_paths.is_empty() {
+                return Err(
+                    "read-only policy requires read_paths (approved read scope)".to_string(),
+                );
+            }
+            if !pkg.allowed_paths.is_empty() || !pkg.create_paths.is_empty() {
+                return Err(
+                    "read-only policy grants no write rights — allowed/create paths must be empty"
+                        .to_string(),
+                );
+            }
+        } else if !pkg.auto_edit_worktree
             || !pkg.auto_commit_candidate
             || pkg.auto_merge
             || pkg.auto_push
@@ -1954,12 +2056,11 @@ impl Runner {
             return Err(
                 "authority does not match the safe worktree/candidate-only policy".to_string(),
             );
-        }
-        if pkg.allowed_paths.is_empty() || pkg.max_changed_files == 0 {
+        } else if pkg.allowed_paths.is_empty() || pkg.max_changed_files == 0 {
             return Err("scope is empty or max_changed_files is zero".to_string());
         }
-        if pkg.acceptance_command_ids.is_empty() {
-            return Err("no trusted acceptance command declared".to_string());
+        if pkg.acceptance_command_ids.is_empty() && pkg.acceptance_verifier_ids.is_empty() {
+            return Err("no trusted acceptance (command or verifier) declared".to_string());
         }
 
         let project = PathBuf::from(&pkg.project_path)
@@ -2470,6 +2571,33 @@ fn create_bundle_decision(
     }
 }
 
+/// 待办租户 G3 (§8): native verifier dispatch. Verifiers are code-level
+/// checks over execution evidence — they never execute anything derived
+/// from report content. The canonical implementation of "todo:report" lives
+/// in the manager-side reconciliation (Node todo-report.ts); the LOCAL
+/// Runner cannot execute it, so it fails closed — a package carrying it
+/// must not complete under local execution. Unknown ids fail closed too.
+fn resolve_and_run_native_verifier(verifier_id: &str) -> VerifierResult {
+    let reason = match verifier_id {
+        "todo:report" => "verifier 'todo:report' runs in the manager-side receipt reconciliation — \
+                          a package carrying it must not complete under local Runner execution"
+            .to_string(),
+        other => format!("unknown verifier '{other}'"),
+    };
+    VerifierResult {
+        command_id: format!("verifier:{verifier_id}"),
+        command: format!("native-verifier:{verifier_id}"),
+        cwd: String::new(),
+        candidate_sha: None,
+        exit_code: 0,
+        started_at: 0,
+        finished_at: 0,
+        stdout_excerpt: String::new(),
+        stderr_excerpt: reason,
+        passed: false,
+    }
+}
+
 fn resolve_and_run_acceptance_verbose(
     command_id: &str,
     repo_root: &Path,
@@ -2628,6 +2756,76 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("QUESTLOG_RUNTIME", dir.path().join("runtime"));
         (dir, guard)
+    }
+
+    /// 待办租户 G3 (audit W7): the strict read-only branch of
+    /// validate_before_claim — pure shape checks, no filesystem access.
+    fn strict_summary(read_paths: Vec<String>, allowed: Vec<String>) -> TaskPackageSummary {
+        TaskPackageSummary {
+            package_id: "p".into(),
+            epic_id: "e".into(),
+            step_id: "s".into(),
+            plan_revision: 1,
+            project_path: "/tmp/never".into(),
+            repo_root: "/tmp/never".into(),
+            base_sha: "b".into(),
+            objective: "o".into(),
+            display_no: None,
+            origin_kind: None,
+            origin_todo_id: None,
+            origin_task_key: None,
+            allowed_paths: allowed,
+            create_paths: vec![],
+            forbidden_paths: vec![],
+            read_paths,
+            max_changed_files: 0,
+            expected_changed_files: None,
+            warn_changed_files: None,
+            executor_preferred: "zcode".into(),
+            executor_fallbacks: vec![],
+            sandbox: "read-only".into(),
+            timeout_seconds: 900,
+            max_attempts: 2,
+            acceptance_command_ids: vec!["verify:readonly".into()],
+            acceptance_verifier_ids: vec!["todo:report".into()],
+            preconditions: vec![],
+            authority_present: true,
+            auto_edit_worktree: false,
+            auto_commit_candidate: false,
+            auto_merge: false,
+            auto_push: false,
+            auto_deploy: false,
+            sealed_at: "t".into(),
+            status: "sealed".into(),
+            package_hash: "h".into(),
+            computed_hash: "h".into(),
+        }
+    }
+
+    #[test]
+    fn validate_before_claim_rejects_strict_read_only_without_read_paths() {
+        let err = Runner::validate_before_claim(&strict_summary(vec![], vec![]), 0).unwrap_err();
+        assert!(err.contains("read_paths"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_before_claim_rejects_strict_read_only_with_write_paths() {
+        let err = Runner::validate_before_claim(
+            &strict_summary(vec!["**".into()], vec!["src/**".into()]),
+            0,
+        )
+        .unwrap_err();
+        assert!(err.contains("no write rights"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_before_claim_rejects_strict_shape_without_authority_present() {
+        let mut pkg = strict_summary(vec!["**".into()], vec![]);
+        pkg.authority_present = false;
+        // authority absent ⇒ not strict ⇒ falls into the legacy authority
+        // check (edit/commit must be true) ⇒ rejected fail-closed (B1).
+        let err = Runner::validate_before_claim(&pkg, 0).unwrap_err();
+        assert!(err.contains("authority"), "got: {err}");
     }
 
     /// Network-class failure detection: connection/DNS/rate-limit signals
@@ -3258,6 +3456,8 @@ mod tests {
             origin_kind: None,
             origin_todo_id: None,
             origin_task_key: None,
+            read_paths: vec![],
+            acceptance_verifier_ids: vec![],
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3271,6 +3471,7 @@ mod tests {
             max_attempts: 2,
             acceptance_command_ids: vec!["verify:candidate".to_string()],
             preconditions: vec![],
+            authority_present: true,
             auto_edit_worktree: true,
             auto_commit_candidate: true,
             auto_merge: false,
@@ -3383,6 +3584,8 @@ mod tests {
             origin_kind: None,
             origin_todo_id: None,
             origin_task_key: None,
+            read_paths: vec![],
+            acceptance_verifier_ids: vec![],
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3396,6 +3599,7 @@ mod tests {
             max_attempts: 2,
             acceptance_command_ids: vec!["verify:candidate".to_string()],
             preconditions: vec![],
+            authority_present: true,
             auto_edit_worktree: true,
             auto_commit_candidate: true,
             auto_merge: false,
@@ -3625,6 +3829,8 @@ mod tests {
             origin_kind: None,
             origin_todo_id: None,
             origin_task_key: None,
+            read_paths: vec![],
+            acceptance_verifier_ids: vec![],
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3638,6 +3844,7 @@ mod tests {
             max_attempts: 2,
             acceptance_command_ids: vec!["verify:candidate".to_string()],
             preconditions: vec![],
+            authority_present: true,
             auto_edit_worktree: true,
             auto_commit_candidate: true,
             auto_merge: false,
@@ -3903,6 +4110,8 @@ mod tests {
             origin_kind: None,
             origin_todo_id: None,
             origin_task_key: None,
+            read_paths: vec![],
+            acceptance_verifier_ids: vec![],
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -3916,6 +4125,7 @@ mod tests {
             max_attempts: 2,
             acceptance_command_ids: vec!["verify:candidate".to_string()],
             preconditions: vec![],
+            authority_present: true,
             auto_edit_worktree: true,
             auto_commit_candidate: true,
             auto_merge: false,
@@ -3991,6 +4201,8 @@ mod tests {
             origin_kind: None,
             origin_todo_id: None,
             origin_task_key: None,
+            read_paths: vec![],
+            acceptance_verifier_ids: vec![],
             allowed_paths: vec!["src/**".to_string()],
             create_paths: vec![],
             forbidden_paths: vec![],
@@ -4004,6 +4216,7 @@ mod tests {
             max_attempts: 2,
             acceptance_command_ids: vec!["verify:candidate".to_string()],
             preconditions: vec![],
+            authority_present: true,
             auto_edit_worktree: true,
             auto_commit_candidate: true,
             auto_merge: false,

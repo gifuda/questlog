@@ -94,15 +94,24 @@ describe("produceTodoPackage", () => {
     const step = epics.steps.find((s) => s.id === r.step_id)!;
     expect(step.links?.todo_ref).toBe(TODO_ID);
 
-    // Sealed standard package: manual (never locally executed), read-only,
-    // verify:readonly acceptance, origin carried.
+    // Sealed standard package: strict read-only policy (G3) — manual
+    // executor (never locally executed), zero write rights, read_paths
+    // scope, command + native verifier acceptance, origin carried.
     const pkg = await getPackage(r.package_id);
     if ("error" in pkg) throw new Error(pkg.error);
     expect(pkg.pkg.status).toBe("sealed");
     expect(pkg.pkg.executor.preferred).toBe("manual");
     expect(pkg.pkg.executor.sandbox).toBe("read-only");
     expect(pkg.pkg.executor.max_attempts).toBe(1);
-    expect(pkg.pkg.acceptance).toEqual([{ type: "command", command_id: "verify:readonly" }]);
+    expect(pkg.pkg.scope.allowed_paths).toEqual([]);
+    expect(pkg.pkg.scope.read_paths).toEqual(["**"]);
+    expect(pkg.pkg.scope.max_changed_files).toBe(0);
+    expect(pkg.pkg.authority.auto_edit_worktree).toBe(false);
+    expect(pkg.pkg.authority.auto_commit_candidate).toBe(false);
+    expect(pkg.pkg.acceptance).toEqual([
+      { type: "command", command_id: "verify:readonly" },
+      { type: "verifier", verifier_id: "todo:report" },
+    ]);
     expect(pkg.pkg.origin).toMatchObject({ type: "todo", tenant_id: "test-project", todo_id: TODO_ID, consent_revision: 1 });
     expect(pkg.pkg.origin!.task_key).toBe(r.task_key);
 

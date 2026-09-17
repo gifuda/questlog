@@ -73,9 +73,13 @@ export interface PrepareInput {
   executor_timeout_seconds?: number;
   executor_max_attempts?: number;
   /** Executor sandbox: workspace-write (default) allows edits inside the
-   * worktree scope; read-only forbids any file change (report tasks). */
+   *  worktree scope; read-only forbids any file change (report tasks). */
   executor_sandbox?: "workspace-write" | "read-only";
   acceptance_command_ids?: string[];
+  /** 待办租户 G3: native verifier acceptance entries (KNOWN_VERIFIERS only). */
+  acceptance_verifier_ids?: string[];
+  /** 待办租户 G3: approved read scope for read-only packages. */
+  read_paths?: string[];
   /**
    * Conservative authority override, merged over the default. The server
    * clamps auto_merge/auto_push/auto_deploy to false REGARDLESS of input —
@@ -225,6 +229,7 @@ export async function prepareTaskPackage(
       max_changed_files: input.max_changed_files ?? 10,
       expected_changed_files: input.expected_changed_files,
       warn_changed_files: input.warn_changed_files,
+      ...(input.read_paths ? { read_paths: input.read_paths } : {}),
     },
     // No implicit preconditions: git_clean is opt-in (the standard package is
     // an independent carrier; execution happens in an isolated worktree).
@@ -236,10 +241,16 @@ export async function prepareTaskPackage(
       timeout_seconds: input.executor_timeout_seconds ?? 3600,
       max_attempts: input.executor_max_attempts ?? 2,
     },
-    acceptance: (input.acceptance_command_ids ?? []).map((id) => ({
-      type: "command" as const,
-      command_id: id,
-    })),
+    acceptance: [
+      ...(input.acceptance_command_ids ?? []).map((id) => ({
+        type: "command" as const,
+        command_id: id,
+      })),
+      ...(input.acceptance_verifier_ids ?? []).map((id) => ({
+        type: "verifier" as const,
+        verifier_id: id,
+      })),
+    ],
     authority,
     stop_conditions: defaultStopConditions(),
     rollback,

@@ -350,9 +350,11 @@ export async function produceTodoPackage(
     if (stepAnchorErr) return { ok: false, error: stepAnchorErr, reason_code: "ledger_anchor_failed" };
 
     // Standard package via the existing core. executor=manual: the local
-    // Runner never claims it (execution happens on the collector platform);
-    // sandbox/read-only + verify:readonly express the read-only research
-    // contract; scope fields are inert compat metadata (plan §4.3).
+    // Runner never claims it (execution happens on the collector platform).
+    // STRICT read-only policy (G3 §4.3): zero write rights (authority all
+    // false, max_changed_files 0, no allowed/create paths); the read scope is
+    // granted solely by read_paths. Acceptance = trusted read-only command +
+    // the native todo:report verifier (§8).
     const origin: PackageOrigin = {
       type: "todo",
       tenant_id: tenantId,
@@ -379,16 +381,17 @@ export async function produceTodoPackage(
       step_id: stepId,
       objective,
       context_refs: [".todos.json"],
-      allowed_paths: [".auto-report/**"], // inert: read-only + manual executor
+      allowed_paths: [],
       forbidden_paths: [],
-      max_changed_files: 1,
-      expected_changed_files: 0,
-      warn_changed_files: 1,
+      read_paths: ["**"],
+      max_changed_files: 0,
       executor_preferred: "manual",
       executor_sandbox: "read-only",
       executor_timeout_seconds: 900,
       executor_max_attempts: 1,
       acceptance_command_ids: ["verify:readonly"],
+      acceptance_verifier_ids: ["todo:report"],
+      authority: { auto_edit_worktree: false, auto_commit_candidate: false },
       origin,
     });
     if ("error" in prepared) {

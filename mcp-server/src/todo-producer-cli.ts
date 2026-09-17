@@ -11,6 +11,7 @@
  */
 
 import { produceTodoPackage } from "./todo-producer.js";
+import { pathToFileURL } from "node:url";
 
 interface CliInput {
   project_dir: string;
@@ -46,9 +47,15 @@ async function main(): Promise<number> {
   return result.ok ? 0 : 1;
 }
 
+// Run only when executed directly — importing this module (e.g. by a test)
+// must not block on stdin.
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectRun) {
 main()
   .then((code) => process.exit(code))
   .catch((err: Error) => {
     process.stdout.write(JSON.stringify({ ok: false, error: err.message, reason_code: "internal_error" }));
     process.exit(1);
   });
+}
+

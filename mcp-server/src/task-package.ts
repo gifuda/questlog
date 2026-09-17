@@ -30,14 +30,22 @@ export interface TaskScope {
   /**
    * TaskScope v2 (S3): glob patterns for paths the executor MAY CREATE.
    * Empty/absent on v1 packages — creation then falls back to
-   * allowed_paths (unchanged v1 behaviour). Creation rights never apply to
-   * a file that already exists in the base tree.
+   * allowed_paths (unchanged v1 behaviour). Creation rights never apply to a
+   * file that already exists in the base tree.
    */
   create_paths?: string[];
   /** Glob patterns for paths the executor MUST NOT touch. */
   forbidden_paths: string[];
+  /**
+   * 待办租户 G3 (§4.3): the approved READ scope for strict read-only
+   * packages. This is a SEPARATE grant — the write-semantics fields above
+   * (allowed_paths/create_paths) never double as read authorization, and
+   * read_paths never grants any write right.
+   */
+  read_paths?: string[];
   /** Maximum number of files the executor may change — the LAST-RESORT
-   *  breaker against runaway formatters/generators, not a work quota. */
+   *  breaker against runaway formatters/generators, not a work quota.
+   *  Strict read-only packages MUST set 0 (no write rights at all). */
   max_changed_files: number;
   /** S3 three-tier semantics: exceeding the expected estimate is only
    *  recorded; exceeding the warn threshold annotates the bundle and the
@@ -71,6 +79,16 @@ export interface AcceptanceCheck {
   /** For verifier: the verifier identifier. */
   verifier_id?: string;
 }
+
+/**
+ * 待办租户 G3 (§8): native verifier registry. A verifier is a code-level
+ * check the HOST runs against execution evidence — it never executes
+ * anything from the report content. Unknown verifier ids refuse to seal.
+ *   todo:report — structured research-report verification (todo-report.ts);
+ *     canonical implementation runs on the manager during receipt
+ *     reconciliation; the LOCAL Runner cannot execute it and fails closed.
+ */
+export const KNOWN_VERIFIERS: readonly string[] = ["todo:report"];
 
 export interface Authority {
   auto_edit_worktree: boolean;
@@ -224,13 +242,42 @@ export function validatePackageContent(pkg: Partial<TaskPackage>): ValidationIss
     issues.push({ field: "step_id", message: "step_id is required", severity: "error" });
   }
 
-  // Scope validation
+  // Scope validation — policy dichotomy (待办租户 G3 §4.3):
+  //   workspace-write / legacy read-only: existing rules (allowed_paths
+  //     required, max_changed_files ≥ 1)
+  //   STRICT read-only (sandbox=read-only AND authority edit/commit false AND
+  //     max_changed_files 0): NO write rights at all — allowed/create paths
+  //     must be empty, read_paths required
+  const isStrictReadOnly =
+    pkg.executor?.sandbox === "read-only" &&
+    pkg.authority != null &&
+    !pkg.authority.auto_edit_worktree &&
+    !pkg.authority.auto_commit_candidate &&
+    !pkg.authority.auto_merge &&
+    !pkg.authority.auto_push &&
+    !pkg.authority.auto_deploy &&
+    pkg.scope?.max_changed_files === 0;
   if (pkg.scope) {
-    if (pkg.scope.allowed_paths.length === 0) {
-      issues.push({ field: "scope.allowed_paths", message: "at least one allowed path is required", severity: "error" });
-    }
-    if (pkg.scope.max_changed_files < 1) {
-      issues.push({ field: "scope.max_changed_files", message: "must be ≥ 1", severity: "error" });
+    if (isStrictReadOnly) {
+      if ((pkg.scope.allowed_paths?.length ?? 0) > 0) {
+        issues.push({ field: "scope.allowed_paths", message: "read-only policy grants no write rights — allowed_paths must be empty", severity: "error" });
+      }
+      if ((pkg.scope.create_paths?.length ?? 0) > 0) {
+        issues.push({ field: "scope.create_paths", message: "read-only policy grants no creation rights — create_paths must be empty", severity: "error" });
+      }
+      if ((pkg.scope.read_paths?.length ?? 0) === 0) {
+        issues.push({ field: "scope.read_paths", message: "read-only policy requires the approved read scope (read_paths)", severity: "error" });
+      }
+      if (pkg.scope.expected_changed_files !== undefined || pkg.scope.warn_changed_files !== undefined) {
+        issues.push({ field: "scope.expected_changed_files", message: "read-only policy has no change tiers — omit expected/warn counts", severity: "error" });
+      }
+    } else {
+      if (pkg.scope.allowed_paths.length === 0) {
+        issues.push({ field: "scope.allowed_paths", message: "at least one allowed path is required", severity: "error" });
+      }
+      if (pkg.scope.max_changed_files < 1) {
+        issues.push({ field: "scope.max_changed_files", message: "must be ≥ 1", severity: "error" });
+      }
     }
     // S3 (TaskScope v2): repository-wide creation rights are forbidden — a
     // pattern of "**" or starting with "**/" grants create access everywhere
@@ -312,8 +359,12 @@ export function validatePackageContent(pkg: Partial<TaskPackage>): ValidationIss
       if (check.type === "command" && !check.command_id) {
         issues.push({ field: "acceptance.command_id", message: "command checks require a command_id", severity: "error" });
       }
-      if (check.type === "verifier" && !check.verifier_id) {
-        issues.push({ field: "acceptance.verifier_id", message: "verifier checks require a verifier_id", severity: "error" });
+      if (check.type === "verifier") {
+        if (!check.verifier_id) {
+          issues.push({ field: "acceptance.verifier_id", message: "verifier checks require a verifier_id", severity: "error" });
+        } else if (!KNOWN_VERIFIERS.includes(check.verifier_id)) {
+          issues.push({ field: "acceptance.verifier_id", message: `unknown verifier '${check.verifier_id}' — known: ${KNOWN_VERIFIERS.join(", ")}`, severity: "error" });
+        }
       }
     }
   }

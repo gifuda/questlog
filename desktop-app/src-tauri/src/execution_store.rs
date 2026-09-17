@@ -1083,6 +1083,9 @@ pub struct TaskPackageSummary {
     #[serde(default)]
     pub create_paths: Vec<String>,
     pub forbidden_paths: Vec<String>,
+    /// 待办租户 G3: approved read scope (strict read-only packages only).
+    #[serde(default)]
+    pub read_paths: Vec<String>,
     pub max_changed_files: u32,
     #[serde(default)]
     pub expected_changed_files: Option<u32>,
@@ -1098,7 +1101,14 @@ pub struct TaskPackageSummary {
     #[serde(default)]
     pub max_attempts: u32,
     pub acceptance_command_ids: Vec<String>,
+    /// 待办租户 G3: native verifier entries from acceptance.
+    #[serde(default)]
+    pub acceptance_verifier_ids: Vec<String>,
     pub preconditions: Vec<PackagePrecondition>,
+    /// G3 audit B1: strict read-only classification requires the authority
+    /// object to have been explicitly present in the package JSON.
+    #[serde(default)]
+    pub authority_present: bool,
     pub auto_edit_worktree: bool,
     pub auto_commit_candidate: bool,
     pub auto_merge: bool,
@@ -1148,8 +1158,12 @@ pub struct RawTaskPackage {
     pub acceptance: Vec<RawAcceptance>,
     #[serde(default)]
     pub preconditions: Vec<RawPrecondition>,
+    /// Authority must be EXPLICITLY present: an absent authority object is
+    /// not "all false" (that would misclassify a hand-edited package as
+    /// strict read-only — G3 audit B1). Absent ⇒ authority_present=false ⇒
+    /// the package can never classify as strict read-only.
     #[serde(default)]
-    pub authority: RawAuthority,
+    pub authority: Option<RawAuthority>,
     #[serde(default)]
     pub status: String,
     pub package_hash: String,
@@ -1186,6 +1200,10 @@ pub struct RawScope {
     pub create_paths: Vec<String>,
     #[serde(default)]
     pub forbidden_paths: Vec<String>,
+    /// 待办租户 G3: approved READ scope for strict read-only packages — a
+    /// separate grant that never implies any write right.
+    #[serde(default)]
+    pub read_paths: Vec<String>,
     #[serde(default)]
     pub max_changed_files: u32,
     #[serde(default)]
@@ -1247,7 +1265,27 @@ pub struct RawAcceptance {
     #[serde(rename = "type")]
     pub kind: String,
     pub command_id: Option<String>,
-    // verifier_id ignored by Runner for now
+    /// 待办租户 G3: native verifier acceptance entry (e.g. "todo:report").
+    #[serde(default)]
+    pub verifier_id: Option<String>,
+}
+
+impl TaskPackageSummary {
+    /// 待办租户 G3 (§4.3): the STRICT read-only policy — every write right is
+    /// false and the change breaker is 0. Read scope is granted solely by
+    /// `read_paths`. Legacy read-only packages (default authority + max ≥ 1,
+    /// the existing read-only report contract) are NOT strict and keep their
+    /// own policy.
+    pub fn is_strict_read_only(&self) -> bool {
+        self.authority_present
+            && self.sandbox == "read-only"
+            && !self.auto_edit_worktree
+            && !self.auto_commit_candidate
+            && !self.auto_merge
+            && !self.auto_push
+            && !self.auto_deploy
+            && self.max_changed_files == 0
+    }
 }
 
 impl From<RawTaskPackage> for TaskPackageSummary {
@@ -1268,6 +1306,7 @@ impl From<RawTaskPackage> for TaskPackageSummary {
             allowed_paths: raw.scope.allowed_paths,
             create_paths: raw.scope.create_paths,
             forbidden_paths: raw.scope.forbidden_paths,
+            read_paths: raw.scope.read_paths,
             max_changed_files: raw.scope.max_changed_files,
             expected_changed_files: raw.scope.expected_changed_files,
             warn_changed_files: raw.scope.warn_changed_files,
@@ -1278,9 +1317,15 @@ impl From<RawTaskPackage> for TaskPackageSummary {
             max_attempts: raw.executor.max_attempts,
             acceptance_command_ids: raw
                 .acceptance
-                .into_iter()
+                .iter()
                 .filter(|a| a.kind == "command")
-                .filter_map(|a| a.command_id)
+                .filter_map(|a| a.command_id.clone())
+                .collect(),
+            acceptance_verifier_ids: raw
+                .acceptance
+                .iter()
+                .filter(|a| a.kind == "verifier")
+                .filter_map(|a| a.verifier_id.clone())
                 .collect(),
             preconditions: raw
                 .preconditions
@@ -1292,11 +1337,12 @@ impl From<RawTaskPackage> for TaskPackageSummary {
                     value: precondition.value,
                 })
                 .collect(),
-            auto_edit_worktree: raw.authority.auto_edit_worktree,
-            auto_commit_candidate: raw.authority.auto_commit_candidate,
-            auto_merge: raw.authority.auto_merge,
-            auto_push: raw.authority.auto_push,
-            auto_deploy: raw.authority.auto_deploy,
+            authority_present: raw.authority.is_some(),
+            auto_edit_worktree: raw.authority.as_ref().map(|a| a.auto_edit_worktree).unwrap_or(false),
+            auto_commit_candidate: raw.authority.as_ref().map(|a| a.auto_commit_candidate).unwrap_or(false),
+            auto_merge: raw.authority.as_ref().map(|a| a.auto_merge).unwrap_or(false),
+            auto_push: raw.authority.as_ref().map(|a| a.auto_push).unwrap_or(false),
+            auto_deploy: raw.authority.as_ref().map(|a| a.auto_deploy).unwrap_or(false),
             sealed_at: raw.sealed_at,
             status: raw.status,
             package_hash: raw.package_hash,
@@ -2355,5 +2401,87 @@ mod tests {
         assert!(parsed.origin.is_none());
         let summary: TaskPackageSummary = parsed.into();
         assert!(summary.origin_kind.is_none());
+    }
+
+    /// 待办租户 G3: the STRICT read-only shape parses and projects — read
+    /// scope granted by read_paths alone, verifier acceptance entries
+    /// surface in the summary, and is_strict_read_only() recognizes it.
+    #[test]
+    fn strict_read_only_package_parses_and_projects() {
+        let raw = serde_json::json!({
+            "package_id": "pkg_ro",
+            "epic_id": "e",
+            "step_id": "s",
+            "plan_revision": 1,
+            "origin": {"type": "todo", "tenant_id": "t", "todo_id": "d", "task_revision": "r", "consent_revision": 1, "task_key": "k"},
+            "project_path": "/tmp/p",
+            "repo_root": "/tmp/p",
+            "base_sha": "beef",
+            "objective": "研究",
+            "scope": {"allowed_paths": [], "forbidden_paths": [], "read_paths": ["**"], "max_changed_files": 0},
+            "executor": {"preferred": "manual", "fallbacks": [], "sandbox": "read-only", "timeout_seconds": 900, "max_attempts": 1},
+            "acceptance": [
+                {"type": "command", "command_id": "verify:readonly"},
+                {"type": "verifier", "verifier_id": "todo:report"}
+            ],
+            "authority": {"auto_edit_worktree": false, "auto_commit_candidate": false, "auto_merge": false, "auto_push": false, "auto_deploy": false},
+            "status": "sealed",
+            "package_hash": "h"
+        });
+        let parsed: RawTaskPackage = serde_json::from_value(raw).unwrap();
+        let summary: TaskPackageSummary = parsed.into();
+        assert!(summary.is_strict_read_only());
+        assert_eq!(summary.read_paths, vec!["**".to_string()]);
+        assert!(summary.allowed_paths.is_empty());
+        assert_eq!(summary.max_changed_files, 0);
+        assert_eq!(summary.acceptance_command_ids, vec!["verify:readonly".to_string()]);
+        assert_eq!(summary.acceptance_verifier_ids, vec!["todo:report".to_string()]);
+        assert!(!summary.auto_edit_worktree && !summary.auto_commit_candidate);
+    }
+
+    /// Legacy read-only (default authority + max ≥ 1, the existing read-only
+    /// report contract) is NOT strict — regression guard for S6 chains.
+    #[test]
+    fn legacy_read_only_shape_is_not_strict() {
+        let summary = TaskPackageSummary {
+            package_id: "p".into(),
+            epic_id: "e".into(),
+            step_id: "s".into(),
+            plan_revision: 1,
+            project_path: "/p".into(),
+            repo_root: "/p".into(),
+            base_sha: "b".into(),
+            objective: "o".into(),
+            display_no: None,
+            origin_kind: None,
+            origin_todo_id: None,
+            origin_task_key: None,
+            allowed_paths: vec!["docs/**".into()],
+            create_paths: vec![],
+            forbidden_paths: vec![],
+            read_paths: vec![],
+            max_changed_files: 1,
+            expected_changed_files: None,
+            warn_changed_files: None,
+            executor_preferred: "zcode".into(),
+            executor_fallbacks: vec![],
+            sandbox: "read-only".into(),
+            timeout_seconds: 900,
+            max_attempts: 2,
+            acceptance_command_ids: vec!["verify:readonly".into()],
+            acceptance_verifier_ids: vec![],
+            preconditions: vec![],
+            authority_present: true,
+            auto_edit_worktree: true,
+            auto_commit_candidate: true,
+            auto_merge: false,
+            auto_push: false,
+            auto_deploy: false,
+            package_hash: "h".into(),
+            computed_hash: "h".into(),
+            status: "sealed".into(),
+            sealed_at: "t".into(),
+        };
+        assert!(!summary.is_strict_read_only());
     }
 }
