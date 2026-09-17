@@ -1,0 +1,33 @@
+{
+  "task_id": "questlog-<task_key前40位>",
+  "tenant": "questlog",
+  "task_type": "todo_research",
+  "executor": { "kind": "python", "name": "questlog-research" },
+  "inputs": [
+    { "logical_uri": "questlog://delivery/<task_key>", "sha256": null },
+    { "logical_uri": "questlog://snapshot/<sanitized_repo>", "sha256": "<base_sha>" }
+  ],
+  "outputs": [
+    { "logical_uri": "questlog://report/<task_key>", "content_type": "text/markdown" }
+  ],
+  "parameters": {
+    "script": "/Users/Shared/CollectorPlatform/current/scripts/questlog_research.py",
+    "args": [
+      "/Users/Shared/CollectorData/tenants/questlog/reports/<task_key>.delivery.json",
+      "/Users/Shared/CollectorData/tenants/questlog/repos/<sanitized_repo>/<sha12>",
+      "/Users/Shared/CollectorData/tenants/questlog/reports"
+    ]
+  },
+  "resource_budget": {
+    "max_wall_seconds": 900,
+    "max_cpu_seconds": null,
+    "max_memory_mb": null,
+    "max_disk_mb": null,
+    "max_output_bytes": 2097152
+  },
+  "retry_policy": { "max_attempts": 1, "backoff_seconds": 5, "backoff_multiplier": 1.0 },
+  "idempotency_key": "<task_key 64hex>",
+  "side_effect_class": "read_only",
+  "approval": { "required": false, "approver": null, "rationale": null },
+  "acceptance": { "kind": "exit_code_zero", "expect": null }
+}
