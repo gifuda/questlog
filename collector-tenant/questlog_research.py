@@ -71,6 +71,51 @@ def run_stub(task_key: str, report_file: Path) -> None:
     write_report(STUB_REPORT.format(task_key=task_key), task_key, report_file)
 
 
+def provision_model_config(repo_dir: str, model: str, thinking: str | None) -> None:
+    """项目级 .zcode/config.json 注入（manager Runner 已验证手法）：
+    - 必须携带完整 provider 定义（项目配置不合并全局 provider 表，纯
+      model 字符串会 "provider is missing baseURL"）——从 ~/.zcode/cli/
+      config.json 逐字复制对应 provider 条目
+    - thinking 归一化：model def 的 providerOptionsByLevel 每档参数都改写
+      为所选档的参数（与 manager runner_git.rs 同语义）
+    - .git/info/exclude 隐身：不污染快照的 git status（changes_detected
+      判定保持干净）
+    失败不致命：打日志回退 CLI 默认模型。"""
+    import shutil
+    home_cfg = Path.home() / ".zcode" / "cli" / "config.json"
+    try:
+        import json as _json
+        global_cfg = _json.loads(home_cfg.read_text(encoding="utf-8"))
+        provider_name = model.split("/", 1)[0]
+        providers = global_cfg.get("provider") or {}
+        prov_def = providers.get(provider_name)
+        if not prov_def:
+            print(f"[questlog-research] provider {provider_name!r} not in global config; using default model", file=sys.stderr)
+            return
+        proj: dict = {"provider": {provider_name: prov_def}, "model": {"main": model}}
+        if thinking:
+            models = prov_def.get("models")
+            model_id = model.split("/", 1)[1] if "/" in model else model
+            povl = (prov_def.get("options") or {}).get("providerOptionsByLevel") if isinstance(prov_def, dict) else None
+            # providerOptionsByLevel 的位置按 zcode 配置惯例在 provider.options
+            if isinstance(povl, dict) and thinking in povl:
+                normalized = {k: povl[thinking] for k in povl}
+                prov_def.setdefault("options", {})["providerOptionsByLevel"] = normalized
+        zdir = Path(repo_dir) / ".zcode"
+        zdir.mkdir(parents=True, exist_ok=True)
+        (zdir / "config.json").write_text(_json.dumps(proj, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 隐身：git status 不显示注入文件（只写 .git/info/exclude，不动工作树）
+        git_info = Path(repo_dir) / ".git" / "info"
+        git_info.mkdir(parents=True, exist_ok=True)
+        excl = git_info / "exclude"
+        marker = ".zcode/"
+        existing = excl.read_text() if excl.exists() else ""
+        if marker not in existing:
+            excl.write_text(existing + "\n" + marker + "\n")
+    except Exception as e:  # noqa: BLE001 — 注入失败回退默认，不挡任务
+        print(f"[questlog-research] model config injection skipped: {e}", file=sys.stderr)
+
+
 def run_zcode(zcode_bin: str, prompt: str, repo_dir: str, task_key: str, report_file: Path, timeout_secs: int = 840) -> int:
     # 探针：CLI 必须可用（只读 --version）
     probe = subprocess.run([zcode_bin, "--version"], capture_output=True, text=True, check=False)
@@ -134,6 +179,10 @@ def main(argv: list[str]) -> int:
         print("zcode unavailable (tenants/questlog/zcode.bin) and stub mode off", file=sys.stderr)
         return 5
 
+    model_pref = str(msg.get("model") or "")
+    thinking_pref = str(msg.get("thinking") or "") or None
+    if model_pref:
+        provision_model_config(repo_dir, model_pref, thinking_pref)
     prompt = ENVELOPE.format(objective=str(msg.get("objective", "")), task_key=task_key)
     # Inner timeout tracks the task's own budget (delivery timeout_seconds),
     # leaving 60s of headroom for report writing — the platform's wall-clock

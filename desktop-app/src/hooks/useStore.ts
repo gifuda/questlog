@@ -96,7 +96,22 @@ export async function updateItem(
   id: string,
   patch: { status?: ItemStatus; content?: string; tags?: string[]; priority?: string; title?: string; type?: string; processing?: boolean; auto_process?: boolean }
 ) {
-  await invoke("update_todo", { projectPath, id, ...patch });
+  // Tauri maps camelCase JS args to snake_case Rust params — patch keys
+  // must be translated explicitly (auto_process → autoProcess; a bare
+  // spread silently no-ops, which is exactly the "clicked but nothing
+  // happened" bug on the nightly toggle).
+  await invoke("update_todo", {
+    projectPath,
+    id,
+    status: patch.status,
+    content: patch.content,
+    tags: patch.tags,
+    priority: patch.priority,
+    title: patch.title,
+    itemType: patch.type,
+    processing: patch.processing,
+    autoProcess: patch.auto_process,
+  });
 }
 
 export async function addItem(

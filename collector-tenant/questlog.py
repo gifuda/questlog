@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+SAFE_HINT = re.compile(r"^[A-Za-z0-9/._-]{1,80}$")
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 # 平台租户恒为 questlog（TaskSpec.tenant）；投递消息里的 tenant_id 是经理机
 # 项目名（信息性字段，进 receipt 取证），不参与平台租户判定。
@@ -62,6 +63,11 @@ def validate_delivery(msg: dict) -> dict:
         raise DeliveryError("objective is empty")
     if len(objective.encode("utf-8")) > MAX_OBJECTIVE_BYTES:
         raise DeliveryError(f"objective exceeds {MAX_OBJECTIVE_BYTES} bytes")
+    # 可选全局偏好：模型（provider/model）与思考档——白名单字符防注入
+    for field in ("model", "thinking"):
+        if field in msg and msg[field] is not None:
+            if not SAFE_HINT.match(str(msg[field])):
+                raise DeliveryError(f"{field} must match [A-Za-z0-9/._-] (≤80)")
     try:
         timeout = int(msg["timeout_seconds"])
     except (TypeError, ValueError):

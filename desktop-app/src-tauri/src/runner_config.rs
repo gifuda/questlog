@@ -67,6 +67,17 @@ pub struct TodoSchedule {
     /// authorization either way.
     #[serde(default)]
     pub projects: Option<Vec<String>>,
+    /// GLOBAL nightly-execution model preference ("provider/model", e.g.
+    /// "bigmodel/GLM-5.3-Flash"). Absent = the collector zcode default.
+    /// Injected per-task via a project-level .zcode/config.json in the
+    /// snapshot (zero global mutation, no cross-task races).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// GLOBAL nightly thinking-level preference (e.g. "high" | "max" |
+    /// "off"). Absent = CLI default. Applied by normalizing every
+    /// providerOptionsByLevel entry to the chosen level's params.
+    #[serde(default)]
+    pub thinking: Option<String>,
 }
 
 fn default_start() -> u32 {

@@ -347,7 +347,13 @@ pub fn sweep_once(
             }
             match produce(&path.to_string_lossy(), &item.id) {
                 ProduceOutcome::Produced { task_key, package_id } => {
-                    if let Err(e) = write_outbox_message(&task_key, &package_id) {
+                    let prefs = cfg
+                        .model
+                        .as_deref()
+                        .zip(cfg.thinking.as_deref().or(Some("")))
+                        .map(|(m, t)| (m.to_string(), t.to_string()));
+                    let prefs_ref = prefs.as_ref().map(|(m, t)| (m.as_str(), t.as_str()));
+                    if let Err(e) = write_outbox_message(&task_key, &package_id, prefs_ref) {
                         errors.push(format!("tenant {name}: outbox write failed: {e}"));
                         continue;
                     }
@@ -390,7 +396,11 @@ pub fn sweep_once(
 /// Delivery message for the collector-side tenant adapter (GX). Idempotent:
 /// named by task_key — rewriting the same key is a no-op unless the content
 /// differs (which would indicate a bug — logged).
-pub fn write_outbox_message(task_key: &str, package_id: &str) -> Result<(), String> {
+pub fn write_outbox_message(
+    task_key: &str,
+    package_id: &str,
+    prefs: Option<(&str, &str)>,
+) -> Result<(), String> {
     let dir = outbox_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir outbox: {e}"))?;
     let path = dir.join(format!("{task_key}.json"));
@@ -399,7 +409,7 @@ pub fn write_outbox_message(task_key: &str, package_id: &str) -> Result<(), Stri
     }
     // Pull the delivery-facing fields from the sealed package (packages.json).
     let pkg = find_package(package_id)?;
-    let msg = serde_json::json!({
+    let mut msg = serde_json::json!({
         "version": 1,
         "task_key": task_key,
         "tenant_id": pkg.get("origin").and_then(|o| o.get("tenant_id")).and_then(|v| v.as_str()).unwrap_or(""),
@@ -415,6 +425,14 @@ pub fn write_outbox_message(task_key: &str, package_id: &str) -> Result<(), Stri
         "timeout_seconds": pkg.get("executor").and_then(|e| e.get("timeout_seconds")).and_then(|v| v.as_u64()).unwrap_or(900),
         "created_at": Utc::now().to_rfc3339(),
     });
+    if let Some((m, t)) = prefs {
+        if !m.is_empty() {
+            msg["model"] = serde_json::json!(m);
+        }
+        if !t.is_empty() {
+            msg["thinking"] = serde_json::json!(t);
+        }
+    }
     let tmp = dir.join(format!("{task_key}.tmp-{}", uuid::Uuid::new_v4()));
     std::fs::write(&tmp, serde_json::to_string_pretty(&msg).map_err(|e| e.to_string())?)
         .map_err(|e| format!("write outbox: {e}"))?;
@@ -456,6 +474,8 @@ mod tests {
             producer_cli: "/nonexistent".into(),
             verify_cli: "/nonexistent".into(),
             projects: None,
+            model: None,
+            thinking: None,
         }
     }
 
@@ -627,8 +647,8 @@ mod tests {
         assert_eq!(round2.outcome, "ran");
         // Outbox idempotency (task_key named file): replaying the same key
         // must not duplicate; other keys' files are separate deliveries.
-        write_outbox_message("k_a1", "pkg_a1").unwrap();
-        write_outbox_message("k_a1", "pkg_a1").unwrap();
+        write_outbox_message("k_a1", "pkg_a1", None).unwrap();
+        write_outbox_message("k_a1", "pkg_a1", None).unwrap();
         let count = std::fs::read_dir(outbox_dir())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -736,7 +756,16 @@ pub fn recover_preparing_entries() -> Result<usize, String> {
             Ok(())
         })?;
         if sealed {
-            let _ = write_outbox_message(&entry.task_key, &entry.package_id);
+            let cfg = crate::runner_config::get_todo_schedule();
+            let prefs = cfg
+                .as_ref()
+                .and_then(|c| c.model.as_deref().zip(c.thinking.as_deref().or(Some(""))))
+                .map(|(m, t)| (m.to_string(), t.to_string()));
+            let _ = write_outbox_message(
+                &entry.task_key,
+                &entry.package_id,
+                prefs.as_ref().map(|(m, t)| (m.as_str(), t.as_str())),
+            );
         }
         recovered += 1;
     }
