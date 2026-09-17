@@ -35,3 +35,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# python cache (tenant submission package)
+collector-tenant/__pycache__/
