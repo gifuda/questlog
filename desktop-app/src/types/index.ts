@@ -43,6 +43,8 @@ export interface TodoItem {
   auto_result?: AutoResult;
   /** Written only when a CAS write-back completed active→completed. */
   auto_completed_at?: string;
+  /** User confirmation of a nightly-completed result (review gate). */
+  auto_ack_at?: string;
   created_at: string;
   updated_at: string;
 }

@@ -94,7 +94,7 @@ export function useTodos(projectPath: string | null) {
 export async function updateItem(
   projectPath: string,
   id: string,
-  patch: { status?: ItemStatus; content?: string; tags?: string[]; priority?: string; title?: string; type?: string; processing?: boolean; auto_process?: boolean }
+  patch: { status?: ItemStatus; content?: string; tags?: string[]; priority?: string; title?: string; type?: string; processing?: boolean; auto_process?: boolean; auto_ack?: boolean }
 ) {
   // Tauri maps camelCase JS args to snake_case Rust params — patch keys
   // must be translated explicitly (auto_process → autoProcess; a bare
@@ -111,6 +111,7 @@ export async function updateItem(
     itemType: patch.type,
     processing: patch.processing,
     autoProcess: patch.auto_process,
+    autoAck: patch.auto_ack,
   });
 }
 

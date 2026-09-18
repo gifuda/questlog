@@ -36,7 +36,10 @@
     "titlePlaceholder": "标题",
     "detailPlaceholder": "详细内容（可选）",
     "cancel": "取消",
-    "empty": "暂无条目"
+    "empty": "暂无条目",
+    "nightlyReview": "🌙 夜间完成·待确认",
+    "ackNightly": "确认归档",
+    "ackNightlyTitle": "确认夜间处理结果没问题，归入普通完成区（与手动完成并列）"
   },
   "card": {
     "itemTypeKnowhow": "经验",

@@ -139,6 +139,7 @@ pub fn update_todo(
     item_type: Option<String>,
     processing: Option<bool>,
     auto_process: Option<bool>,
+    auto_ack: Option<bool>,
 ) -> Result<(), String> {
     let path = validate_project_path(&project_path, &state)?;
     let mut archived_quickly = false;
@@ -190,6 +191,12 @@ pub fn update_todo(
         }
         // 夜间自动处理开关（待办租户 §2.2）：off→on 递增授权修订——旧结果
         // 永不跨修订复用；开在非 todo 类型上直接拒绝（fail-closed）。
+        // 夜间完成确认（review gate）：确认后卡片进入普通完成区
+        if let Some(ack) = auto_ack {
+            if ack {
+                typed.auto_ack_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+        }
         if let Some(ap) = auto_process {
             if ap && typed.item_type != ItemType::Todo {
                 return Err("auto_process opt-in is only valid for type='todo' items".into());
@@ -262,6 +269,7 @@ pub fn add_todo(
         auto_process_revision: 0,
         auto_result: None,
         auto_completed_at: None,
+        auto_ack_at: None,
         created_at: now.clone(),
         updated_at: now,
     };

@@ -36,7 +36,10 @@
     "titlePlaceholder": "Title",
     "detailPlaceholder": "Details (optional)",
     "cancel": "Cancel",
-    "empty": "No items"
+    "empty": "No items",
+    "nightlyReview": "🌙 Nightly done·review",
+    "ackNightly": "Acknowledge",
+    "ackNightlyTitle": "Confirm the nightly result is good and move it into the regular done area"
   },
   "card": {
     "itemTypeKnowhow": "Know-how",

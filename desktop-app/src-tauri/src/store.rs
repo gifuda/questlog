@@ -293,6 +293,7 @@ mod tests {
             auto_process_revision: 0,
             auto_result: None,
             auto_completed_at: None,
+            auto_ack_at: None,
             created_at: "2026".into(),
             updated_at: "2026".into(),
         }

@@ -136,6 +136,11 @@ pub struct TodoItem {
     /// Written only when a CAS write-back actually completed active→completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_completed_at: Option<String>,
+    /// User confirmation of a nightly-completed result (the review gate:
+    /// auto-completed cards wait in a dedicated holding section until the
+    /// user acknowledges, then join the regular done area).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_ack_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -510,6 +515,7 @@ mod tests {
             auto_process_revision: 0,
             auto_result: None,
             auto_completed_at: None,
+            auto_ack_at: None,
             created_at: "2026".into(),
             updated_at: "2026".into(),
         };
