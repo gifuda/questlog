@@ -555,6 +555,14 @@ export async function updateAndSave(
   id: string,
   patch: Partial<Pick<TodoItem, "status" | "content" | "tags" | "priority" | "title" | "processing" | "auto_process" | "auto_process_revision">>
 ): Promise<{ ok: true } | { error: string }> {
+  // 2026-09-23 注入防护（纵深）：字段长度硬上限——schema 层之外再拦一层，
+  // 防拼接载荷经任何调用路径入库（事件存证 ~/.zcode/ymos-evidence-backup/injection-20260923/）。
+  if (patch.title !== undefined && patch.title.length > 300)
+    return { error: `title too long (${patch.title.length} > 300 chars) — rejected` };
+  if (patch.content !== undefined && patch.content.length > 20000)
+    return { error: `content too long (${patch.content.length} > 20000 chars) — rejected` };
+  if (patch.tags !== undefined && (patch.tags.length > 12 || patch.tags.some((t) => t.length > 64)))
+    return { error: "tags invalid (max 12 tags, 64 chars each) — rejected" };
   const filePath = resolveTodoPath(cwd);
   return withFileLock(
     filePath,

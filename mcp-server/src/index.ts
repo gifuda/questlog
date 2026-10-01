@@ -116,10 +116,10 @@ server.tool(
   ].join("\n"),
   {
     type: z.enum(["knowhow", "todo", "idea"]).describe("Item type"),
-    title: z.string().describe("Pure content summary. No prefixes, no dates, no emoji. ≤40 chars."),
-    content: z.string().optional().describe("Full context and details for future reference"),
-    suggestion: z.string().optional().describe("One concrete next action step"),
-    tags: z.array(z.string()).optional().describe("2-4 lowercase noun tags for grouping"),
+    title: z.string().max(300).describe("Pure content summary. No prefixes, no dates, no emoji. ≤40 chars."),
+    content: z.string().max(20000).optional().describe("Full context and details for future reference"),
+    suggestion: z.string().max(2000).optional().describe("One concrete next action step"),
+    tags: z.array(z.string().max(64)).max(12).optional().describe("2-4 lowercase noun tags for grouping"),
     priority: z.enum(["high", "medium", "low"]).optional().describe("Priority — only meaningful for todo type"),
     auto_process: z.boolean().optional().describe(
       "Opt-in for nightly auto-processing by the collector (只读研究类). Set true ONLY when the user explicitly asked for 自动处理/夜间处理 and the item is a research-style todo (调查/盘点/分析 with verifiable report). Never set it on your own initiative.",
@@ -275,12 +275,12 @@ server.tool(
     "knowhow: active → archived | todo: active → completed → archived | idea: active → converted → archived",
   ].join("\n"),
   {
-    id: z.string().describe("Item ID"),
+    id: z.string().max(100).describe("Item ID"),
     status: z.enum(["active", "completed", "archived", "converted"]).optional().describe("New status"),
-    content: z.string().optional().describe("Updated content"),
-    tags: z.array(z.string()).optional().describe("Updated tags"),
-    priority: z.enum(["high", "medium", "low"]).optional().describe("Updated priority"),
-    title: z.string().optional().describe("Updated title"),
+    content: z.string().max(20000).optional().describe("Updated content"),
+    tags: z.array(z.string().max(64)).max(12).optional().describe("Updated tags"),
+    priority: z.enum(["high", "medium", "low"]).optional().describe("New priority"),
+    title: z.string().max(300).optional().describe("Updated title"),
     processing: z.boolean().optional().describe("Mark the item as being processed (true when you start working on it)"),
     auto_process: z.boolean().optional().describe(
       "Nightly auto-process opt-in toggle (todo items only). Turning it on requires the user's explicit request; each off→on transition starts a fresh authorization revision.",
