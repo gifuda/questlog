@@ -8,7 +8,6 @@ import type {
   ArbOutcome,
   ArbControl,
   ArbLead,
-  ArbBrief,
   ArbDecisionItem,
 } from "../types/arb";
 
@@ -95,11 +94,12 @@ export default function ArbBoard() {
         <span className="text-faint ml-auto">{t("arb.readOnlyHint")}</span>
       </div>
 
+      {/* 决策处置区（契约 v4）——本页第一行动区，紧跟汇总条。
+          晨报概要已并入晨报页（D2），这里只留处置。 */}
+      <DecisionsSection decisions={data.decisions} />
+
       {/* 自动化控制条（契约 v3 B 控制区；GROS-01 增量 #2 未落地时置灰） */}
       <ControlBar control={data.control} />
-
-      {/* 晨报卡片（契约 v4；GROS 侧 brief/decisions 段未产出时置灰等待） */}
-      <BriefingSection brief={data.brief} decisions={data.decisions} />
 
       {/* 过滤 + 排序 */}
       <div className="px-4 py-2 border-b border-line flex items-center gap-2">
@@ -587,90 +587,42 @@ function LeadCard({ lead }: { lead: ArbLead }) {
 }
 
 // ══════════════════════════════════════════════
-// BriefingSection — 晨报卡片（契约 v4，2026-10-08）
-// brief 段（概要 + 当日机会橱窗）+ decisions 段（D# 决策清单，点击处置）。
+// DecisionsSection — 决策处置区（契约 v4，2026-10-08；2026-10-08 从晨报卡拆出）
+// 晨报概要已并入晨报页（D2），本页只承担处置。D# 决策清单，点击处置。
 // 处置 = 本地执行 GROS 预生成的 cmd 草稿（app 不组装命令），白名单硬约束
 // 在 Rust 侧 run_arb_decision 统一把守（唯一执行口）。写走薄壳（账房留痕），
 // 读走下一轮 board.json 导出——已处置项自然消失，与控制区同一单向双通道。
-// 降级铁律：brief/decisions 两段都 undefined（契约 v4 前旧数据）→ 整卡置灰
-// 「等待 GROS 侧数据」；字段级 null 一律渲染 "—"，绝不崩溃。
+// 降级：decisions undefined（契约 v4 前旧数据）→ 置灰「等待 GROS 侧数据」；
+// 空数组 = 今日无决策，整区不渲染。
 // ══════════════════════════════════════════════
-function BriefingSection({ brief, decisions }: { brief?: ArbBrief; decisions?: ArbDecisionItem[] }) {
+function DecisionsSection({ decisions }: { decisions?: ArbDecisionItem[] }) {
   const { t } = useTranslation();
 
-  if (brief === undefined && decisions === undefined) {
-    // 旧数据（GROS 侧晨报段未产出）→ 按约定整卡置灰
+  if (decisions === undefined) {
     return (
-      <div className="px-4 py-1.5 border-b border-line/50 text-[10px] text-faint/70 flex items-center gap-2 shrink-0">
-        <span>📰 {t("arb.briefTitle")}</span>
+      <div className="px-4 py-1.5 border-b border-line/50 text-[11px] text-faint/70 flex items-center gap-2 shrink-0">
+        <span>☑ {t("arb.decisionsTitle")}</span>
         <span className="px-1.5 py-px rounded bg-elevated text-faint/70">{t("arb.briefWaiting")}</span>
       </div>
     );
   }
-
-  // 字段级 null 容忍：数组非数组一律按空处理（外部导出不可信）
-  const opps = Array.isArray(brief?.opportunities) ? brief!.opportunities! : [];
   const items = Array.isArray(decisions) ? decisions : [];
+  if (items.length === 0) return null;
 
   return (
-    // 自带滚动上限：晨报+决策再多也不挤占下方卡片列表的滚动空间。
-    <div className="px-3 pt-2.5 pb-2 border-b border-line/50 shrink-0 flex flex-col gap-2 max-h-[45%] overflow-y-auto">
-      {/* brief 段：概要一行 + 当日机会橱窗 */}
-      <div>
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-[11px] font-medium text-heading">📰 {t("arb.briefTitle")}</span>
-          {brief?.brief_date && (
-            <span className="text-[10px] text-faint" title={t("arb.briefDate")}>
-              {brief.brief_date}
-            </span>
-          )}
-          <span className="text-[11px] text-faint/70 ml-auto shrink-0">{t("arb.briefHint")}</span>
-        </div>
-        {brief?.headline && (
-          <div className="text-[11px] text-body truncate mb-1" title={brief.headline}>
-            {brief.headline}
-          </div>
-        )}
-        {opps.length > 0 && (
-          <div className="flex flex-col gap-1">
-            {opps.map((o, i) => (
-              <div key={i} className="flex items-center gap-1.5 min-w-0">
-                <Badge tone={leadPriorityTone(o.priority)} className="shrink-0">
-                  {o.priority ?? "?"}
-                </Badge>
-                <span className="text-[11px] text-body truncate min-w-0" title={o.title ?? ""}>
-                  {o.title ?? "—"}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+    <div className="px-3 pt-2.5 pb-2 border-b border-line/50 shrink-0">
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="text-[13px] font-medium text-heading">☑ {t("arb.decisionsTitle")}</span>
+        <span className="text-[11px] text-faint tabular-nums">{items.length}</span>
+        <span className="text-[11px] text-faint/70 ml-auto shrink-0">{t("arb.decisionHint")}</span>
       </div>
-
-      {/* decisions 段：D# 决策清单（cmd 非空的项才有按钮） */}
-      {items.length > 0 && (
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[11px] font-medium text-heading">☑ {t("arb.decisionsTitle")}</span>
-            <span className="text-[10px] text-faint">{items.length}</span>
-            <span className="text-[11px] text-faint/70 ml-auto shrink-0">{t("arb.decisionHint")}</span>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            {items.map((d, i) => (
-              <DecisionRow key={d.id ?? `idx-${i}`} item={d} />
-            ))}
-          </div>
-        </div>
-      )}
+      <div className="flex flex-col gap-1.5">
+        {items.map((d, i) => (
+          <DecisionRow key={d.id ?? `idx-${i}`} item={d} />
+        ))}
+      </div>
     </div>
   );
-}
-
-/** 优先级徽章 tone：兼容中文"高/中/低"与契约初稿英文枚举（同 LeadCard）。 */
-function leadPriorityTone(p: string | null | undefined): "danger" | "amber" | "muted" {
-  if (p === "high" || p === "高") return "danger";
-  if (p === "medium" || p === "中") return "amber";
-  return "muted";
 }
 
 /** 截止临期判定：今天起 3 天内（含已逾期）→ true；日期缺失/不可解析 → false。 */
@@ -753,7 +705,7 @@ function DecisionRow({ item: d }: { item: ArbDecisionItem }) {
           <>
             {canApprove && (
               <button
-                className="text-[10px] px-2 py-0.5 rounded bg-success/15 text-success hover:bg-success/25 disabled:opacity-40 shrink-0"
+                className="text-[11px] px-2.5 py-1 rounded bg-success/15 text-success hover:bg-success/25 disabled:opacity-40 shrink-0"
                 disabled={busy}
                 onClick={() => run("approve")}
                 title={d.cmd_approve ?? ""}
@@ -763,7 +715,7 @@ function DecisionRow({ item: d }: { item: ArbDecisionItem }) {
             )}
             {canReject && (
               <button
-                className="text-[10px] px-2 py-0.5 rounded bg-danger/15 text-danger hover:bg-danger/25 disabled:opacity-40 shrink-0"
+                className="text-[11px] px-2.5 py-1 rounded bg-danger/15 text-danger hover:bg-danger/25 disabled:opacity-40 shrink-0"
                 disabled={busy}
                 onClick={() => run("reject")}
                 title={d.cmd_reject ?? ""}
