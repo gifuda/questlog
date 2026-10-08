@@ -8,9 +8,9 @@ export const typeIcons: Record<string, string> = {
 };
 
 export const priorityDot: Record<string, string> = {
-  high: "bg-red-500",
-  medium: "bg-yellow-500",
-  low: "bg-gray-500",
+  high: "bg-danger",
+  medium: "bg-amber",
+  low: "bg-faint",
 };
 
 export const typeOrder = ["todo", "knowhow", "idea"] as const;

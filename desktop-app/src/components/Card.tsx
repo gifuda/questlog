@@ -1,21 +1,27 @@
 import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import type { TodoItem } from "../types";
+import type { TodoTaskLink } from "../hooks/useFleetHealth";
 import { updateItem } from "../hooks/useStore";
 import { stripMd, formatDate } from "../utils";
+import { priorityDot } from "../constants";
+import Badge from "./Badge";
+import ConfirmButton from "./ConfirmButton";
 
 interface CardProps {
   item: TodoItem;
   projectPath: string;
   onRefresh: () => void;
   dimmed?: boolean;
+  /** 夜间调度整体是否启用（false = todo_schedule 未配置）。 */
+  scheduleEnabled?: boolean | null;
+  /** 项目是否在夜间调度名单内；false 时 auto 徽章降级为琥珀色警示。 */
+  nightlyScheduled?: boolean | null;
+  /** 该待办的夜间任务链路（存在说明已被产包/执行过）。 */
+  taskLink?: TodoTaskLink;
+  /** 跳转到方案追踪页（查看自动生成的方案/执行记录）。 */
+  onOpenEpics?: () => void;
 }
-
-const priorityColors: Record<string, string> = {
-  high: "bg-red-500",
-  medium: "bg-yellow-500",
-  low: "bg-gray-500",
-};
 
 /** Type label keys shared with the locales; values come from t(). */
 const typeLabelKey: Record<string, string> = {
@@ -30,7 +36,7 @@ const statusLabelKey: Record<string, string> = {
   archived: "card.statusArchived",
 };
 
-export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps) {
+export default function Card({ item, projectPath, onRefresh, dimmed, scheduleEnabled, nightlyScheduled, taskLink, onOpenEpics }: CardProps) {
   const { t, i18n } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -85,10 +91,18 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
     onRefresh();
   }
 
+  const [saving, setSaving] = useState(false);
+
   async function handleSave() {
-    await updateItem(projectPath, item.id, { title: editTitle, content: editContent });
-    setEditing(false);
-    onRefresh();
+    if (saving || !editTitle.trim()) return;
+    setSaving(true);
+    try {
+      await updateItem(projectPath, item.id, { title: editTitle.trim(), content: editContent });
+      setEditing(false);
+      onRefresh();
+    } finally {
+      setSaving(false);
+    }
   }
 
   const moveOptions = [
@@ -118,33 +132,84 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
                 <span className="text-faint mr-1">[{t(statusLabelKey[item.status])}]</span>
               )}
               {!dimmed && item.type === "todo" && item.processing && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-accent-bg text-accent mr-1.5">{t("card.processing")}</span>
+                <Badge tone="accent" className="mr-1.5">{t("card.processing")}</Badge>
               )}
               {!dimmed && item.type === "todo" && item.auto_process && !item.auto_result && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 mr-1.5" title={t("card.autoProcess")}>{t("card.autoProcess")}</span>
+                <Badge
+                  tone={scheduleEnabled === false || nightlyScheduled === false ? "amber" : "info"}
+                  className="mr-1.5"
+                  title={
+                    (scheduleEnabled === false
+                      ? `${t("card.autoNoSchedule")} · `
+                      : nightlyScheduled === false
+                        ? `${t("card.autoNotScheduled")} · `
+                        : "") + t("card.autoBadgeToggle")
+                  }
+                  onClick={() =>
+                    updateItem(projectPath, item.id, { auto_process: false }).then(onRefresh)
+                  }
+                >
+                  {t("card.autoProcess")}
+                </Badge>
               )}
               {!dimmed && item.auto_result && (
-                <span className={`text-[9px] px-1.5 py-0.5 rounded mr-1.5 ${item.status === "completed" && item.auto_completed_at ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"}`}>
+                <Badge
+                  tone={item.status === "completed" && item.auto_completed_at ? "success" : "amber"}
+                  className="mr-1.5"
+                >
                   {t(`card.autoOutcome.${item.auto_result.outcome}`, item.auto_result.outcome)}
-                </span>
+                </Badge>
               )}
               {item.title}
             </h3>
           )}
         </div>
         {item.type === "todo" && !dimmed && (
-          <span className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${priorityColors[item.priority]}`} />
+          <span className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${priorityDot[item.priority]}`} />
         )}
       </div>
+
+      {/* 夜间任务链路：这条待办被产包/执行后的去向，一键跳到方案追踪 */}
+      {taskLink && (
+        <div className="flex items-center gap-1.5 mt-1.5 text-[11px] text-faint">
+          <span>🌙 {t(`card.autoState.${taskLink.state}`, taskLink.state)}</span>
+          {taskLink.outcome && (
+            <span>· {t(`card.autoOutcome.${taskLink.outcome}`, taskLink.outcome)}</span>
+          )}
+          {taskLink.has_epic && onOpenEpics && (
+            <button
+              className="text-accent hover:underline"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenEpics();
+              }}
+            >
+              {t("card.viewPlan")} →
+            </button>
+          )}
+          {/* dimmed（待确认/已完成区）卡片也保留取消入口——授权撤销永远可达 */}
+          {dimmed && item.auto_process && (
+            <button
+              className="text-amber hover:underline"
+              onClick={(e) => {
+                e.stopPropagation();
+                updateItem(projectPath, item.id, { auto_process: false }).then(onRefresh);
+              }}
+            >
+              {t("card.autoCancelShort")}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Tags */}
       {item.tags.length > 0 && (
         <div className="flex flex-wrap gap-1 mt-2">
           {item.tags.slice(0, 3).map((tag) => (
-            <span key={tag} className="text-[10px] px-1.5 py-0.5 bg-chip text-body rounded">{tag}</span>
+            <span key={tag} className="text-[11px] px-1.5 py-0.5 bg-chip text-body rounded">{tag}</span>
           ))}
           {item.tags.length > 3 && (
-            <span className="text-[10px] px-1.5 py-0.5 text-faint">+{item.tags.length - 3}</span>
+            <span className="text-[11px] px-1.5 py-0.5 text-faint">+{item.tags.length - 3}</span>
           )}
         </div>
       )}
@@ -161,15 +226,15 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
             />
           ) : (
             item.content && (
-              <p className="text-xs text-muted whitespace-pre-wrap">{stripMd(item.content)}</p>
+              <p className="text-[13px] text-muted whitespace-pre-wrap">{stripMd(item.content)}</p>
             )
           )}
           {item.suggestion && (
-            <div className="text-xs text-accent bg-accent-bg rounded p-2">
+            <div className="text-[13px] text-accent bg-accent-bg rounded p-2">
               💡 {stripMd(item.suggestion)}
             </div>
           )}
-          <div className="flex gap-1.5 text-[10px] text-faint">
+          <div className="flex gap-1.5 text-[11px] text-faint">
             <span>{t(typeLabelKey[item.type] ?? "card.itemTypeTodo")}</span>
             <span>·</span>
             <span>{formatDate(item.created_at, i18n.resolvedLanguage ?? "zh")}</span>
@@ -181,36 +246,47 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
       {!dimmed ? (
         <div className="flex items-center gap-1 mt-2 pt-2 border-t border-line/50">
           <button
-            className="text-[10px] px-2 py-0.5 text-muted hover:text-heading hover:bg-elevated rounded transition-colors"
+            className="text-[11px] px-2 py-0.5 text-muted hover:text-heading hover:bg-elevated rounded transition-colors"
             onClick={() => setEditing(!editing)}
           >
             {editing ? t("card.cancel") : t("card.edit")}
           </button>
           <button
-            className="text-[10px] px-2 py-0.5 text-muted hover:text-accent hover:bg-elevated rounded transition-colors"
+            className="text-[11px] px-2 py-0.5 text-muted hover:text-accent hover:bg-elevated rounded transition-colors"
             onClick={handleCopyRef}
             title={t("card.copyRef")}
           >
             {copied ? t("card.copied") : t("card.ref")}
           </button>
           {item.type === "todo" && item.status === "active" && (
-            <button
-              className={`text-[10px] px-2 py-0.5 rounded transition-colors ${
-                item.auto_process
-                  ? "bg-blue-100 text-blue-700"
-                  : "text-muted hover:text-heading hover:bg-elevated"
-              }`}
-              onClick={() =>
-                updateItem(projectPath, item.id, { auto_process: !item.auto_process }).then(onRefresh)
-              }
-              title={t("card.autoToggleTitle")}
-            >
-              {item.auto_process ? t("card.autoOn") : t("card.autoOff")}
-            </button>
+            item.auto_process ? (
+              /* 已授权：单击即关（关闭无风险）。 */
+              <button
+                className="text-[11px] px-2 py-0.5 rounded transition-colors bg-accent-bg text-accent"
+                onClick={() =>
+                  updateItem(projectPath, item.id, { auto_process: false }).then(onRefresh)
+                }
+                title={t("card.autoToggleTitle")}
+              >
+                {t("card.autoOn")}
+              </button>
+            ) : (
+              /* 未授权：两段确认并明示适用条件（仅只读研究类任务）。 */
+              <ConfirmButton
+                tone="accent"
+                label={t("card.autoOff")}
+                confirmLabel={t("card.autoConfirmOn")}
+                onConfirm={() =>
+                  updateItem(projectPath, item.id, { auto_process: true }).then(onRefresh)
+                }
+                title={t("card.autoToggleTitle")}
+                className="text-[11px] px-2 py-0.5 rounded transition-colors text-muted hover:text-heading hover:bg-elevated"
+              />
+            )
           )}
           <div className="relative" ref={moveRef}>
             <button
-              className="text-[10px] px-2 py-0.5 text-muted hover:text-heading hover:bg-elevated rounded transition-colors"
+              className="text-[11px] px-2 py-0.5 text-muted hover:text-heading hover:bg-elevated rounded transition-colors"
               onClick={() => setShowMove(!showMove)}
               title={t("card.moveTo")}
             >
@@ -221,7 +297,7 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
                 {moveOptions.map((o) => (
                   <button
                     key={o.key}
-                    className="w-full text-left px-3 py-1 text-[10px] text-body hover:bg-surface transition-colors"
+                    className="w-full text-left px-3 py-1 text-[11px] text-body hover:bg-surface transition-colors"
                     onClick={() => handleMoveType(o.key)}
                   >
                     {o.label}
@@ -232,7 +308,7 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
           </div>
           {item.type === "todo" && (
             <button
-              className="text-[10px] px-2 py-0.5 text-success hover:brightness-125 hover:bg-elevated rounded transition-colors"
+              className="text-[11px] px-2 py-0.5 text-success hover:brightness-125 hover:bg-elevated rounded transition-colors"
               onClick={() => handleStatus("completed")}
             >
               {t("card.done")}
@@ -240,22 +316,23 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
           )}
           {item.type === "idea" && (
             <button
-              className="text-[10px] px-2 py-0.5 text-accent hover:brightness-125 hover:bg-elevated rounded transition-colors"
+              className="text-[11px] px-2 py-0.5 text-accent hover:brightness-125 hover:bg-elevated rounded transition-colors"
               onClick={() => handleStatus("converted")}
             >
               {t("card.convert")}
             </button>
           )}
           <button
-            className="text-[10px] px-2 py-0.5 text-faint hover:text-danger hover:bg-elevated rounded transition-colors ml-auto"
+            className="text-[11px] px-2 py-0.5 text-faint hover:text-danger hover:bg-elevated rounded transition-colors ml-auto"
             onClick={() => handleStatus("archived")}
           >
             {t("card.archive")}
           </button>
           {editing && (
             <button
-              className="text-[10px] px-2 py-0.5 text-accent hover:brightness-125 bg-elevated rounded transition-colors ml-auto"
+              className="text-[11px] px-2 py-0.5 text-accent hover:brightness-125 bg-elevated rounded transition-colors ml-auto disabled:opacity-40"
               onClick={handleSave}
+              disabled={saving || !editTitle.trim()}
             >
               {t("card.save")}
             </button>
@@ -264,7 +341,7 @@ export default function Card({ item, projectPath, onRefresh, dimmed }: CardProps
       ) : (
         <div className="flex items-center gap-1 mt-2 pt-2 border-t border-line/50">
           <button
-            className="text-[10px] px-2 py-0.5 text-accent hover:brightness-125 hover:bg-elevated rounded transition-colors"
+            className="text-[11px] px-2 py-0.5 text-accent hover:brightness-125 hover:bg-elevated rounded transition-colors"
             onClick={() => handleStatus("active")}
           >
             {t("card.restore")}

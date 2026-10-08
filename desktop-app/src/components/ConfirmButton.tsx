@@ -12,18 +12,32 @@ export default function ConfirmButton({
   onConfirm,
   className = "",
   title,
+  onPendingChange,
+  tone = "danger",
 }: {
   label: React.ReactNode;
   confirmLabel?: string;
   onConfirm: () => void;
   className?: string;
   title?: string;
+  /** 确认窗开合回调——调用方可借此在确认窗期间锁定同组其他动作。 */
+  onPendingChange?: (pending: boolean) => void;
+  /** danger=破坏性操作（红）；accent=知情授权（蓝，如夜间自动 opt-in）。 */
+  tone?: "danger" | "accent";
 }) {
   const { t } = useTranslation();
   const [pending, setPending] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const reset = useCallback(() => setPending(false), []);
+  const setPendingBoth = useCallback(
+    (p: boolean) => {
+      setPending(p);
+      onPendingChange?.(p);
+    },
+    [onPendingChange],
+  );
+
+  const reset = useCallback(() => setPendingBoth(false), [setPendingBoth]);
 
   useEffect(() => {
     if (pending) {
@@ -37,17 +51,22 @@ export default function ConfirmButton({
     e.preventDefault();
     if (pending) {
       clearTimeout(timer.current);
-      setPending(false);
+      setPendingBoth(false);
       onConfirm();
     } else {
-      setPending(true);
+      setPendingBoth(true);
     }
   }
 
   if (pending) {
+    // 保留调用方的尺寸/布局类，避免确认态布局跳动；配色与 hover 全部钉死。
+    const toneCls =
+      tone === "accent"
+        ? "bg-accent! text-white! hover:bg-accent!"
+        : "bg-danger! text-white! hover:bg-danger!";
     return (
       <button
-        className="bg-red-500 text-white font-bold rounded px-2 py-0.5 animate-pulse"
+        className={`${className} ${toneCls} animate-pulse`}
         onClick={handleClick}
         title={title}
       >

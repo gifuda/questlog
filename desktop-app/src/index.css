@@ -17,6 +17,8 @@
   --color-amber-bg: var(--c-amber-bg);
   --color-success: var(--c-success);
   --color-danger: var(--c-danger);
+  --color-info: var(--c-info);
+  --color-info-bg: var(--c-info-bg);
 
   /* 科技风字体栈：UI 用系统无衬线（中文 PingFang/Noto 回退），
      数字/ID/阶段名用等宽并开 tabular-nums */
@@ -44,6 +46,9 @@
   --c-amber-bg: rgba(245, 205, 71, 0.1);
   --c-success: #57c98a;
   --c-danger: #e5484d;
+  /* 信息色（验证中/进行中派生）：青蓝，与 accent 蓝、amber 黄拉开色相 */
+  --c-info: #4cc3d9;
+  --c-info-bg: rgba(76, 195, 217, 0.12);
 }
 
 /* ── Light ── */
@@ -64,4 +69,6 @@
   --c-amber-bg: #fef9c3;
   --c-success: #16a34a;
   --c-danger: #dc2626;
+  --c-info: #0e7490;
+  --c-info-bg: #cffafe;
 }

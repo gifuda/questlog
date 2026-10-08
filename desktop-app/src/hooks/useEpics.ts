@@ -6,14 +6,22 @@ import { useRefreshFallback } from "./useRefreshFallback";
 
 export function useEpics(projectPath: string | null) {
   const [data, setData] = useState<EpicsFile | null>(null);
+  // 首载完成前 loading=true，避免空态闪现。
+  const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     if (!projectPath) return;
     const file = await invoke<EpicsFile>("get_epics", { projectPath });
     setData(file);
+    setLoading(false);
   }, [projectPath]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    // 切换项目时先清空旧项目快照，避免摘要条短暂显示旧项目数字。
+    setData(null);
+    setLoading(true);
+    refresh();
+  }, [refresh]);
 
   // 实时刷新：监听 .epics.json 变化
   useEffect(() => {
@@ -85,7 +93,7 @@ export function useEpics(projectPath: string | null) {
     setData(file);
   }
 
-  return { data, epics: data?.epics ?? [], summary: data?.summary ?? null, refresh, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep };
+  return { data, epics: data?.epics ?? [], summary: data?.summary ?? null, refresh, loading, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep };
 }
 
 /** Global aggregated epics across all projects. */

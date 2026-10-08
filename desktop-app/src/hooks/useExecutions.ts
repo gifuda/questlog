@@ -140,50 +140,7 @@ export function useExecutionActions() {
     }
   }, []);
 
-  const cleanupStale = useCallback(async (): Promise<ActionResult> => {
-    try {
-      await invoke("cleanup_stale_executions");
-      return { ok: true, detail: "stale executions cleaned" };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
-  }, []);
-
-  return { cancel, retry, pause, cleanupStale };
-}
-
-/**
- * useRunner — manage the Runner enable/disable state at runtime.
- * Lets the user toggle auto-execution from the UI.
- */
-export function useRunner() {
-  const [enabled, setEnabled] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  // On mount, check the backend's current Runner state
-  useEffect(() => {
-    invoke<boolean>("is_runner_running")
-      .then(setEnabled)
-      .catch((err) => setError(String(err)))
-      .finally(() => setLoading(false));
-  }, []);
-
-  const toggle = useCallback(async () => {
-    const next = !enabled;
-    try {
-      setLoading(true);
-      setError(null);
-      const result = await invoke<boolean>("set_runner_enabled", { enabled: next });
-      setEnabled(result);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [enabled]);
-
-  return { enabled, loading, error, toggle };
+  return { cancel, retry, pause };
 }
 
 // ─── Runner runtime heartbeat ───
@@ -488,49 +445,6 @@ export interface AttemptDetail {
   manifest: AttemptManifest;
   execution_id: string;
   files: BundleFile[];
-}
-
-/**
- * useAttemptBundles — fetch all attempt bundles for a given step.
- * Returns manifest-level summaries sorted by attempt_no ascending.
- */
-export function useAttemptBundles(stepId: string | null) {
-  const [bundles, setBundles] = useState<AttemptManifest[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  const refresh = useCallback(async () => {
-    if (!stepId) {
-      setBundles([]);
-      return;
-    }
-    try {
-      setLoading(true);
-      const data = await invoke<AttemptManifest[]>("get_attempt_bundles", { stepId });
-      setBundles(data);
-    } catch (err) {
-      // Command may not be available in older app versions
-      setBundles([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [stepId]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  return { bundles, loading, refresh };
-}
-
-/**
- * Fetch full detail for a single attempt bundle (manifest + file list).
- */
-export async function getAttemptDetail(executionId: string): Promise<AttemptDetail | null> {
-  try {
-    return await invoke<AttemptDetail>("get_attempt_detail", { executionId });
-  } catch {
-    return null;
-  }
 }
 
 /** What the Runner is working on right now (S7-followup banner). */

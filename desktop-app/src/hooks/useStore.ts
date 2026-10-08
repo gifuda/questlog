@@ -51,11 +51,14 @@ export function useTodos(projectPath: string | null) {
   const [data, setData] = useState<TodosFile | null>(null);
   const [tags, setTags] = useState<string[]>([]);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
+  // 首载完成前 loading=true，避免空态闪现（"暂无"闪一下再出内容）。
+  const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     if (!projectPath) return;
     const file = await invoke<TodosFile>("get_todos", { projectPath });
     setData(file);
+    setLoading(false);
     // Only count tags from active items, top 8 by frequency
     const freq = new Map<string, number>();
     file.items
@@ -68,7 +71,13 @@ export function useTodos(projectPath: string | null) {
     setTags(top);
   }, [projectPath]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    // 切换项目时先清空旧项目快照，避免旧 tags/数据短暂显示。
+    setData(null);
+    setTags([]);
+    setLoading(true);
+    refresh();
+  }, [refresh]);
 
   useEffect(() => {
     const unlisten = listen<string>("todos-changed", () => { refresh(); });
@@ -88,7 +97,7 @@ export function useTodos(projectPath: string | null) {
     (i) => i.status === "completed" || i.status === "converted" || i.status === "archived"
   );
 
-  return { knowhow, todos, ideas, doneItems, tags, tagFilter, setTagFilter, refresh };
+  return { knowhow, todos, ideas, doneItems, tags, tagFilter, setTagFilter, refresh, loading };
 }
 
 export async function updateItem(

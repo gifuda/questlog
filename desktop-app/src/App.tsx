@@ -8,11 +8,13 @@ import { useUndo } from "./hooks/useUndo";
 import KanbanBoard from "./components/KanbanBoard";
 import EpicBoard from "./components/EpicBoard";
 import ArbBoard from "./components/ArbBoard";
+import Overview from "./components/Overview";
 import Logo from "./components/Logo";
 import Settings from "./components/Settings";
 import ConfirmButton from "./components/ConfirmButton";
+import UndoBar from "./components/UndoBar";
 
-type ModuleTab = "todos" | "epics" | "arb";
+type ModuleTab = "overview" | "todos" | "epics" | "arb";
 
 function App() {
   const { t } = useTranslation();
@@ -22,7 +24,7 @@ function App() {
   const activeProject = projects.find((p) => p.name === selected);
 
   // ── Undo ──
-  const { undoInfo, trigger: triggerUndo, undo: doUndo } = useUndo();
+  const { undoInfo, trigger: triggerUndo, undo: doUndo, dismiss } = useUndo();
 
   async function handleRemove(name: string) {
     const info = await removeProject(name);
@@ -105,6 +107,15 @@ function App() {
           <Logo size={20} />
           {/* Module tabs */}
           <div className="flex items-center gap-0.5 ml-3">
+            {/* 总览：跨项目聚合，app 级全局视图，不依赖选中项目 */}
+            <button
+              className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
+                activeTab === "overview" ? "bg-surface text-heading" : "text-faint hover:text-body"
+              }`}
+              onClick={() => setActiveTab("overview")}
+            >
+              {t("app.overviewTab")}
+            </button>
             <button
               className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
                 activeTab === "todos" ? "bg-surface text-heading" : "text-faint hover:text-body"
@@ -133,7 +144,7 @@ function App() {
           </div>
         </div>
         {activeProject && activeTab === "todos" && (
-          <div className="flex items-center gap-3 text-[10px] text-faint">
+          <div className="flex items-center gap-3 text-[11px] text-faint tabular-nums">
             <span>📘 {activeProject.counts.knowhow}</span>
             <span>✅ {activeProject.counts.todo}</span>
             <span>💡 {activeProject.counts.idea}</span>
@@ -144,12 +155,20 @@ function App() {
 
       {/* Board */}
       <div className="flex-1 overflow-hidden">
-        {activeTab === "arb" ? (
+        {activeTab === "overview" ? (
+          <Overview
+            projects={projects}
+            onOpenProject={(name) => {
+              setSelected(name);
+              setActiveTab("epics");
+            }}
+          />
+        ) : activeTab === "arb" ? (
           /* 套利机会栏：全局功能，不依赖选中项目 */
           <ArbBoard />
         ) : activeProject ? (
           activeTab === "todos" ? (
-            <KanbanBoard projectPath={activeProject.path} />
+            <KanbanBoard projectPath={activeProject.path} onOpenEpics={() => setActiveTab("epics")} />
           ) : (
             <EpicBoard projectPath={activeProject.path} />
           )
@@ -175,24 +194,26 @@ function App() {
                 onContextMenu={(e) => handleContextMenu(e, p.name)}
               >
                 {p.name}
-                {activeTab === "todos"
-                  ? p.counts.todo > 0 && (
-                      <span className="ml-1 bg-danger text-white text-[10px] px-1 rounded-full">
+                {activeTab === "todos" ? (
+                  p.counts.todo > 0 && (
+                      <span className="ml-1 bg-danger text-white text-[11px] px-1 rounded-full tabular-nums">
                         {p.counts.todo}
                       </span>
-                    )
-                  : p.active_epics > 0 && (
-                      <span className="ml-1 bg-accent-bg text-accent text-[10px] px-1 rounded-full">
+                  )
+                ) : activeTab === "epics" ? (
+                  p.active_epics > 0 && (
+                      <span className="ml-1 bg-accent-bg text-accent text-[11px] px-1 rounded-full tabular-nums">
                         {p.active_epics}
                       </span>
-                    )}
+                  )
+                ) : null}
               </button>
               <span className="absolute -top-1 -right-1 opacity-0 group-hover/tab:opacity-100 transition-opacity">
                 <ConfirmButton
                   label="×"
                   confirmLabel="✓"
                   onConfirm={() => handleRemove(p.name)}
-                  className="w-3.5 h-3.5 flex items-center justify-center text-[8px] bg-surface text-faint hover:text-danger rounded-full border border-line"
+                  className="w-3.5 h-3.5 flex items-center justify-center text-[10px] bg-surface text-faint hover:text-danger rounded-full border border-line"
                   title={t("app.removeProject")}
                 />
               </span>
@@ -203,15 +224,7 @@ function App() {
 
       {/* Undo bar */}
       {undoInfo && (
-        <div className="flex items-center gap-2 px-4 py-1.5 bg-yellow-100 border-t border-yellow-300">
-          <span className="text-[11px] text-yellow-800 flex-1">{t("app.undoRemove", { name: undoInfo.name })}</span>
-          <button
-            className="text-[11px] text-yellow-800 font-bold underline"
-            onClick={handleUndo}
-          >
-            {t("app.undo")}
-          </button>
-        </div>
+        <UndoBar name={undoInfo.name} onUndo={handleUndo} onDismiss={dismiss} edge="bottom" />
       )}
 
       {/* Trash */}
@@ -223,7 +236,7 @@ function App() {
           >
             <span className={`transition-transform ${showTrash ? "rotate-90" : ""}`}>▶</span>
             {t("app.trash")}
-            <span className="bg-chip px-1.5 py-0.5 rounded text-[10px]">{trash.length}</span>
+            <span className="bg-chip px-1.5 py-0.5 rounded text-[11px] tabular-nums">{trash.length}</span>
           </button>
           {showTrash && (
             <div className="px-4 pb-2 flex flex-col gap-1 max-h-40 overflow-y-auto">

@@ -49,7 +49,7 @@ export default function ExecutorModelSelector() {
   return (
     <div className="relative shrink-0" ref={ref}>
       <button
-        className="px-2 py-0.5 rounded-full text-[9px] font-medium transition-colors bg-elevated text-body hover:bg-line-hover"
+        className="px-2 py-0.5 rounded-full text-[11px] font-medium transition-colors bg-elevated text-body hover:bg-line-hover"
         onClick={() => setOpen(!open)}
         title={t("execution.modelSelectorHint")}
       >
@@ -119,7 +119,7 @@ export default function ExecutorModelSelector() {
                 >
                   <span className="truncate">{t("execution.thinkingLevel", { level })}</span>
                   {currentModelDef?.thinking_default === level && (
-                    <span className="text-[9px] text-faint shrink-0">
+                    <span className="text-[11px] text-faint shrink-0">
                       {t("execution.thinkingIsDefault")}
                     </span>
                   )}
@@ -148,7 +148,7 @@ export default function ExecutorModelSelector() {
             </button>
           )}
 
-          <div className="px-3 pt-2 text-[9px] text-faint leading-relaxed border-t border-line mt-1">
+          <div className="px-3 pt-2 text-[11px] text-faint leading-relaxed border-t border-line mt-1">
             {t("execution.thinkingSelectorHint")}
           </div>
         </div>

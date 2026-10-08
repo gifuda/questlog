@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTranslation } from "react-i18next";
 import ConfirmButton from "./ConfirmButton";
+import UndoBar from "./UndoBar";
 import { useUndo } from "../hooks/useUndo";
 import { typeIcons, priorityDot, typeOrder, ARCHIVE_DAYS } from "../constants";
 import { formatDate } from "../utils";
@@ -126,7 +127,7 @@ export default function TimelinePanel() {
     0
   );
 
-  const { undoInfo, trigger: triggerUndo, undo: doUndo } = useUndo();
+  const { undoInfo, trigger: triggerUndo, undo: doUndo, dismiss: dismissUndo } = useUndo();
 
   async function handleRemoveProject(name: string) {
     const [removedName, removedPath] = await invoke<[string, string]>("remove_project", { name });
@@ -146,15 +147,7 @@ export default function TimelinePanel() {
 
       {/* ---- undo bar ---- */}
       {undoInfo && (
-        <div className="flex items-center gap-2 px-3 py-2 bg-yellow-100 border-b border-yellow-300">
-          <span className="text-xs text-yellow-800 flex-1">{t("timeline.undoRemove", { name: undoInfo.name })}</span>
-          <button
-            className="text-xs text-yellow-800 font-bold underline"
-            onClick={handleUndo}
-          >
-            {t("timeline.undo")}
-          </button>
-        </div>
+        <UndoBar name={undoInfo.name} onUndo={handleUndo} onDismiss={dismissUndo} edge="top" />
       )}
 
       {/* ---- body ---- */}

@@ -1,5 +1,6 @@
 import { useMemo, useState, useEffect, Fragment } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useEpics } from "../hooks/useEpics";
 import { useProjectRunner, useRunnerStatus, getEpicAutoExecute, setEpicAutoExecute } from "../hooks/useExecutions";
 import { epicStatusBadge, stageOrder, statusOptions, statusRank } from "../epicConstants";
@@ -8,6 +9,7 @@ import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
 import ExecutionPanel, { DecisionInbox, RunningBanner } from "./ExecutionPanel";
 import ExecutorModelSelector from "./ExecutorModelSelector";
+import { FleetHealthBand } from "./FleetHealth";
 
 /** i18n keys for epic status labels (statuses stay lowercase in data). */
 const epicStatusKey: Record<EpicStatus, string> = {
@@ -53,7 +55,7 @@ interface EpicBoardProps {
 
 export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { t, i18n } = useTranslation();
-  const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep } = useEpics(projectPath);
+  const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep, loading } = useEpics(projectPath);
   const { status: projectStatus, loading: projectLoading, toggle: toggleProjectRunner, toggleGlobal } = useProjectRunner(projectPath);
   const { status: runnerStatus, lastPollSecsAgo } = useRunnerStatus();
   const [showNewEpic, setShowNewEpic] = useState(false);
@@ -76,6 +78,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
           <Metric num={summary.observing} label={t("epic.sumObserving")} numClass="text-amber" />
           <Metric num={summary.blocked} label={t("epic.sumBlocked")} numClass="text-danger" />
           <Metric num={summary.done} label={t("epic.sumDone")} numClass="text-success" />
+          <FleetHealthBand />
           <div className="ml-auto">
             <RunnerHeartbeat runnerStatus={runnerStatus} lastPollSecsAgo={lastPollSecsAgo} />
           </div>
@@ -125,7 +128,10 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
 
       {/* 总表 */}
       <div className="flex-1 overflow-auto">
-        {sorted.length === 0 && !showNewEpic ? (
+        {loading ? (
+          /* 首载期间不渲染空态，避免"暂无方案"闪现 */
+          <div className="h-full" />
+        ) : sorted.length === 0 && !showNewEpic ? (
           <div className="flex flex-col items-center justify-center h-full text-faint gap-3">
             <span className="text-3xl">📊</span>
             <span className="text-sm">{t("epic.emptyTitle")}</span>
@@ -504,7 +510,7 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
       <div
         className={`${GRID} py-2.5 border-b border-line/60 cursor-pointer hover:bg-surface/60 transition-colors ${
           isDone ? "opacity-50" : isBlocked ? "opacity-70" : ""
-        } ${depth === 1 ? "bg-white/[.012]" : ""}`}
+        } ${depth === 1 ? "bg-heading/[.02]" : ""}`}
         onClick={() => setExpanded(!expanded)}
       >
         {/* 方案 */}
@@ -513,6 +519,10 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
           <span className={`text-faint shrink-0 w-4 text-center text-[10px] transition-transform ${expanded ? "rotate-90" : ""}`}>▶</span>
           <div className="min-w-0">
             <div className={`break-words leading-snug ${depth === 0 ? "text-sm font-semibold" : "text-[13px] font-medium"} ${isDone ? "text-faint line-through" : "text-heading"}`}>
+              {/* 夜间待办自动产出的方案：标题由 producer 固定以"自动处理·"开头 */}
+              {epic.title.startsWith("自动处理·") && (
+                <span className="mr-1" title={t("epic.autoOrigin")}>🌙</span>
+              )}
               {epic.title}
             </div>
             <div className="text-xs text-faint font-mono truncate mt-0.5">
@@ -974,9 +984,10 @@ function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
       </div>
       <div className="flex items-center gap-3">
         <button
-          className="text-xs px-2 py-1 bg-accent text-white rounded hover:opacity-90"
+          className="text-xs px-2 py-1 bg-accent text-white rounded hover:opacity-90 disabled:opacity-40"
+          disabled={!title.trim()}
           onClick={() => onSubmit({
-            title, description,
+            title: title.trim(), description,
             status, priority,
             dependsOn,
             linksDoc, linksBranch, linksNote,
@@ -1007,9 +1018,7 @@ function priorityBadge(priority: string): string {
 // assistant call list_epics to match the title and continue.
 // Protocol text stays in sync with mcp-server/src/index.ts tool descriptions.
 // ══════════════════════════════════════════════
-type TFunc = (key: string, opts?: Record<string, unknown>) => string;
-
-function copyEpicRef(epic: Epic, t: TFunc) {
+function copyEpicRef(epic: Epic, t: TFunction) {
   const actionable = [...epic.steps]
     .sort((a, b) => a.order - b.order || a.created_at.localeCompare(b.created_at))
     .filter((s) => s.actionable);

@@ -15,20 +15,21 @@
 import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useExecutions, useExecutionActions, useDecisionRequests, useCurrentExecution, type Execution, type ExecutionStatus } from "../hooks/useExecutions";
+import ConfirmButton from "./ConfirmButton";
 
 const STATUS_COLORS: Record<ExecutionStatus, string> = {
-  queued: "bg-gray-100 text-gray-700",
-  running: "bg-blue-100 text-blue-700 animate-pulse",
-  candidate: "bg-yellow-100 text-yellow-700",
-  verifying: "bg-purple-100 text-purple-700 animate-pulse",
-  passed: "bg-green-100 text-green-700",
-  failed: "bg-red-100 text-red-700",
-  cancelled: "bg-gray-100 text-gray-500",
-  cancel_requested: "bg-orange-100 text-orange-700 animate-pulse",
-  pause_requested: "bg-orange-100 text-orange-700 animate-pulse",
-  timed_out: "bg-red-100 text-red-700",
-  blocked: "bg-orange-100 text-orange-700",
-  stale: "bg-gray-200 text-gray-500",
+  queued: "bg-elevated text-muted",
+  running: "bg-accent-bg text-accent animate-pulse",
+  candidate: "bg-amber-bg text-amber",
+  verifying: "bg-info-bg text-info animate-pulse",
+  passed: "bg-success/15 text-success",
+  failed: "bg-danger/15 text-danger",
+  cancelled: "bg-elevated text-faint",
+  cancel_requested: "bg-amber-bg text-amber animate-pulse",
+  pause_requested: "bg-amber-bg text-amber animate-pulse",
+  timed_out: "bg-danger/15 text-danger",
+  blocked: "bg-amber-bg text-amber",
+  stale: "bg-elevated text-faint",
 };
 
 function formatTimestamp(ts: number): string {
@@ -47,14 +48,25 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
   const [expanded, setExpanded] = useState(false);
   // S0-A: per-row action feedback — every click renders success or failure.
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  // 动作防连点：pause/retry/cancel 在 await 期间全部禁用。
+  const [acting, setActing] = useState(false);
+  // cancel 确认窗（3s）期间同样锁死 pause/retry，避免与 cancel 并发。
+  const [cancelPending, setCancelPending] = useState(false);
+  const busy = acting || cancelPending;
 
   const runAction = async (action: () => Promise<{ ok: boolean; detail?: string; error?: string }>) => {
-    const result = await action();
-    setFeedback(
-      result.ok
-        ? { ok: true, text: result.detail ?? "ok" }
-        : { ok: false, text: result.error ?? "action failed" },
-    );
+    if (acting) return;
+    setActing(true);
+    try {
+      const result = await action();
+      setFeedback(
+        result.ok
+          ? { ok: true, text: result.detail ?? "ok" }
+          : { ok: false, text: result.error ?? "action failed" },
+      );
+    } finally {
+      setActing(false);
+    }
   };
 
   const statusKey = `execution.status.${exec.status}`;
@@ -67,7 +79,7 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
 
   return (
     <div
-      className={`border rounded-lg p-3 mb-2 bg-white shadow-sm${isRetry ? " border-l-4 border-l-accent" : ""}`}
+      className={`border border-line rounded-lg p-3 mb-2 bg-surface${isRetry ? " border-l-4 border-l-accent" : ""}`}
       style={{ marginLeft: depth > 0 ? depth * 16 : 0 }}
     >
       <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(!expanded)}>
@@ -86,48 +98,48 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
             )}
           </span>
           {exec.executor && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-200">
+            <span className="text-[11px] px-1.5 py-0.5 rounded bg-chip text-muted border border-line">
               {exec.executor}
             </span>
           )}
           {exec.package_display_no !== undefined && (
-            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 border border-blue-200">
+            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-accent-bg text-accent border border-accent/30">
               #{exec.package_display_no}
             </span>
           )}
           {exec.scene_recovered_from && (
             <span
               title={`${t("execution.recoveredFrom", "成果已恢复自")} ${exec.scene_recovered_from.slice(0, 16)}…`}
-              className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 border border-amber-200"
+              className="text-[11px] px-1.5 py-0.5 rounded bg-amber-bg text-amber border border-amber/30"
             >
               ⏫ {t("execution.sceneRecovered", "断点恢复")}
             </span>
           )}
-          <span className="text-xs text-gray-500">
+          <span className="text-xs text-muted tabular-nums">
             #{exec.attempts} · {formatTimestamp(exec.updated_at)}
           </span>
           {/* Lineage badge — how this attempt links into the retry chain */}
           {parentAttemptId ? (
-            <span className="text-[10px] text-muted" title={`parent: ${parentAttemptId}`}>
+            <span className="text-[11px] text-muted" title={`parent: ${parentAttemptId}`}>
               ↳ retry #{exec.attempt_no} from {parentAttemptId.slice(0, 8)}
             </span>
           ) : (
-            <span className="text-[10px] text-muted">attempt #{exec.attempt_no}</span>
+            <span className="text-[11px] text-muted">attempt #{exec.attempt_no}</span>
           )}
         </div>
-        <span className="text-xs text-gray-400">{expanded ? "▼" : "▶"}</span>
+        <span className="text-xs text-faint">{expanded ? "▼" : "▶"}</span>
       </div>
 
       {expanded && (
-        <div className="mt-2 space-y-1 text-xs text-gray-600">
+        <div className="mt-2 space-y-1 text-xs text-muted">
           <div>
             <span className="font-medium">{t("execution.baseSha")}:</span>{" "}
-            <code className="bg-gray-100 px-1 rounded">{formatSha(exec.base_sha)}</code>
+            <code className="bg-chip px-1 rounded">{formatSha(exec.base_sha)}</code>
           </div>
           {exec.candidate_sha && (
             <div>
               <span className="font-medium">{t("execution.candidateSha")}:</span>{" "}
-              <code className="bg-gray-100 px-1 rounded">{formatSha(exec.candidate_sha)}</code>
+              <code className="bg-chip px-1 rounded">{formatSha(exec.candidate_sha)}</code>
             </div>
           )}
           {exec.branch && (
@@ -141,12 +153,12 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
             </div>
           )}
           {exec.last_error && (
-            <div className="text-red-600">
+            <div className="text-danger">
               <span className="font-medium">{t("execution.lastError")}:</span> {exec.last_error}
             </div>
           )}
           {retriesRemaining !== undefined && (
-            <div className={budgetExhausted ? "text-orange-600" : "text-gray-500"}>
+            <div className={budgetExhausted ? "text-amber" : "text-muted"}>
               <span className="font-medium">{t("execution.retryBudget", "Retry budget")}:</span>{" "}
               {budgetExhausted
                 ? t("execution.budgetExhausted", "exhausted — revise the sealed package to retry")
@@ -154,7 +166,7 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
             </div>
           )}
           {feedback && (
-            <div className={`break-words ${feedback.ok ? "text-green-600" : "text-red-600"}`}>
+            <div className={`break-words ${feedback.ok ? "text-success" : "text-danger"}`}>
               {feedback.ok ? "✓ " : "✗ "}
               {feedback.text}
             </div>
@@ -162,15 +174,16 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
           <div className="flex gap-2 mt-2">
             {exec.status === "running" && (
               <button
+                disabled={busy}
                 onClick={() => runAction(() => pause(exec.id))}
-                className="px-2 py-1 text-xs rounded bg-orange-100 text-orange-700 hover:bg-orange-200"
+                className="px-2 py-1 text-xs rounded bg-amber-bg text-amber hover:bg-amber/20 disabled:opacity-40"
               >
                 {t("execution.pause")}
               </button>
             )}
             {(exec.status === "failed" || exec.status === "cancelled" || exec.status === "stale" || exec.status === "blocked" || exec.status === "timed_out") && (
               <button
-                disabled={budgetExhausted}
+                disabled={busy || budgetExhausted}
                 title={
                   budgetExhausted
                     ? t(
@@ -180,18 +193,18 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
                     : undefined
                 }
                 onClick={() => runAction(() => retry(exec.id))}
-                className="px-2 py-1 text-xs rounded bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="px-2 py-1 text-xs rounded bg-accent-bg text-accent hover:bg-accent/20 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {t("execution.retry")}
               </button>
             )}
             {!(["cancelled", "passed", "blocked", "failed", "timed_out", "cancel_requested", "pause_requested"] as ExecutionStatus[]).includes(exec.status) && (
-              <button
-                onClick={() => runAction(() => cancel(exec.id))}
-                className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-600 hover:bg-gray-200"
-              >
-                {t("execution.cancel")}
-              </button>
+              <ConfirmButton
+                label={t("execution.cancel")}
+                onConfirm={() => runAction(() => cancel(exec.id))}
+                onPendingChange={setCancelPending}
+                className="px-2 py-1 text-xs rounded bg-elevated text-muted hover:bg-line-hover disabled:opacity-40"
+              />
             )}
           </div>
         </div>
@@ -200,18 +213,7 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
   );
 }
 
-/** Chinese labels for the fixed decision actions (original English stays
- *  available on hover and is what actually gets resolved). */
-const OPTION_LABELS: Record<string, string> = {
-  retry: "重试",
-  resume: "续跑",
-  cancel: "取消",
-  revise_scope: "修订范围并继续",
-  revise_package: "修订封存包",
-  transfer_manual: "转人工",
-  manual: "转人工",
-  reject: "拒绝",
-};
+/** 决策动作标签走 i18n（drq.option.*）；未知 option 回退英文原文。 */
 
 /** Localized question by kind + option signature; the English original is
  *  preserved in the tooltip so nothing is lost. */
@@ -251,19 +253,19 @@ export function DecisionInbox() {
   };
 
   return (
-    <section className="px-4 py-2 border-b border-orange-500/30 bg-orange-500/5">
+    <section className="px-4 py-2 border-b border-amber/30 bg-amber-bg">
       {/* 动作失败内联提示：不替换整个 inbox，其余待决项保持可见 */}
       {error && (
-        <div className="mb-1.5 px-2 py-1 rounded text-[11px] text-red-300 bg-red-500/10 border border-red-500/30 break-words">
+        <div className="mb-1.5 px-2 py-1 rounded text-[11px] text-danger bg-danger/10 border border-danger/30 break-words">
           {error}
         </div>
       )}
-      <div className="text-[11px] font-semibold text-orange-300 mb-1">
+      <div className="text-[11px] font-semibold text-amber mb-1">
         🔔 {t("execution.attention", { count: requests.length })}
       </div>
       <div className="space-y-2">
         {requests.map((request) => (
-          <div key={request.request_id} className="rounded border border-orange-500/20 p-2 text-[10px]">
+          <div key={request.request_id} className="rounded border border-amber/20 p-2 text-[11px]">
             <div className="text-body font-medium" title={request.question}>
               {localizedQuestion(t, request.kind, request.options) || request.question}
             </div>
@@ -282,9 +284,9 @@ export function DecisionInbox() {
                   disabled={submitting === request.request_id}
                   title={option}
                   onClick={() => answer(request.request_id, option)}
-                  className="px-2 py-0.5 rounded bg-orange-500/15 text-orange-300 hover:bg-orange-500/25 disabled:opacity-40"
+                  className="px-2 py-0.5 rounded bg-amber-bg text-amber hover:bg-amber/25 disabled:opacity-40"
                 >
-                  {OPTION_LABELS[option] ?? option}
+                  {t(`drq.option.${option}`, option)}
                 </button>
               ))}
               <input
@@ -363,7 +365,7 @@ export default function ExecutionPanel({ stepId }: { stepId?: string }) {
   }, [filtered]);
 
   if (loading) {
-    return <div className="text-xs text-gray-400 p-2">{t("execution.title")}…</div>;
+    return <div className="text-xs text-faint p-2">{t("execution.title")}…</div>;
   }
 
   if (filtered.length === 0) {
@@ -372,7 +374,7 @@ export default function ExecutionPanel({ stepId }: { stepId?: string }) {
 
   return (
     <div className="mt-2 border-t pt-2">
-      <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+      <h4 className="text-xs font-semibold text-muted uppercase tracking-wide mb-1">
         {t("execution.runs")} ({filtered.length})
       </h4>
       {chains.map((attempts) => (
@@ -392,11 +394,11 @@ export function RunningBanner() {
   const current = useCurrentExecution();
   if (!current) return null;
   return (
-    <div className="px-4 py-1 border-b border-blue-500/30 bg-blue-500/5 flex items-center gap-2 text-[11px]">
+    <div className="px-4 py-1 border-b border-accent/30 bg-accent-bg flex items-center gap-2 text-[11px]">
       <span className="animate-pulse">⚙</span>
-      <span className="font-medium text-blue-400">{t("execution.runningNow", "运行中")}</span>
+      <span className="font-medium text-accent">{t("execution.runningNow", "运行中")}</span>
       {current.package_display_no !== null && (
-        <span className="font-mono px-1 rounded bg-blue-500/15 text-blue-300">
+        <span className="font-mono px-1 rounded bg-surface/60 text-accent">
           #{current.package_display_no}
         </span>
       )}
@@ -404,7 +406,7 @@ export function RunningBanner() {
       <span className="text-faint">· {t(`execution.status.${current.status}`, current.status)}</span>
       <span className="text-faint">· attempt {current.attempt_no}</span>
       {current.scene_recovered_from && (
-        <span className="px-1 rounded bg-amber-500/15 text-amber-300">
+        <span className="px-1 rounded bg-amber-bg text-amber">
           ⏫ {t("execution.sceneRecovered", "断点恢复")}
         </span>
       )}

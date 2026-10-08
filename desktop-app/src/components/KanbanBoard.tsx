@@ -1,17 +1,22 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useTodos } from "../hooks/useStore";
+import { useTodoStatus } from "../hooks/useFleetHealth";
 import Column from "./Column";
 import Card from "./Card";
+import { NightlyDigestLine } from "./FleetHealth";
 import { updateItem } from "../hooks/useStore";
 
 interface KanbanBoardProps {
   projectPath: string;
+  /** 跳转到方案追踪页（卡片上的夜间任务链路入口）。 */
+  onOpenEpics?: () => void;
 }
 
-export default function KanbanBoard({ projectPath }: KanbanBoardProps) {
+export default function KanbanBoard({ projectPath, onOpenEpics }: KanbanBoardProps) {
   const { t } = useTranslation();
-  const { knowhow, todos, ideas, doneItems, tags, tagFilter, setTagFilter, refresh } = useTodos(projectPath);
+  const { knowhow, todos, ideas, doneItems, tags, tagFilter, setTagFilter, refresh, loading } = useTodos(projectPath);
+  const { scheduled: nightlyScheduled, links: taskLinks, scheduleEnabled } = useTodoStatus(projectPath);
   const [showDone, setShowDone] = useState(false);
   const [showNightly, setShowNightly] = useState(true);
   // 夜间完成·待确认：机器验收通过但用户尚未确认的结果——与手动完成分开，
@@ -24,9 +29,9 @@ export default function KanbanBoard({ projectPath }: KanbanBoardProps) {
       {/* Tag filter bar */}
       {tags.length > 0 && (
         <div className="flex items-center gap-1.5 px-3 py-2 border-b border-line overflow-x-auto">
-          <span className="text-[10px] text-faint mr-1 shrink-0">{t("kanban.tagFilter")}</span>
+          <span className="text-[11px] text-faint mr-1 shrink-0">{t("kanban.tagFilter")}</span>
           <button
-            className={`text-[10px] px-2 py-0.5 rounded transition-colors shrink-0 ${
+            className={`text-[11px] px-2 py-0.5 rounded transition-colors shrink-0 ${
               !tagFilter ? "bg-accent text-white" : "text-muted hover:text-heading hover:bg-elevated"
             }`}
             onClick={() => setTagFilter(null)}
@@ -36,7 +41,7 @@ export default function KanbanBoard({ projectPath }: KanbanBoardProps) {
           {tags.map((tag) => (
             <button
               key={tag}
-              className={`text-[10px] px-2 py-0.5 rounded transition-colors shrink-0 ${
+              className={`text-[11px] px-2 py-0.5 rounded transition-colors shrink-0 ${
                 tagFilter === tag ? "bg-accent text-white" : "text-muted hover:text-heading hover:bg-elevated"
               }`}
               onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
@@ -47,33 +52,40 @@ export default function KanbanBoard({ projectPath }: KanbanBoardProps) {
         </div>
       )}
 
-      {/* Three columns */}
+      {/* Three columns — 首载期间不渲染空态，避免"暂无"闪现 */}
+      {loading ? (
+        <div className="flex-1" />
+      ) : (
       <div className="flex gap-4 flex-1 p-4 overflow-y-auto">
-        <Column title={t("kanban.knowhowTitle")} icon="📘" type="knowhow" items={knowhow} projectPath={projectPath} onRefresh={refresh} accentColor="bg-blue-500" />
-        <Column title={t("kanban.todoTitle")} icon="✅" type="todo" items={todos} projectPath={projectPath} onRefresh={refresh} accentColor="bg-green-500" />
-        <Column title={t("kanban.ideaTitle")} icon="💡" type="idea" items={ideas} projectPath={projectPath} onRefresh={refresh} accentColor="bg-yellow-500" />
+        <Column title={t("kanban.knowhowTitle")} icon="📘" type="knowhow" items={knowhow} projectPath={projectPath} onRefresh={refresh} accentColor="bg-info" scheduleEnabled={scheduleEnabled} nightlyScheduled={nightlyScheduled} taskLinks={taskLinks} onOpenEpics={onOpenEpics} />
+        <Column title={t("kanban.todoTitle")} icon="✅" type="todo" items={todos} projectPath={projectPath} onRefresh={refresh} accentColor="bg-success" scheduleEnabled={scheduleEnabled} nightlyScheduled={nightlyScheduled} taskLinks={taskLinks} onOpenEpics={onOpenEpics} />
+        <Column title={t("kanban.ideaTitle")} icon="💡" type="idea" items={ideas} projectPath={projectPath} onRefresh={refresh} accentColor="bg-amber" scheduleEnabled={scheduleEnabled} nightlyScheduled={nightlyScheduled} taskLinks={taskLinks} onOpenEpics={onOpenEpics} />
       </div>
+      )}
 
       {/* Nightly-completed review gate */}
       {nightlyItems.length > 0 && (
-        <div className="border-t border-line bg-blue-50/40">
+        <div className="border-t border-line bg-accent-bg">
           <button
-            className="w-full flex items-center gap-2 px-4 py-2 text-[11px] text-blue-700 transition-colors"
+            className="w-full flex items-center gap-2 px-4 py-2 text-[11px] text-accent transition-colors"
             onClick={() => setShowNightly(!showNightly)}
           >
             <span className={`transition-transform ${showNightly ? "rotate-90" : ""}`}>▶</span>
             {t("kanban.nightlyReview")}
-            <span className="bg-blue-100 px-1.5 py-0.5 rounded text-[10px]">{nightlyItems.length}</span>
+            <span className="bg-chip px-1.5 py-0.5 rounded text-[11px] tabular-nums">{nightlyItems.length}</span>
+            <span className="ml-auto" role="presentation" onClick={(e) => e.stopPropagation()}>
+              <NightlyDigestLine />
+            </span>
           </button>
           {showNightly && (
             <div className="px-4 pb-3 flex flex-col gap-2 max-h-64 overflow-y-auto">
               {nightlyItems.map((item) => (
                 <div key={item.id} className="flex items-start gap-2">
                   <div className="flex-1 min-w-0">
-                    <Card item={item} projectPath={projectPath} onRefresh={refresh} dimmed />
+                    <Card item={item} projectPath={projectPath} onRefresh={refresh} dimmed scheduleEnabled={scheduleEnabled} taskLink={taskLinks[item.id]} onOpenEpics={onOpenEpics} />
                   </div>
                   <button
-                    className="shrink-0 text-[10px] px-2.5 py-1.5 mt-1 rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                    className="shrink-0 text-[11px] px-2.5 py-1.5 mt-1 rounded bg-accent text-white hover:opacity-90 transition-colors"
                     onClick={() => updateItem(projectPath, item.id, { auto_ack: true }).then(refresh)}
                     title={t("kanban.ackNightlyTitle")}
                   >
@@ -95,7 +107,7 @@ export default function KanbanBoard({ projectPath }: KanbanBoardProps) {
           >
             <span className={`transition-transform ${showDone ? "rotate-90" : ""}`}>▶</span>
             {t("kanban.doneArchive")}
-            <span className="bg-chip px-1.5 py-0.5 rounded text-[10px]">{regularDone.length}</span>
+            <span className="bg-chip px-1.5 py-0.5 rounded text-[11px] tabular-nums">{regularDone.length}</span>
           </button>
           {showDone && (
             <div className="px-4 pb-3 flex flex-col gap-2 max-h-48 overflow-y-auto">

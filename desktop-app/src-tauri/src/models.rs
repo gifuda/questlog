@@ -97,10 +97,6 @@ pub struct AutoResult {
     pub verification_level: Option<String>,
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
-
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
@@ -122,7 +118,9 @@ pub struct TodoItem {
     pub processing: bool,
     /// Nightly auto-process opt-in (collector tenant pipeline). Explicit user
     /// authorization only — defaults to false, never inferred by a model.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// NOTE: 不得加 skip_serializing_if——update_todo 的补丁循环只写序列化
+    /// 出的键，跳过 false 会导致"开"写进去、"关"永远写不进去。
+    #[serde(default)]
     pub auto_process: bool,
     /// Bumped on every explicit (re)authorization. A closed result never
     /// applies to a later revision: turning the opt-in off and back on must
@@ -429,6 +427,34 @@ mod tests {
 
     // ── StepStage::pct — the progress-percent mapping. Frontend progress bars
     //    depend on these exact values; a regression here shifts every plan's %. ──
+
+    #[test]
+    fn auto_process_false_serializes_explicitly() {
+        // 回归钉：auto_process 曾带 skip_serializing_if=is_false，而
+        // update_todo 的补丁循环只写序列化出的键——导致"开"能写入、
+        // "关"永远写不进文件（用户视角：夜间自动开了就取消不了）。
+        let item = TodoItem {
+            id: "t".into(),
+            item_type: ItemType::Todo,
+            title: "t".into(),
+            content: String::new(),
+            suggestion: String::new(),
+            tags: vec![],
+            status: ItemStatus::Active,
+            priority: Priority::Medium,
+            source_session: String::new(),
+            processing: false,
+            auto_process: false,
+            auto_process_revision: 0,
+            auto_result: None,
+            auto_completed_at: None,
+            auto_ack_at: None,
+            created_at: "2026-09-24T00:00:00Z".into(),
+            updated_at: "2026-09-24T00:00:00Z".into(),
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v.get("auto_process"), Some(&serde_json::json!(false)));
+    }
 
     #[test]
     fn step_stage_pct_values() {

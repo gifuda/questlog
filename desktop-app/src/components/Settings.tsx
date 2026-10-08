@@ -147,7 +147,7 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
                 placeholder="/absolute/path/to/gros/exports/board.json"
                 title={t("arb.pathHint")}
               />
-              <div className="text-[9px] text-faint mt-0.5">{t("arb.pathHint")}</div>
+              <div className="text-[11px] text-faint mt-0.5">{t("arb.pathHint")}</div>
             </div>
           </>
         </div>
