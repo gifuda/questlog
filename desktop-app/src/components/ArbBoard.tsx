@@ -613,7 +613,8 @@ function BriefingSection({ brief, decisions }: { brief?: ArbBrief; decisions?: A
   const items = Array.isArray(decisions) ? decisions : [];
 
   return (
-    <div className="px-3 pt-2.5 pb-2 border-b border-line/50 shrink-0 flex flex-col gap-2">
+    // 自带滚动上限：晨报+决策再多也不挤占下方卡片列表的滚动空间。
+    <div className="px-3 pt-2.5 pb-2 border-b border-line/50 shrink-0 flex flex-col gap-2 max-h-[45%] overflow-y-auto">
       {/* brief 段：概要一行 + 当日机会橱窗 */}
       <div>
         <div className="flex items-center gap-2 mb-1">
