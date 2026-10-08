@@ -95,10 +95,30 @@ pub fn window_missed(last_run_date: &str, last_missed_date: &str) -> bool {
 
 /// 汇总当前健康快照。ledger 损坏时 fail-closed 返回 Err（与 read_ledger 语义一致），
 /// 前端 catch 后隐藏灯带——宁可不显示也不显示错的健康状态。
-pub fn collect() -> Result<serde_json::Value, String> {
+/// projects 用于跨项目统计"机器完成但人未确认"的待办（晨报首屏决断卡用）。
+pub fn collect(projects: &[(String, std::path::PathBuf)]) -> Result<serde_json::Value, String> {
     let schedule_enabled = crate::runner_config::get_todo_schedule().is_some();
     let sweep_state = todo_ledger::read_sweep_state();
     let ledger = todo_ledger::read_ledger()?;
+
+    // 待确认（review gate）：auto_completed_at 已写但 auto_ack_at 未写。
+    let mut pending_ack_items: Vec<serde_json::Value> = vec![];
+    for (name, path) in projects {
+        let data = match crate::store::read_todos(path) {
+            Ok(d) => d,
+            Err(_) => continue, // 单项目读取失败不拖垮整体
+        };
+        for item in &data.items {
+            if item.auto_completed_at.is_some() && item.auto_ack_at.is_none() {
+                pending_ack_items.push(serde_json::json!({
+                    "project": name,
+                    "title": item.title,
+                }));
+            }
+        }
+    }
+    let pending_ack_count = pending_ack_items.len();
+    pending_ack_items.truncate(5);
 
     let entries: BTreeMap<String, LedgerEntry> = ledger.entries.into_iter().collect();
     let in_flight = entries
@@ -123,6 +143,7 @@ pub fn collect() -> Result<serde_json::Value, String> {
         "in_flight": in_flight,
         "last_applied_at": last_applied_at,
         "digest": digest,
+        "pending_ack": { "count": pending_ack_count, "items": pending_ack_items },
     }))
 }
 

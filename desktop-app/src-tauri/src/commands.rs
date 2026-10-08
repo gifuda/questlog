@@ -1742,10 +1742,12 @@ pub fn get_todo_status(
 }
 
 /// 跨机链路健康（只读聚合）：outbox 积压、回执滞留/未匹配、窗口漏跑、
-/// 最近一夜的结果分布。全部从 runtime 目录既有文件读时聚合，无新写路径。
+/// 最近一夜的结果分布、待确认计数。全部从 runtime/项目目录既有文件读时聚合，
+/// 无新写路径。
 #[tauri::command]
-pub fn get_fleet_health() -> Result<serde_json::Value, String> {
-    crate::fleet_health::collect()
+pub fn get_fleet_health(state: State<AppState>) -> Result<serde_json::Value, String> {
+    let projects = state.projects.lock().map_err(|e| e.to_string())?.clone();
+    crate::fleet_health::collect(&projects)
 }
 
 /// Get the Runner status for a specific project (global + project + effective).

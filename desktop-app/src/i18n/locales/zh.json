@@ -24,8 +24,8 @@
     "themeSystem": "跟随系统",
     "langZh": "中文",
     "langEn": "English",
-    "overviewTab": "总览",
-    "dismiss": "关闭"
+    "dismiss": "关闭",
+    "morningTab": "☀ 晨报"
   },
   "kanban": {
     "tagFilter": "标签",
@@ -385,5 +385,36 @@
     "empty": "各项目暂无在办事项",
     "epicCount": "{{count}} 在办方案",
     "jumpTitle": "打开该项目的方案追踪页"
+  },
+  "tray": {
+    "title": "晨报速览",
+    "pendingUnit": "件待我决断",
+    "briefRow": "套利晨报",
+    "briefWaiting": "等待 GROS 数据",
+    "nightRow": "夜间管线",
+    "digestLine": "{{total}} 条 · ✓{{accepted}} 待审{{review}} 失败{{failed}}",
+    "noDigest": "昨夜无任务",
+    "decisionsRow": "套利决策",
+    "pendingAckRow": "夜间待确认",
+    "activeCount": "在办 {{count}}",
+    "noProjects": "暂无项目",
+    "oldView": "项目与时间线 ›"
+  },
+  "morning": {
+    "briefTitle": "晨报",
+    "sources": "GROS 雷达 × QuestLog 夜间管线",
+    "briefWaiting": "等待 GROS 侧晨报数据…",
+    "opps": "当日机会橱窗",
+    "nightly": "昨夜机器产出",
+    "digestLine": "共 {{total}} 条 · ✓{{accepted}} 待审 {{review}} 失败 {{failed}}",
+    "noNightly": "昨夜无任务",
+    "focusTitle": "各项目焦点 · 先看哪里",
+    "decArb": "套利决策",
+    "decArbGo": "处置 →",
+    "decNightly": "夜间待确认",
+    "decNightlyGo": "确认 →",
+    "decDrq": "决策请求",
+    "decDrqNone": "Runner 无阻塞",
+    "decDrqGo": "处置 →"
   }
 }

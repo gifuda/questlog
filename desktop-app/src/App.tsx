@@ -8,20 +8,28 @@ import { useUndo } from "./hooks/useUndo";
 import KanbanBoard from "./components/KanbanBoard";
 import EpicBoard from "./components/EpicBoard";
 import ArbBoard from "./components/ArbBoard";
-import Overview from "./components/Overview";
+import MorningBriefing from "./components/MorningBriefing";
+import { FleetHealthBand } from "./components/FleetHealth";
 import Logo from "./components/Logo";
 import Settings from "./components/Settings";
 import ConfirmButton from "./components/ConfirmButton";
 import UndoBar from "./components/UndoBar";
 
-type ModuleTab = "overview" | "todos" | "epics" | "arb";
+type ModuleTab = "morning" | "todos" | "epics" | "arb";
 
 function App() {
   const { t } = useTranslation();
   const { projects, selected, setSelected, removeProject, reorderProjects, refresh } = useProjects();
   const { theme, setTheme } = useTheme();
-  const [activeTab, setActiveTab] = useState<ModuleTab>("todos");
+  const [activeTab, setActiveTab] = useState<ModuleTab>("morning");
   const activeProject = projects.find((p) => p.name === selected);
+
+  /** 晨报首屏的跳转：切 tab，可选同时切项目（如待确认跳到该待办所在项目）。
+   *  项目名不在注册表时降级为纯切 tab（防御 pending_ack 快照与注册表的竞态）。 */
+  function gotoTab(tab: "todos" | "epics" | "arb", projectName?: string) {
+    if (projectName && projects.some((p) => p.name === projectName)) setSelected(projectName);
+    setActiveTab(tab);
+  }
 
   // ── Undo ──
   const { undoInfo, trigger: triggerUndo, undo: doUndo, dismiss } = useUndo();
@@ -107,14 +115,14 @@ function App() {
           <Logo size={20} />
           {/* Module tabs */}
           <div className="flex items-center gap-0.5 ml-3">
-            {/* 总览：跨项目聚合，app 级全局视图，不依赖选中项目 */}
+            {/* 晨报：默认首屏（D1/D4——吞并原总览 tab） */}
             <button
               className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
-                activeTab === "overview" ? "bg-surface text-heading" : "text-faint hover:text-body"
+                activeTab === "morning" ? "bg-surface text-heading" : "text-faint hover:text-body"
               }`}
-              onClick={() => setActiveTab("overview")}
+              onClick={() => setActiveTab("morning")}
             >
-              {t("app.overviewTab")}
+              {t("app.morningTab")}
             </button>
             <button
               className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
@@ -153,16 +161,15 @@ function App() {
         <Settings theme={theme} onThemeChange={setTheme} />
       </div>
 
+      {/* 跨机健康灯带：全局共享，晨报页同样可见（异常信号不该只在方案页） */}
+      <div className="px-4 py-1 border-b border-line/50 flex items-center">
+        <FleetHealthBand />
+      </div>
+
       {/* Board */}
       <div className="flex-1 overflow-hidden">
-        {activeTab === "overview" ? (
-          <Overview
-            projects={projects}
-            onOpenProject={(name) => {
-              setSelected(name);
-              setActiveTab("epics");
-            }}
-          />
+        {activeTab === "morning" ? (
+          <MorningBriefing projects={projects} onGoto={gotoTab} />
         ) : activeTab === "arb" ? (
           /* 套利机会栏：全局功能，不依赖选中项目 */
           <ArbBoard />

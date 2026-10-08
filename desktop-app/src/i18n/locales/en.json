@@ -24,8 +24,8 @@
     "themeSystem": "System",
     "langZh": "中文",
     "langEn": "English",
-    "overviewTab": "Overview",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "morningTab": "☀ Morning"
   },
   "kanban": {
     "tagFilter": "Tag",
@@ -385,5 +385,36 @@
     "empty": "No active items across projects",
     "epicCount": "{{count}} active plans",
     "jumpTitle": "Open this project’s plan board"
+  },
+  "tray": {
+    "title": "Morning brief",
+    "pendingUnit": "awaiting your call",
+    "briefRow": "Arb brief",
+    "briefWaiting": "Waiting for GROS data",
+    "nightRow": "Nightly pipeline",
+    "digestLine": "{{total}} done · ✓{{accepted}}, {{review}} review, {{failed}} failed",
+    "noDigest": "No nightly tasks",
+    "decisionsRow": "Arb decisions",
+    "pendingAckRow": "Nightly acks",
+    "activeCount": "{{count}} active",
+    "noProjects": "No projects",
+    "oldView": "Projects & timeline ›"
+  },
+  "morning": {
+    "briefTitle": "Morning Brief",
+    "sources": "GROS radar × QuestLog nightly",
+    "briefWaiting": "Waiting for GROS briefing data…",
+    "opps": "Today’s opportunities",
+    "nightly": "Last night’s machine output",
+    "digestLine": "{{total}} done · ✓{{accepted}} review {{review}} failed {{failed}}",
+    "noNightly": "No nightly tasks",
+    "focusTitle": "Project focus · where to look first",
+    "decArb": "Arb decisions",
+    "decArbGo": "Handle →",
+    "decNightly": "Nightly to confirm",
+    "decNightlyGo": "Review →",
+    "decDrq": "Decision requests",
+    "decDrqNone": "Runner unblocked",
+    "decDrqGo": "Handle →"
   }
 }

@@ -8,6 +8,8 @@ import UndoBar from "./UndoBar";
 import { useUndo } from "../hooks/useUndo";
 import { typeIcons, priorityDot, typeOrder, ARCHIVE_DAYS } from "../constants";
 import { formatDate } from "../utils";
+import type { ArbBoardFile, ArbBrief } from "../types/arb";
+import type { FleetHealth } from "../hooks/useFleetHealth";
 
 /** i18n keys for item type labels in the popup (mirrors Card.tsx). */
 const typeLabelKey: Record<string, string> = {
@@ -44,19 +46,41 @@ interface ProjectDetail {
   idea: ItemSummary[];
 }
 
+/**
+ * get_fleet_health 的托盘读取形状。pending_ack 由 Rust 侧提供（review gate 计数）；
+ * FleetHealth 接口尚未声明该字段前按可选容错——缺失/非数字一律按 0（D5 决断总数不因它崩）。
+ */
+type TrayFleetHealth = FleetHealth & {
+  pending_ack?: { count: number } | null;
+};
+
+/** 托盘晨报速览数据。任一数据源失败 → 对应字段 null/0，行置灰，绝不白屏。 */
+interface BriefingData {
+  /** GROS 晨报段（契约 v4）；null = 未产出/读取失败 */
+  brief: ArbBrief | null;
+  /** 待处置套利决策数（decisions 数组长度） */
+  decisionCount: number;
+  /** 夜间 digest；null = 昨夜无任务 */
+  digest: FleetHealth["digest"];
+  /** 夜间待确认（review gate）计数 */
+  pendingAck: number;
+}
+
 /* ---------- main component ---------- */
 
 type View =
+  | { kind: "briefing" }
   | { kind: "projects" }
   | { kind: "all" }
   | { kind: "project"; data: ProjectDetail };
 
 export default function TimelinePanel() {
   const { t } = useTranslation();
-  const [view, setView] = useState<View>({ kind: "projects" });
+  const [view, setView] = useState<View>({ kind: "briefing" });
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [allItems, setAllItems] = useState<ItemSummary[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [briefing, setBriefing] = useState<BriefingData | null>(null);
 
   const refreshProjects = useCallback(async () => {
     const list = await invoke<ProjectSummary[]>("get_projects");
@@ -68,9 +92,45 @@ export default function TimelinePanel() {
     setAllItems(list);
   }, []);
 
+  /**
+   * 晨报速览数据（D5）：两个只读源独立降级——get_arb_board 失败只灰晨报/决策行，
+   * get_fleet_health 失败只灰夜间行，互不拖垮，也绝不抛出白屏。
+   */
+  const refreshBriefing = useCallback(async () => {
+    const [arb, fleet] = await Promise.allSettled([
+      invoke<ArbBoardFile>("get_arb_board"),
+      invoke<TrayFleetHealth>("get_fleet_health"),
+    ]);
+    const arbFile = arb.status === "fulfilled" ? arb.value : null;
+    const fleetHealth = fleet.status === "fulfilled" ? fleet.value : null;
+    setBriefing({
+      brief: arbFile?.brief ?? null,
+      decisionCount: Array.isArray(arbFile?.decisions) ? arbFile.decisions.length : 0,
+      digest: fleetHealth?.digest ?? null,
+      pendingAck:
+        typeof fleetHealth?.pending_ack?.count === "number"
+          ? fleetHealth.pending_ack.count
+          : 0,
+    });
+  }, []);
+
   useEffect(() => {
     refreshProjects();
   }, [refreshProjects]);
+
+  useEffect(() => {
+    refreshBriefing();
+    const un1 = listen("arb-changed", () => {
+      refreshBriefing();
+    });
+    const un2 = listen("todos-changed", () => {
+      refreshBriefing();
+    });
+    return () => {
+      un1.then((f) => f());
+      un2.then((f) => f());
+    };
+  }, [refreshBriefing]);
 
   useEffect(() => {
     const unlisten = listen<string>("todos-changed", () => {
@@ -122,6 +182,12 @@ export default function TimelinePanel() {
     getCurrentWindow().hide();
   }
 
+  /** 托盘行 → 主窗（D5：处置动作全部留在主窗，弹窗只读）。 */
+  function openMain() {
+    invoke("show_main_window").catch(() => {});
+    getCurrentWindow().hide();
+  }
+
   const totalActive = projects.reduce(
     (s, p) => s + p.counts.knowhow + p.counts.todo + p.counts.idea,
     0
@@ -142,8 +208,10 @@ export default function TimelinePanel() {
 
   return (
     <div className="flex flex-col bg-page text-heading text-xs rounded-[16px] overflow-hidden" style={{ maxHeight: "33vh" }}>
-      {/* ---- header ---- */}
-      <Header view={view} totalActive={totalActive} goBack={() => setView({ kind: "projects" })} />
+      {/* ---- header（晨报速览自带头部；旧视图沿用旧 Header） ---- */}
+      {view.kind !== "briefing" && (
+        <Header view={view} totalActive={totalActive} goBack={() => setView({ kind: "briefing" })} />
+      )}
 
       {/* ---- undo bar ---- */}
       {undoInfo && (
@@ -152,6 +220,15 @@ export default function TimelinePanel() {
 
       {/* ---- body ---- */}
       <div className="flex-1 overflow-y-auto min-h-0">
+        {view.kind === "briefing" && (
+          <BriefingView
+            data={briefing}
+            projects={projects}
+            totalActive={totalActive}
+            onOpenMain={openMain}
+            onProjects={() => setView({ kind: "projects" })}
+          />
+        )}
         {view.kind === "projects" && (
           <ProjectList projects={projects} onSelect={openProject} onAll={openAll} totalActive={totalActive} onRemove={handleRemoveProject} />
         )}
@@ -171,7 +248,165 @@ export default function TimelinePanel() {
   );
 }
 
-/* ---------- header ---------- */
+/* ---------- briefing view（D5 晨报速览，默认视图） ---------- */
+
+function BriefingView({
+  data,
+  projects,
+  totalActive,
+  onOpenMain,
+  onProjects,
+}: {
+  data: BriefingData | null;
+  projects: ProjectSummary[];
+  totalActive: number;
+  onOpenMain: () => void;
+  onProjects: () => void;
+}) {
+  const { t } = useTranslation();
+  const brief = data?.brief ?? null;
+  const digest = data?.digest ?? null;
+  const decisionCount = data?.decisionCount ?? 0;
+  const pendingAck = data?.pendingAck ?? 0;
+  const pendingTotal = decisionCount + pendingAck;
+  const projectNames = projects.map((p) => p.name).join(" · ");
+
+  return (
+    <div>
+      {/* ---- head：☀ 晨报速览 + 待决断总数（大数字，琥珀） ---- */}
+      <div className="flex items-center gap-2 px-3.5 py-2.5 border-b border-line">
+        <span className="text-[13px]">☀</span>
+        <span className="text-[12px] font-semibold text-heading">{t("tray.title")}</span>
+        <span className="font-mono text-[16px] font-bold text-amber tabular-nums">
+          {pendingTotal}
+        </span>
+        <span className="flex-1 min-w-0 truncate text-[11px] text-faint">
+          {t("tray.pendingUnit")}
+        </span>
+        <button
+          onClick={onOpenMain}
+          className="text-[11px] text-faint hover:text-heading"
+          title={t("timeline.showMain")}
+        >
+          ⊞
+        </button>
+        <ConfirmButton
+          label="✕"
+          confirmLabel="✕"
+          onConfirm={() => invoke("quit_app").catch(() => {})}
+          className="text-[11px] text-faint hover:text-danger"
+          title={t("timeline.quit")}
+        />
+      </div>
+
+      {/* 📰 套利晨报：headline + brief_date；GROS 缺失 → 置灰等待 */}
+      <TrayRow
+        icon="📰"
+        label={t("tray.briefRow")}
+        summary={brief ? (brief.headline ?? "—") : t("tray.briefWaiting")}
+        right={brief ? (brief.brief_date ?? "—") : "—"}
+        dimmed={!brief}
+        onClick={onOpenMain}
+      />
+
+      {/* 🌙 夜间管线：digest 摘要 + 日期；昨夜无任务 → 置灰 */}
+      <TrayRow
+        icon="🌙"
+        label={t("tray.nightRow")}
+        summary={
+          digest && digest.total > 0
+            ? t("tray.digestLine", {
+                total: digest.total,
+                accepted: digest.accepted,
+                review: digest.review,
+                failed: digest.failed,
+              })
+            : t("tray.noDigest")
+        }
+        right={digest ? digest.date : "—"}
+        dimmed={!digest || digest.total === 0}
+        onClick={onOpenMain}
+      />
+
+      {/* ☑ 套利决策 → 主窗套利页处置 */}
+      <TrayRow
+        icon="☑"
+        label={t("tray.decisionsRow")}
+        summary=""
+        right={decisionCount > 0 ? `${decisionCount} →` : "0"}
+        dimmed={decisionCount === 0}
+        onClick={onOpenMain}
+      />
+
+      {/* 🔵 夜间待确认 → 主窗待确认区处置 */}
+      <TrayRow
+        icon="🔵"
+        label={t("tray.pendingAckRow")}
+        summary=""
+        right={pendingAck > 0 ? `${pendingAck} →` : "0"}
+        dimmed={pendingAck === 0}
+        onClick={onOpenMain}
+      />
+
+      {/* 📁 各项目在办一行汇总 → 托盘内项目列表 */}
+      <TrayRow
+        icon="📁"
+        label=""
+        summary={projectNames || t("tray.noProjects")}
+        right={t("tray.activeCount", { count: totalActive })}
+        dimmed={projects.length === 0}
+        last
+        onClick={onProjects}
+      />
+
+      {/* 底部小字入口：切回项目/时间线旧视图 */}
+      <button
+        className="w-full text-left px-3.5 py-2 text-[11px] text-faint hover:text-accent transition-colors"
+        onClick={onProjects}
+      >
+        {t("tray.oldView")}
+      </button>
+    </div>
+  );
+}
+
+/** 晨报速览单行（照抄效果图 .t-row 结构：图标 · 标签 · 摘要 · 右侧 mono）。 */
+function TrayRow({
+  icon,
+  label,
+  summary,
+  right,
+  dimmed = false,
+  last = false,
+  onClick,
+}: {
+  icon: string;
+  /** 空字符串 = 无标签（📁 行直接放项目名摘要） */
+  label: string;
+  summary: string;
+  right: string;
+  dimmed?: boolean;
+  last?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`w-full flex items-center gap-2 px-3.5 py-[7px] text-left text-[11px] hover:bg-surface transition-colors cursor-pointer ${
+        last ? "" : "border-b"
+      } border-line ${dimmed ? "opacity-50" : ""}`}
+      onClick={onClick}
+    >
+      <span className="shrink-0">{icon}</span>
+      {label && <span className="shrink-0 text-muted">{label}</span>}
+      <span className={`flex-1 min-w-0 truncate ${label ? "text-body" : "text-muted"}`}>
+        {summary}
+      </span>
+      <span className="shrink-0 font-mono text-faint tabular-nums">{right}</span>
+    </button>
+  );
+}
+
+/* ---------- header（旧视图：项目列表 / 全部活跃 / 项目详情） ---------- */
 
 function Header({
   view,
@@ -184,11 +419,11 @@ function Header({
 }) {
   const { t } = useTranslation();
   const title =
-    view.kind === "projects"
-      ? t("timeline.projectList")
-      : view.kind === "all"
-        ? t("timeline.allActive")
-        : view.data.project;
+    view.kind === "all"
+      ? t("timeline.allActive")
+      : view.kind === "project"
+        ? view.data.project
+        : t("timeline.projectList");
 
   function showMain() {
     invoke("show_main_window").catch(() => {});
@@ -196,11 +431,9 @@ function Header({
 
   return (
     <div className="flex items-center gap-2 px-3 py-2 border-b border-line">
-      {view.kind !== "projects" && (
-        <button onClick={goBack} className="text-accent hover:opacity-70 transition-opacity">
-          ←
-        </button>
-      )}
+      <button onClick={goBack} className="text-accent hover:opacity-70 transition-opacity">
+        ←
+      </button>
       <span className="font-bold flex-1 truncate">{title}</span>
       <span className="text-[10px] text-faint">{t("timeline.count", { total: totalActive })}</span>
       <button onClick={showMain} className="text-[10px] text-faint hover:text-heading" title={t("timeline.showMain")}>⊞</button>

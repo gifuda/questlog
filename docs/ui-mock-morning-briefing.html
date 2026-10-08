@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuestLog 晨报首屏 · 效果图（需求 v1 / D1–D5）</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --page:      #0b0e14;
+    --surface:   #12161f;
+    --elevated:  #1a2030;
+    --chip:      #1c2333;
+    --line:      #232b3d;
+    --line-soft: #1a2130;
+    --heading:   #e8ecf4;
+    --body:      #b9c1d1;
+    --muted:     #7d879c;
+    --faint:     #4d566b;
+    --accent:    #5ea2ff;
+    --accent-bg: rgba(94,162,255,.12);
+    --amber:     #f0b45a;
+    --amber-bg:  rgba(240,180,90,.10);
+    --success:   #57c98a;
+    --danger:    #e56c6c;
+    --info:      #4cc3d9;
+    --info-bg:   rgba(76,195,217,.12);
+    --fs-micro:  11px;
+    --fs-meta:   12px;
+    --fs-body:   13px;
+    --fs-title:  14px;
+    --fs-panel:  16px;
+    --fs-hero:   20px;
+    --font-ui:   "Space Grotesk", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #070910;
+    color: var(--body);
+    font-family: var(--font-ui);
+    font-size: var(--fs-body);
+    line-height: 1.55;
+    padding: 40px 24px 80px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  .doc-head h1 { color: var(--heading); font-size: 22px; font-weight: 600; letter-spacing: .02em; }
+  .doc-head p { color: var(--muted); font-size: var(--fs-body); margin-top: 6px; }
+  .doc-head .tags { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .dtag { font-size: var(--fs-micro); padding: 2px 8px; border-radius: 99px; background: var(--chip); color: var(--muted); }
+  .dtag b { color: var(--accent); font-weight: 600; }
+
+  /* ── App 窗口框 ── */
+  .window {
+    margin-top: 28px;
+    background: var(--page);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0,0,0,.5);
+  }
+  .win-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; border-bottom: 1px solid var(--line-soft);
+    background: var(--surface);
+  }
+  .win-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .win-title { font-size: var(--fs-micro); color: var(--faint); margin-left: 8px; font-family: var(--font-mono); }
+
+  /* ── 顶栏：模块 tab ── */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 16px; border-bottom: 1px solid var(--line);
+  }
+  .topbar .left { display: flex; align-items: center; gap: 10px; }
+  .logo { font-size: 15px; font-weight: 700; color: var(--heading); letter-spacing: .03em; }
+  .logo em { color: var(--accent); font-style: normal; }
+  .tabs { display: flex; gap: 2px; margin-left: 12px; }
+  .tab {
+    font-size: var(--fs-micro); padding: 4px 10px; border-radius: 7px;
+    color: var(--faint); cursor: pointer; position: relative; transition: background .15s;
+  }
+  .tab:hover { color: var(--body); }
+  .tab.active { background: var(--surface); color: var(--heading); }
+  .tab .cnt {
+    font-family: var(--font-mono); font-size: 10px; margin-left: 4px;
+    padding: 0 5px; border-radius: 99px; background: var(--danger); color: #fff;
+  }
+  .gear { color: var(--faint); font-size: 14px; }
+
+  /* ── 健康灯带（全局，所有页共享） ── */
+  .health {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 6px 16px; border-bottom: 1px solid var(--line-soft);
+    font-size: var(--fs-micro); color: var(--faint);
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 1px 8px; border-radius: 6px; font-size: var(--fs-micro); white-space: nowrap;
+  }
+  .chip.ok     { color: var(--success); }
+  .chip.warn   { background: var(--amber-bg); color: var(--amber); }
+  .chip.info   { background: var(--accent-bg); color: var(--accent); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
+  .health .right { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+  .pulse { display:inline-block; width:6px; height:6px; border-radius:50%; background: var(--success); animation: pl 1.6s infinite; }
+  @keyframes pl { 50% { opacity: .35; } }
+
+  /* ── 晨报卡（D2 跨源合一） ── */
+  .brief {
+    margin: 14px 16px 0;
+    border: 1px solid var(--line); border-radius: 12px;
+    background: var(--surface); overflow: hidden;
+  }
+  .brief-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px 8px;
+  }
+  .brief-head .t { font-size: var(--fs-title); font-weight: 600; color: var(--heading); }
+  .brief-head .date { font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--faint); }
+  .brief-head .src { margin-left: auto; font-size: var(--fs-micro); color: var(--faint); }
+  .brief-headline { padding: 0 14px 8px; font-size: var(--fs-body); color: var(--body); }
+  .brief-sec { border-top: 1px solid var(--line-soft); padding: 8px 14px 10px; }
+  .brief-sec .lbl { font-size: var(--fs-micro); color: var(--faint); margin-bottom: 6px; letter-spacing: .04em; }
+  .opp { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: var(--fs-body); color: var(--body); }
+  .badge {
+    font-size: var(--fs-micro); padding: 1px 7px; border-radius: 6px; white-space: nowrap; flex-shrink: 0;
+  }
+  .badge.hi { background: rgba(229,108,108,.15); color: var(--danger); }
+  .badge.mid { background: var(--amber-bg); color: var(--amber); }
+  .digest { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body); }
+  .digest .mono { font-family: var(--font-mono); }
+
+  /* ── 待我决断（D3 计数+跳转） ── */
+  .decisions { display: flex; gap: 10px; padding: 12px 16px 0; }
+  .dcard {
+    flex: 1; display: flex; align-items: center; gap: 10px;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--surface); padding: 10px 12px;
+    cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .dcard:hover { border-color: var(--accent); background: var(--elevated); }
+  .dcard.empty { cursor: default; }
+  .dcard.empty:hover { border-color: var(--line); background: var(--surface); }
+  .dcard .n { font-family: var(--font-mono); font-size: var(--fs-hero); font-weight: 700; color: var(--heading); }
+  .dcard .n.amber { color: var(--amber); }
+  .dcard .n.blue { color: var(--accent); }
+  .dcard .meta { flex: 1; min-width: 0; }
+  .dcard .meta .a { font-size: var(--fs-body); color: var(--heading); }
+  .dcard .meta .b { font-size: var(--fs-micro); color: var(--faint); }
+  .dcard .go { color: var(--accent); font-size: var(--fs-body); }
+
+  /* ── 各项目焦点（D4 吞并总览） ── */
+  .focus { margin: 12px 16px 0; }
+  .focus .sec-title { font-size: var(--fs-micro); color: var(--faint); letter-spacing: .05em; margin-bottom: 6px; }
+  .prow {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px;
+    background: rgba(18,22,31,.6); margin-bottom: 6px;
+    cursor: pointer; transition: border-color .15s;
+  }
+  .prow:hover { border-color: var(--accent); }
+  .prow.empty { cursor: default; }
+  .prow.empty:hover { border-color: var(--line); }
+  .prow .name { font-size: var(--fs-body); font-weight: 500; color: var(--heading); flex-shrink: 0; }
+  .prow .counts { display: flex; gap: 8px; font-size: var(--fs-micro); color: var(--muted); flex-shrink: 0; font-family: var(--font-mono); }
+  .prow .sig { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: var(--fs-micro); color: var(--muted); min-width: 0; }
+  .prow .sig .t { color: var(--body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sdot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .sdot.act { background: var(--accent); } .sdot.obs { background: var(--amber); } .sdot.blk { background: var(--danger); }
+
+  /* ── 底部项目条 ── */
+  .projbar {
+    display: flex; gap: 4px; padding: 8px 16px; margin-top: 14px;
+    border-top: 1px solid var(--line); overflow-x: auto;
+  }
+  .ptab {
+    font-size: var(--fs-micro); padding: 3px 12px; border-radius: 99px; color: var(--faint);
+    white-space: nowrap; flex-shrink: 0; cursor: pointer; transition: background .15s;
+  }
+  .ptab:hover { color: var(--body); background: var(--surface); }
+  .ptab.sel { background: var(--surface); color: var(--heading); box-shadow: inset 0 0 0 1px var(--line); }
+
+  /* ── 可点原型：其余三页简化版 ── */
+  .page { display: none; }
+  .page.active { display: block; }
+  .stub-sec { padding: 12px 16px 0; }
+  .stub-title { font-size: var(--fs-micro); color: var(--faint); letter-spacing: .05em; margin-bottom: 8px; }
+  .kanban { display: flex; gap: 12px; padding: 0 16px; }
+  .kcol { flex: 1; min-width: 0; }
+  .kcol .kh { font-size: var(--fs-micro); color: var(--muted); margin-bottom: 6px; }
+  .kcard {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+    padding: 8px 10px; font-size: var(--fs-body); color: var(--heading); margin-bottom: 6px;
+  }
+  .kcard .sub { font-size: var(--fs-micro); color: var(--faint); margin-top: 3px; }
+  .kcard .row { display: flex; align-items: center; gap: 6px; }
+  .review-zone { margin: 12px 16px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--accent-bg); padding: 10px 12px; }
+  .review-zone .rz-h { display: flex; align-items: center; gap: 8px; font-size: var(--fs-micro); color: var(--accent); margin-bottom: 8px; }
+  .ack-btn {
+    font-size: var(--fs-micro); padding: 3px 12px; border-radius: 7px; border: none;
+    background: var(--accent); color: #fff; cursor: pointer; transition: opacity .15s;
+  }
+  .ack-btn:hover { opacity: .85; }
+  .eprow {
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+    border: 1px solid var(--line); border-radius: 10px; background: rgba(18,22,31,.6); margin-bottom: 6px;
+  }
+  .eprow .t { font-size: var(--fs-body); font-weight: 500; color: var(--heading); }
+  .eprow .p { margin-left: auto; font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--muted); }
+  .bar { width: 90px; height: 4px; border-radius: 2px; background: var(--elevated); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .dec-row {
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--surface); margin-bottom: 8px;
+  }
+  .dec-row .t { flex: 1; min-width: 0; font-size: var(--fs-body); color: var(--heading); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dec-row.done { opacity: .4; }
+  .dec-btn {
+    font-size: var(--fs-micro); padding: 3px 12px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--elevated); color: var(--body); transition: all .15s;
+  }
+  .dec-btn.ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .dec-btn.no:hover { border-color: var(--danger); color: var(--danger); }
+  .dec-btn.ok:hover { opacity: .85; }
+  .toast {
+    position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%);
+    background: var(--elevated); border: 1px solid var(--accent); color: var(--heading);
+    font-size: var(--fs-body); padding: 8px 16px; border-radius: 10px;
+    opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 99;
+  }
+  .toast.show { opacity: 1; }
+  .ptab .c { font-family: var(--font-mono); font-size: 10px; color: var(--accent); margin-left: 3px; }
+
+  /* ── 托盘迷你版（D5） ── */
+  .tray {
+    width: 340px; border: 1px solid var(--line); border-radius: 16px;
+    background: var(--page); overflow: hidden;
+    box-shadow: 0 18px 60px rgba(0,0,0,.5);
+  }
+  .tray .t-head { padding: 10px 14px; border-bottom: 1px solid var(--line-soft); display: flex; align-items: center; gap: 8px; }
+  .tray .t-head .n { font-family: var(--font-mono); font-size: 16px; font-weight: 700; color: var(--amber); }
+  .tray .t-row { padding: 7px 14px; display: flex; align-items: center; gap: 8px; font-size: var(--fs-micro); color: var(--muted); border-bottom: 1px solid var(--line-soft); }
+  .tray .t-row .r { margin-left: auto; color: var(--faint); font-family: var(--font-mono); }
+
+  .cols { display: grid; grid-template-columns: 1fr 360px; gap: 24px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+
+  /* ── 注解 ── */
+  .notes { margin-top: 28px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+  .note { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; background: var(--surface); }
+  .note b { color: var(--accent); font-family: var(--font-mono); font-size: var(--fs-micro); }
+  .note p { font-size: var(--fs-meta); color: var(--muted); margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="doc-head">
+    <h1>晨报首屏 · 效果图</h1>
+    <p>需求设定 v1（docs/功能需求设定_晨报首屏_20261008.md）的可视化——数据取自真实 board.json（2026-10-06 晨报）与当前面板状态。</p>
+    <div class="tags">
+      <span class="dtag"><b>D1</b> 脊柱=早晨开机总览</span>
+      <span class="dtag"><b>D2</b> 晨报跨源合一</span>
+      <span class="dtag"><b>D3</b> 待决断=计数+跳转</span>
+      <span class="dtag"><b>D4</b> 晨报吞并总览·四 tab</span>
+      <span class="dtag"><b>D5</b> 托盘=晨报迷你版</span>
+    </div>
+  </div>
+
+  <div class="cols">
+    <!-- ════════ 主窗口 ════════ -->
+    <div class="window">
+      <div class="win-bar">
+        <span class="win-dot" style="background:#e56c6c"></span>
+        <span class="win-dot" style="background:#f0b45a"></span>
+        <span class="win-dot" style="background:#57c98a"></span>
+        <span class="win-title">QuestLog · 桌面清单贴</span>
+      </div>
+
+      <!-- 顶栏：晨报为默认 tab（D4） -->
+      <div class="topbar">
+        <div class="left">
+          <span class="logo">Quest<em>Log</em></span>
+          <div class="tabs">
+            <span class="tab active" data-tab="morning">☀ 晨报</span>
+            <span class="tab" data-tab="todos">待办清单</span>
+            <span class="tab" data-tab="epics">方案追踪</span>
+            <span class="tab" data-tab="arb">套利机会<span class="cnt">3</span></span>
+          </div>
+        </div>
+        <span class="gear">⚙</span>
+      </div>
+
+      <!-- 健康灯带（全局共享，异常才显眼） -->
+      <div class="health">
+        <span class="chip warn">窗口漏跑 09-21</span>
+        <span class="chip info">回执待处理 0</span>
+        <span class="right">
+          <span><span class="pulse"></span> Runner 运转中 · 4s 前</span>
+        </span>
+      </div>
+
+      <!-- ═══ 页 1：晨报（默认，D1） ═══ -->
+      <div class="page active" id="page-morning">
+
+      <!-- 晨报卡（D2：GROS 晨报 + QuestLog 夜间 digest 合一） -->
+      <div class="brief">
+        <div class="brief-head">
+          <span class="t">☀ 晨报</span>
+          <span class="date">2026-10-06</span>
+          <span class="src">GROS 雷达轮 × QuestLog 夜间管线</span>
+        </div>
+        <div class="brief-headline">open 0 | due(7d) 0 | 24h 新增线索 0 / 深研 0 —— 雷达平静，注意力可投向工程线</div>
+        <div class="brief-sec">
+          <div class="lbl">当日机会橱窗 · 3</div>
+          <div class="opp"><span class="badge hi">高</span> iPhone Duo 首发转售窗口</div>
+          <div class="opp"><span class="badge hi">高</span> 塞尔达 40 周年 Switch 2 限定版</div>
+          <div class="opp"><span class="badge mid">中</span> PS5 Pro 缺货溢价（GTA6 窗口）</div>
+        </div>
+        <div class="brief-sec">
+          <div class="lbl">昨夜机器产出 · QuestLog</div>
+          <div class="digest">🌙 <span class="mono">09-18</span> · 共 2 条 · <span style="color:var(--success)">✓1</span> · 待审 1 · 失败 0</div>
+        </div>
+      </div>
+
+      <!-- 待我决断（D3：计数 + 跳转，处置回各自页面） -->
+      <div class="decisions">
+        <div class="dcard" data-goto="arb">
+          <span class="n amber">3</span>
+          <div class="meta"><div class="a">套利决策</div><div class="b">D1 立 · D3 11月初再定…</div></div>
+          <span class="go">处置 →</span>
+        </div>
+        <div class="dcard" data-goto="todos">
+          <span class="n blue">1</span>
+          <div class="meta"><div class="a">夜间待确认</div><div class="b">盘点 src-tauri 架构索引</div></div>
+          <span class="go">确认 →</span>
+        </div>
+        <div class="dcard empty" style="opacity:.45">
+          <span class="n">0</span>
+          <div class="meta"><div class="a">决策请求</div><div class="b">Runner 无阻塞</div></div>
+          <span class="go">—</span>
+        </div>
+      </div>
+
+      <!-- 各项目焦点（D4：吞并总览） -->
+      <div class="focus">
+        <div class="sec-title">各项目焦点 · 先看哪里</div>
+        <div class="prow" data-goto="epics">
+          <span class="name">桌面清单贴</span>
+          <span class="counts">✅3 📊2</span>
+          <span class="sig"><span class="sdot act"></span> 进行中 <span class="t">晨报首屏与布局重构 · 需求已设定</span></span>
+        </div>
+        <div class="prow" data-goto="epics">
+          <span class="name">人生os</span>
+          <span class="counts">✅1 📊4</span>
+          <span class="sig"><span class="sdot act"></span> 进行中 <span class="t">Relay 启发三件套</span></span>
+        </div>
+        <div class="prow" data-goto="epics">
+          <span class="name">ymos-投资系统</span>
+          <span class="counts">✅2</span>
+          <span class="sig"><span class="sdot obs"></span> 观察窗 <span class="t">审计管道迁采集机</span></span>
+        </div>
+        <div class="prow empty" style="opacity:.45">
+          <span class="name">stock-debate</span>
+          <span class="counts">—</span>
+          <span class="sig"><span class="sdot"></span> 无在办</span>
+        </div>
+      </div>
+      </div><!-- /page-morning -->
+
+      <!-- ═══ 页 2：待办清单（简化版——真实页不变，仅供原型跳转感受） ═══ -->
+      <div class="page" id="page-todos">
+        <div class="stub-sec">
+          <div class="stub-title">待办清单 · 当前项目：桌面清单贴（此页保持现状设计，此处为简化示意）</div>
+          <div class="review-zone">
+            <div class="rz-h">▼ 夜间完成 · 待确认 <span class="badge" style="background:var(--chip);color:var(--muted)">1</span>
+              <span style="margin-left:auto;color:var(--faint)">🌙 09-18 · 共2条 · ✓1 待审1</span></div>
+            <div class="kcard" style="opacity:.65">
+              <div class="row" style="justify-content:space-between">
+                <span>盘点 src-tauri 模块职责并产出架构索引 <span class="badge" style="background:rgba(87,201,138,.15);color:var(--success)">机器验收完成</span></span>
+                <button class="ack-btn" id="ackBtn">确认</button>
+              </div>
+              <div class="sub">🌙 已闭环 · 查看方案 →</div>
+            </div>
+          </div>
+        </div>
+        <div class="kanban" style="margin-top:12px">
+          <div class="kcol"><div class="kh">📘 经验</div>
+            <div class="kcard">了解 MCP 协议机制<div class="sub">stdio transport · tool schema</div></div>
+          </div>
+          <div class="kcol"><div class="kh">✅ 待办</div>
+            <div class="kcard">范围熔断前先把 raw diff 落入 AttemptBundle<div class="sub">runner · evidence</div></div>
+            <div class="kcard">封包范围默认容纳任务自命名新文件位<div class="sub">task-package · scope</div></div>
+          </div>
+          <div class="kcol"><div class="kh">💡 想法</div>
+            <div class="kcard" style="opacity:.55;color:var(--muted)">（空）</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ 页 3：方案追踪（简化版） ═══ -->
+      <div class="page" id="page-epics">
+        <div class="stub-sec">
+          <div class="stub-title">方案追踪 · 桌面清单贴（简化示意；🌙 = 夜间待办自动产出）</div>
+          <div class="eprow"><span class="t">晨报首屏与布局重构</span><span class="badge" style="background:var(--accent-bg);color:var(--accent)">进行中</span><span class="bar"><i style="width:25%"></i></span><span class="p">25%</span></div>
+          <div class="eprow"><span class="t">🌙 自动处理·盘点 docs 方案文档</span><span class="badge" style="background:var(--accent-bg);color:var(--accent)">进行中</span><span class="bar"><i style="width:37%"></i></span><span class="p">37%</span></div>
+          <div class="eprow"><span class="t">待办租户：采集机凌晨自动处理</span><span class="badge" style="background:var(--accent-bg);color:var(--accent)">进行中</span><span class="bar"><i style="width:64%"></i></span><span class="p">64%</span></div>
+          <div class="eprow" style="opacity:.5"><span class="t" style="text-decoration:line-through">Runner 硬化后受控灰度验证序列</span><span class="badge" style="background:rgba(87,201,138,.15);color:var(--success)">已完成</span><span class="bar"><i style="width:100%;background:var(--success)"></i></span><span class="p">100%</span></div>
+        </div>
+      </div>
+
+      <!-- ═══ 页 4：套利机会（决策处置真实手感） ═══ -->
+      <div class="page" id="page-arb">
+        <div class="stub-sec">
+          <div class="stub-title">套利机会 · 决策处置（点批准/驳回感受流程；数据=今日 board.json）</div>
+          <div class="dec-row" data-dec="D1"><span class="badge hi">D1 · 立</span><span class="t">折叠 Duo 10/23 开售新假设（橱窗口径）</span>
+            <button class="dec-btn ok">批准</button><button class="dec-btn no">驳回</button></div>
+          <div class="dec-row" data-dec="D2"><span class="badge mid">D2 · dismiss</span><span class="t">旧线索 8292a68b 状态收尾</span>
+            <button class="dec-btn ok">批准</button><button class="dec-btn no" disabled style="opacity:.35;cursor:not-allowed">驳回</button></div>
+          <div class="dec-row" data-dec="D3"><span class="badge mid">D3 · 11月初再定</span><span class="t">GTA6 前 PS5 Pro 缺货溢价转售</span>
+            <button class="dec-btn ok">批准</button><button class="dec-btn no" disabled style="opacity:.35;cursor:not-allowed">驳回</button></div>
+        </div>
+      </div>
+
+      <!-- 底部项目条 -->
+      <div class="projbar">
+        <span class="ptab sel">桌面清单贴<span class="c">3</span></span>
+        <span class="ptab">ymos-投资系统<span class="c">2</span></span>
+        <span class="ptab">人生os<span class="c">1</span></span>
+        <span class="ptab">stock-debate</span>
+        <span class="ptab">韬普利TopLEe</span>
+        <span class="ptab">工业品超市</span>
+      </div>
+    </div>
+
+    <!-- ════════ 托盘迷你版（D5） ════════ -->
+    <div>
+      <div class="tray">
+        <div class="t-head">
+          <span style="font-size:13px">☀</span>
+          <span style="font-size:12px;color:var(--heading);font-weight:600">晨报速览</span>
+          <span class="n">4</span>
+          <span style="font-size:11px;color:var(--faint)">件待我决断</span>
+        </div>
+        <div class="t-row">📰 套利晨报 <span style="color:var(--body)">雷达平静 · 机会橱窗 3</span> <span class="r">10-06</span></div>
+        <div class="t-row">🌙 夜间管线 <span style="color:var(--body)">2 条 · ✓1 待审1</span> <span class="r">09-18</span></div>
+        <div class="t-row">☑ 套利决策 <span class="r">3 →</span></div>
+        <div class="t-row">🔵 夜间待确认 <span class="r">1 →</span></div>
+        <div class="t-row" style="border-bottom:none">📁 桌面清单贴 · 人生os · ymos <span class="r">在办 6</span></div>
+      </div>
+      <p style="font-size:12px;color:var(--faint);margin-top:10px;text-align:center">托盘弹窗 = 晨报迷你版（D5）<br>点击行 → 主窗对应位置</p>
+    </div>
+  </div>
+
+  <!-- ════════ 区域注解 ════════ -->
+  <div class="notes">
+    <div class="note"><b>D1 / 首屏默认</b><p>app 打开落在此页。三秒回答：昨晚发生了什么、我要拍几件板、今天先看哪个项目。</p></div>
+    <div class="note"><b>D2 / 晨报卡</b><p>GROS 晨报与 QuestLog 夜间 digest 合一展示，来源标注在卡片右上。各数据源独立降级：缺一置灰该段，不拖垮整卡。</p></div>
+    <div class="note"><b>D3 / 决断卡</b><p>只显示计数与摘要，「处置 →」跳回各自页面——review gate、决策白名单、两段确认全部留在原地，首屏零写权限。</p></div>
+    <div class="note"><b>D4 / 焦点区</b><p>原「总览」tab 内容并入此区：每项目一行（计数 + 单焦点信号），点击行直达该项目方案页。</p></div>
+    <div class="note"><b>健康灯带</b><p>全局共享，晨报页同样可见——窗口漏跑/回执滞留这类信号不应该只在方案页才能看到。</p></div>
+    <div class="note"><b>时效标记</b><p>晨报日期、digest 日期固定显示（mono 字体），过夜数据一眼可辨。</p></div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── 可点原型交互：tab 切换 / 决断卡跳转 / 焦点行跳转 / 处置手感 ──
+const tabs = document.querySelectorAll('.tab');
+const pages = { morning: 'page-morning', todos: 'page-todos', epics: 'page-epics', arb: 'page-arb' };
+function switchTab(name) {
+  tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  Object.values(pages).forEach(id => document.getElementById(id).classList.remove('active'));
+  document.getElementById(pages[name]).classList.add('active');
+}
+tabs.forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
+
+// 决断卡与项目焦点行 → 跳转（D3：处置回各自页面）
+document.querySelectorAll('[data-goto]').forEach(el =>
+  el.addEventListener('click', () => switchTab(el.dataset.goto)));
+
+// 托盘行 → 主窗对应位置（D5）
+document.querySelectorAll('.t-row').forEach((el, i) => {
+  el.style.cursor = 'pointer';
+  el.addEventListener('click', () => switchTab(['arb', 'todos', 'arb', 'todos', 'morning'][i] ?? 'morning'));
+});
+
+// toast
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+// 套利页：批准/驳回 → 行置灰 + toast（原型手感；真实流程走 run_arb_decision 白名单）
+document.querySelectorAll('.dec-row').forEach(row => {
+  row.querySelectorAll('.dec-btn:not([disabled])').forEach(btn => {
+    btn.addEventListener('click', () => {
+      row.classList.add('done');
+      row.querySelectorAll('.dec-btn').forEach(b => b.disabled = true);
+      const ok = btn.classList.contains('ok');
+      toast(`${row.dataset.dec} 已${ok ? '批准' : '驳回'} · 已提交 GROS 薄壳执行，下轮导出后消失`);
+    });
+  });
+});
+
+// 待办页：夜间待确认「确认」→ 卡片离开待确认区（review gate 手感）
+const ackBtn = document.getElementById('ackBtn');
+if (ackBtn) {
+  ackBtn.addEventListener('click', () => {
+    ackBtn.closest('.review-zone').style.display = 'none';
+    toast('已确认 · 卡片进入普通完成区（auto_ack_at 落盘）');
+  });
+}
+</script>
+</body>
+</html>

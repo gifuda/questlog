@@ -9,7 +9,6 @@ import type { Epic, EpicStatus, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
 import ExecutionPanel, { DecisionInbox, RunningBanner } from "./ExecutionPanel";
 import ExecutorModelSelector from "./ExecutorModelSelector";
-import { FleetHealthBand } from "./FleetHealth";
 
 /** i18n keys for epic status labels (statuses stay lowercase in data). */
 const epicStatusKey: Record<EpicStatus, string> = {
@@ -78,7 +77,6 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
           <Metric num={summary.observing} label={t("epic.sumObserving")} numClass="text-amber" />
           <Metric num={summary.blocked} label={t("epic.sumBlocked")} numClass="text-danger" />
           <Metric num={summary.done} label={t("epic.sumDone")} numClass="text-success" />
-          <FleetHealthBand />
           <div className="ml-auto">
             <RunnerHeartbeat runnerStatus={runnerStatus} lastPollSecsAgo={lastPollSecsAgo} />
           </div>

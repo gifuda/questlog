@@ -21,6 +21,8 @@ export interface FleetHealth {
   in_flight: number;
   last_applied_at: string | null;
   digest: NightDigest | null;
+  /** review gate：机器完成但人未确认的待办（跨项目）。 */
+  pending_ack: { count: number; items: { project: string; title: string }[] };
 }
 
 /** 待办 → 夜间任务链路（账本 todo-tasks.json 的读时投影）。 */
