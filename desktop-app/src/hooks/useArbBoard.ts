@@ -44,3 +44,15 @@ export async function setArbBoard(enabled: boolean, boardPath: string): Promise<
 export async function submitArbControl(param: string, value: string): Promise<void> {
   await invoke("submit_arb_control", { param, value });
 }
+
+/**
+ * 执行决策项命令（契约 v4 C：决策点击处置）。
+ * cmd 是 GROS 晨报预生成的完整薄壳命令草稿（research / lead-status / settle
+ * 三类），app 不组装命令；白名单硬约束在 Rust 侧 run_arb_decision 统一执行
+ * （唯一执行口，前端不重复实现）。同一单向双通道纪律：写走薄壳（账房留痕），
+ * 读走下一轮 board.json 导出，已处置项自然消失。
+ * 成功 resolve（stdout）；失败 reject（原样错误输出，UI 显示不重试）。
+ */
+export async function runArbDecision(cmd: string): Promise<string> {
+  return invoke<string>("run_arb_decision", { cmd });
+}

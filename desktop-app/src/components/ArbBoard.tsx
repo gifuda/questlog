@@ -1,7 +1,16 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { useArbBoard, submitArbControl } from "../hooks/useArbBoard";
-import type { ArbOpenHypothesis, ArbSettledHypothesis, ArbOutcome, ArbControl, ArbLead } from "../types/arb";
+import { useArbBoard, submitArbControl, runArbDecision } from "../hooks/useArbBoard";
+import Badge from "./Badge";
+import type {
+  ArbOpenHypothesis,
+  ArbSettledHypothesis,
+  ArbOutcome,
+  ArbControl,
+  ArbLead,
+  ArbBrief,
+  ArbDecisionItem,
+} from "../types/arb";
 
 type ArbFilter = "all" | "open" | "settled";
 type ArbSort = "diff" | "annualized";
@@ -75,12 +84,12 @@ export default function ArbBoard() {
       {/* 汇总条（需求 3.5） */}
       <div className="px-4 py-2.5 border-b border-line bg-surface/30 flex items-center gap-3 text-[11px] text-muted flex-wrap">
         <span className="font-bold text-heading">📈 {t("arb.title")}</span>
-        <span className="text-blue-400">{t("arb.summaryOpen", { count: summary.open })}</span>
-        <span className="text-gray-400">{t("arb.summarySettled", { count: summary.settled })}</span>
-        <span className="text-green-400">
+        <span className="text-accent">{t("arb.summaryOpen", { count: summary.open })}</span>
+        <span className="text-muted">{t("arb.summarySettled", { count: summary.settled })}</span>
+        <span className="text-success">
           {t("arb.summaryHitRate")}: {summary.hit_rate === null ? "—" : `${Math.round(summary.hit_rate * 100)}%`}
         </span>
-        <span className="text-yellow-400">
+        <span className="text-amber">
           {t("arb.summaryBias")}: {summary.mean_bias === null ? "—" : fmtSigned(summary.mean_bias, 4)}
         </span>
         <span className="text-faint ml-auto">{t("arb.readOnlyHint")}</span>
@@ -88,6 +97,9 @@ export default function ArbBoard() {
 
       {/* 自动化控制条（契约 v3 B 控制区；GROS-01 增量 #2 未落地时置灰） */}
       <ControlBar control={data.control} />
+
+      {/* 晨报卡片（契约 v4；GROS 侧 brief/decisions 段未产出时置灰等待） */}
+      <BriefingSection brief={data.brief} decisions={data.decisions} />
 
       {/* 过滤 + 排序 */}
       <div className="px-4 py-2 border-b border-line flex items-center gap-2">
@@ -177,9 +189,9 @@ function OpenCard({ item }: { item: ArbOpenHypothesis }) {
     <div className="rounded-lg border border-line bg-surface/50 hover:border-accent/30 transition-colors">
       <div className="px-3 py-2.5 cursor-pointer" onClick={() => setExpanded(!expanded)}>
         <div className="flex items-center gap-2">
-          <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 shrink-0">
+          <Badge tone="accent" className="shrink-0">
             {t("arb.statusOpen")}
-          </span>
+          </Badge>
           <span className="text-xs font-medium flex-1 truncate text-heading">{item.title}</span>
           <span className="text-xs font-mono font-bold text-heading shrink-0">
             {fmtSigned(item.price_diff, 4)}
@@ -194,15 +206,15 @@ function OpenCard({ item }: { item: ArbOpenHypothesis }) {
           <span className="font-mono">
             {t("arb.fairVsObserved", { fair: fmtNum(item.fair_value, 2), observed: fmtNum(item.observed_value, 2) })}
           </span>
-          <span className="text-green-400/80">✓{item.evidence?.support ?? 0}</span>
-          <span className="text-red-400/80">✗{item.evidence?.oppose ?? 0}</span>
+          <span className="text-success/80">✓{item.evidence?.support ?? 0}</span>
+          <span className="text-danger/80">✗{item.evidence?.oppose ?? 0}</span>
           {item.horizon_days != null && (
             <span className="text-faint">{t("arb.horizonDays", { days: item.horizon_days })}</span>
           )}
         </div>
         {/* 证伪条件摘要（需求 3.3：截断） */}
         {Array.isArray(item.falsification_triggers) && item.falsification_triggers.length > 0 && !expanded && (
-          <div className="mt-1 text-[10px] text-faint truncate">
+          <div className="mt-1 text-[11px] text-faint truncate">
             ⚡ {item.falsification_triggers[0]}
           </div>
         )}
@@ -213,7 +225,7 @@ function OpenCard({ item }: { item: ArbOpenHypothesis }) {
           {/* 证伪条件全文 */}
           {Array.isArray(item.falsification_triggers) && item.falsification_triggers.length > 0 && (
             <div>
-              <div className="text-[10px] text-faint mb-0.5">⚡ {t("arb.falsification")}</div>
+              <div className="text-[11px] text-faint mb-0.5">⚡ {t("arb.falsification")}</div>
               {item.falsification_triggers.map((tr, i) => (
                 <div key={i} className="text-[11px] text-body leading-relaxed">· {tr}</div>
               ))}
@@ -222,7 +234,7 @@ function OpenCard({ item }: { item: ArbOpenHypothesis }) {
           {/* 下一步 */}
           {item.next_action && (
             <div>
-              <div className="text-[10px] text-faint mb-0.5">→ {t("arb.nextAction")}</div>
+              <div className="text-[11px] text-faint mb-0.5">→ {t("arb.nextAction")}</div>
               <div className="text-[11px] text-body leading-relaxed">{item.next_action}</div>
             </div>
           )}
@@ -249,17 +261,17 @@ function OpenCard({ item }: { item: ArbOpenHypothesis }) {
 // ══════════════════════════════════════════════
 function SettledCard({ item }: { item: ArbSettledHypothesis }) {
   const { t } = useTranslation();
-  const outcomeBadge: Record<ArbOutcome, string> = {
-    confirmed: "bg-green-500/15 text-green-300",
-    falsified: "bg-red-500/15 text-red-300",
-    expired: "bg-gray-500/15 text-gray-400",
+  const outcomeTone: Record<ArbOutcome, "success" | "danger" | "muted"> = {
+    confirmed: "success",
+    falsified: "danger",
+    expired: "muted",
   };
   return (
     <div className="rounded-lg border border-line bg-surface/30 px-3 py-2 opacity-80">
       <div className="flex items-center gap-2">
-        <span className={`text-[9px] px-1.5 py-0.5 rounded shrink-0 ${outcomeBadge[item.outcome] ?? "bg-gray-500/15 text-gray-400"}`}>
+        <Badge tone={outcomeTone[item.outcome] ?? "muted"} className="shrink-0">
           {t(`arb.outcome_${item.outcome}`)}
-        </span>
+        </Badge>
         <span className="text-xs flex-1 truncate text-muted line-through">{item.title}</span>
         <span className="text-[10px] font-mono text-faint shrink-0">
           {t("arb.realized")}: {fmtNum(item.realized_value, 2)}
@@ -269,7 +281,7 @@ function SettledCard({ item }: { item: ArbSettledHypothesis }) {
         </span>
       </div>
       {item.close_reason && (
-        <div className="mt-1 text-[10px] text-faint truncate">{item.close_reason}</div>
+        <div className="mt-1 text-[11px] text-faint truncate">{item.close_reason}</div>
       )}
     </div>
   );
@@ -484,7 +496,7 @@ function LeadsSection({ leads }: { leads?: ArbLead[] }) {
       <div className="flex items-center gap-2 mb-1.5">
         <span className="text-[11px] font-medium text-heading">🛰 {t("arb.leadsTitle")}</span>
         <span className="text-[10px] text-faint">{visible.length}</span>
-        <span className="text-[9px] text-faint/70 ml-auto">{t("arb.leadsHint")}</span>
+        <span className="text-[11px] text-faint/70 ml-auto">{t("arb.leadsHint")}</span>
       </div>
       {visible.length === 0 ? (
         <div className="text-[10px] text-faint py-1">{t("arb.noLeads")}</div>
@@ -504,10 +516,10 @@ function LeadCard({ lead }: { lead: ArbLead }) {
   const [copied, setCopied] = useState(false);
   // 优先级徽章：GROS-02 实测导出为中文"高/中/低"，兼容契约初稿英文枚举
   const p = lead.priority;
-  const prioBadge =
-    p === "high" || p === "高" ? "bg-red-500/15 text-red-300"
-    : p === "medium" || p === "中" ? "bg-yellow-500/15 text-yellow-300"
-    : "bg-gray-500/15 text-gray-400";
+  const prioTone: "danger" | "amber" | "muted" =
+    p === "high" || p === "高" ? "danger"
+    : p === "medium" || p === "中" ? "amber"
+    : "muted";
 
   /** "转研究"：复制一段可直接粘贴到 GROS 会话的研究请求（不直接写库，
    *  放行仍走既有审核流——gros research 由用户在会话内发起）。 */
@@ -531,29 +543,29 @@ function LeadCard({ lead }: { lead: ArbLead }) {
     <div className="rounded-lg border border-line bg-surface/40 px-2.5 py-1.5">
       <div className="flex items-center gap-2">
         {lead.status === "promoted" ? (
-          <span className="text-[9px] px-1.5 py-px rounded bg-success/15 text-success shrink-0"
+          <Badge tone="success" className="shrink-0"
             title={lead.promoted_hypothesis_id ? `${t("arb.leadPromoted")}: ${lead.promoted_hypothesis_id}` : t("arb.leadPromoted")}>
             ✓ {t("arb.leadPromoted")}
-          </span>
+          </Badge>
         ) : (
-          <span className={`text-[9px] px-1.5 py-px rounded shrink-0 ${prioBadge}`}>
+          <Badge tone={prioTone} className="shrink-0">
             {lead.priority ?? "?"}
-          </span>
+          </Badge>
         )}
         <span className="text-[11px] flex-1 truncate text-body" title={lead.phenomenon ?? ""}>
           {lead.phenomenon ?? "—"}
         </span>
         {lead.domain && (
-          <span className="text-[9px] px-1.5 py-px rounded bg-accent/10 text-accent shrink-0">
+          <span className="text-[11px] px-1.5 py-px rounded bg-accent/10 text-accent shrink-0">
             {lead.domain}
           </span>
         )}
-        <span className="text-[9px] text-faint shrink-0"
+        <span className="text-[11px] text-faint shrink-0"
           title={`${t("arb.leadCreatedAt")}: ${lead.created_at ?? "—"}\n${lead.conversation_id ?? ""}`}>
           {lead.date ?? "—"}
         </span>
       </div>
-      <div className="mt-0.5 flex items-center gap-3 text-[10px] text-muted flex-wrap">
+      <div className="mt-0.5 flex items-center gap-3 text-[11px] text-muted flex-wrap">
         <span title={t("arb.leadCognitiveGap")}>
           💡 {lead.cognitive_gap ?? "—"}
         </span>
@@ -570,6 +582,203 @@ function LeadCard({ lead }: { lead: ArbLead }) {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
+// BriefingSection — 晨报卡片（契约 v4，2026-10-08）
+// brief 段（概要 + 当日机会橱窗）+ decisions 段（D# 决策清单，点击处置）。
+// 处置 = 本地执行 GROS 预生成的 cmd 草稿（app 不组装命令），白名单硬约束
+// 在 Rust 侧 run_arb_decision 统一把守（唯一执行口）。写走薄壳（账房留痕），
+// 读走下一轮 board.json 导出——已处置项自然消失，与控制区同一单向双通道。
+// 降级铁律：brief/decisions 两段都 undefined（契约 v4 前旧数据）→ 整卡置灰
+// 「等待 GROS 侧数据」；字段级 null 一律渲染 "—"，绝不崩溃。
+// ══════════════════════════════════════════════
+function BriefingSection({ brief, decisions }: { brief?: ArbBrief; decisions?: ArbDecisionItem[] }) {
+  const { t } = useTranslation();
+
+  if (brief === undefined && decisions === undefined) {
+    // 旧数据（GROS 侧晨报段未产出）→ 按约定整卡置灰
+    return (
+      <div className="px-4 py-1.5 border-b border-line/50 text-[10px] text-faint/70 flex items-center gap-2 shrink-0">
+        <span>📰 {t("arb.briefTitle")}</span>
+        <span className="px-1.5 py-px rounded bg-elevated text-faint/70">{t("arb.briefWaiting")}</span>
+      </div>
+    );
+  }
+
+  // 字段级 null 容忍：数组非数组一律按空处理（外部导出不可信）
+  const opps = Array.isArray(brief?.opportunities) ? brief!.opportunities! : [];
+  const items = Array.isArray(decisions) ? decisions : [];
+
+  return (
+    <div className="px-3 pt-2.5 pb-2 border-b border-line/50 shrink-0 flex flex-col gap-2">
+      {/* brief 段：概要一行 + 当日机会橱窗 */}
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-[11px] font-medium text-heading">📰 {t("arb.briefTitle")}</span>
+          {brief?.brief_date && (
+            <span className="text-[10px] text-faint" title={t("arb.briefDate")}>
+              {brief.brief_date}
+            </span>
+          )}
+          <span className="text-[11px] text-faint/70 ml-auto shrink-0">{t("arb.briefHint")}</span>
+        </div>
+        {brief?.headline && (
+          <div className="text-[11px] text-body truncate mb-1" title={brief.headline}>
+            {brief.headline}
+          </div>
+        )}
+        {opps.length > 0 && (
+          <div className="flex flex-col gap-1">
+            {opps.map((o, i) => (
+              <div key={i} className="flex items-center gap-1.5 min-w-0">
+                <Badge tone={leadPriorityTone(o.priority)} className="shrink-0">
+                  {o.priority ?? "?"}
+                </Badge>
+                <span className="text-[11px] text-body truncate min-w-0" title={o.title ?? ""}>
+                  {o.title ?? "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* decisions 段：D# 决策清单（cmd 非空的项才有按钮） */}
+      {items.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[11px] font-medium text-heading">☑ {t("arb.decisionsTitle")}</span>
+            <span className="text-[10px] text-faint">{items.length}</span>
+            <span className="text-[11px] text-faint/70 ml-auto shrink-0">{t("arb.decisionHint")}</span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {items.map((d, i) => (
+              <DecisionRow key={d.id ?? `idx-${i}`} item={d} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 优先级徽章 tone：兼容中文"高/中/低"与契约初稿英文枚举（同 LeadCard）。 */
+function leadPriorityTone(p: string | null | undefined): "danger" | "amber" | "muted" {
+  if (p === "high" || p === "高") return "danger";
+  if (p === "medium" || p === "中") return "amber";
+  return "muted";
+}
+
+/** 截止临期判定：今天起 3 天内（含已逾期）→ true；日期缺失/不可解析 → false。 */
+function isDeadlineNear(deadline: string | null | undefined): boolean {
+  if (!deadline || typeof deadline !== "string") return false;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(deadline.trim());
+  if (!m) return false;
+  const dl = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
+  if (Number.isNaN(dl)) return false;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const DAY = 24 * 60 * 60 * 1000;
+  return dl - today <= 3 * DAY;
+}
+
+// ══════════════════════════════════════════════
+// DecisionRow — 单条决策（D# 编号制）
+// 按钮态机：idle → running（禁用）→ done（已处置 ✓，双按钮禁用）；
+// 失败：错误输出原样显示、不自动重试（按钮保留，用户可自行再点——
+// "不重试"指 app 不自动重试，禁死会让环境类失败无法人工恢复）。
+// 仅 cmd 非空的项渲染对应按钮；cmd 均空 = 系统事项，纯展示。
+// ══════════════════════════════════════════════
+function DecisionRow({ item: d }: { item: ArbDecisionItem }) {
+  const { t } = useTranslation();
+  const [state, setState] = useState<"idle" | "running" | "done">("idle");
+  const [error, setError] = useState<string | null>(null);
+
+  async function run(kind: "approve" | "reject") {
+    const cmd = kind === "approve" ? d.cmd_approve : d.cmd_reject;
+    if (!cmd || state === "running" || state === "done") return;
+    setState("running");
+    setError(null);
+    try {
+      await runArbDecision(cmd);
+      setState("done");
+    } catch (e) {
+      // 失败原样显示错误输出；不自动重试
+      setState("idle");
+      setError(String(e));
+    }
+  }
+
+  const canApprove = d.cmd_approve != null && d.cmd_approve !== "";
+  const canReject = d.cmd_reject != null && d.cmd_reject !== "";
+  const deadlineNear = isDeadlineNear(d.deadline);
+  const busy = state === "running";
+
+  return (
+    <div className={`rounded-lg border px-2.5 py-1.5 ${state === "done" ? "border-success/30 bg-success/5" : "border-line bg-surface/40"}`}>
+      <div className="flex items-center gap-2 min-w-0">
+        <Badge tone={state === "done" ? "success" : "accent"} className="shrink-0 font-mono">
+          {d.id ?? "?"}
+        </Badge>
+        <span className="text-[11px] flex-1 truncate text-body min-w-0" title={d.item ?? ""}>
+          {d.item ?? "—"}
+        </span>
+        {/* 已挂 N 天角标（pending_days） */}
+        {typeof d.pending_days === "number" && !Number.isNaN(d.pending_days) && (
+          <span className="text-[10px] text-faint shrink-0" title={t("arb.decisionPendingDays")}>
+            {t("arb.decisionPendingDays", { days: d.pending_days })}
+          </span>
+        )}
+      </div>
+      <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted flex-wrap min-w-0">
+        <span className="truncate min-w-0 flex-1" title={d.advice ?? ""}>
+          💡 {d.advice ?? "—"}
+        </span>
+        {d.deadline && (
+          <span
+            className={`shrink-0 ${deadlineNear ? "text-danger font-medium" : "text-faint"}`}
+            title={t("arb.decisionDeadline")}
+          >
+            ⏰ {t("arb.decisionDeadline")}: {d.deadline}
+          </span>
+        )}
+        {/* 处置按钮（仅 cmd 非空的项；已处置显示 ✓ 徽章） */}
+        {state === "done" ? (
+          <Badge tone="success" className="shrink-0">✓ {t("arb.decisionDone")}</Badge>
+        ) : (
+          <>
+            {canApprove && (
+              <button
+                className="text-[10px] px-2 py-0.5 rounded bg-success/15 text-success hover:bg-success/25 disabled:opacity-40 shrink-0"
+                disabled={busy}
+                onClick={() => run("approve")}
+                title={d.cmd_approve ?? ""}
+              >
+                {busy ? "⏳" : t("arb.decisionApprove")}
+              </button>
+            )}
+            {canReject && (
+              <button
+                className="text-[10px] px-2 py-0.5 rounded bg-danger/15 text-danger hover:bg-danger/25 disabled:opacity-40 shrink-0"
+                disabled={busy}
+                onClick={() => run("reject")}
+                title={d.cmd_reject ?? ""}
+              >
+                {busy ? "⏳" : t("arb.decisionReject")}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+      {/* 失败：错误输出原样显示（不重试） */}
+      {error && (
+        <div className="mt-1 text-[10px] text-danger whitespace-pre-wrap break-all max-h-24 overflow-y-auto" title={error}>
+          ✗ {error}
+        </div>
+      )}
     </div>
   );
 }

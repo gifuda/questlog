@@ -23,7 +23,9 @@
     "themeLight": "浅色",
     "themeSystem": "跟随系统",
     "langZh": "中文",
-    "langEn": "English"
+    "langEn": "English",
+    "overviewTab": "总览",
+    "dismiss": "关闭"
   },
   "kanban": {
     "tagFilter": "标签",
@@ -75,7 +77,19 @@
     },
     "autoOn": "🌙 夜间自动",
     "autoOff": "夜间自动",
-    "autoToggleTitle": "开关：允许采集机在夜间窗口（03:00–06:00）自动执行这条只读研究待办并回写结果"
+    "autoToggleTitle": "开关：允许采集机在夜间窗口（03:00–06:00）自动执行这条只读研究待办并回写结果",
+    "autoNotScheduled": "该项目不在夜间调度名单内，开启\"自动\"也不会被处理（可在设置中调整 todo_schedule.projects）",
+    "autoBadgeToggle": "点击取消夜间自动",
+    "autoConfirmOn": "仅只读研究类·确认开启",
+    "viewPlan": "查看方案",
+    "autoState": {
+      "preparing": "已产包待投递",
+      "published": "已投递待执行",
+      "closed": "已闭环",
+      "superseded": "已被新修订取代"
+    },
+    "autoNoSchedule": "夜间调度整体未启用（runner-config 无 todo_schedule）",
+    "autoCancelShort": "取消自动"
   },
   "column": {
     "add": "新增",
@@ -167,7 +181,8 @@
     "sumBlocked": "阻塞",
     "sumDone": "完成",
     "archived": "已归档方案",
-    "archivedHint": "已完成方案自动归档，改回未完成状态即可恢复"
+    "archivedHint": "已完成方案自动归档，改回未完成状态即可恢复",
+    "autoOrigin": "来自待办的夜间自动处理"
   },
   "arb": {
     "title": "套利机会",
@@ -221,7 +236,18 @@
     "leadToResearch": "转研究",
     "leadToResearchHint": "复制研究请求 → 粘贴到 GROS 会话发起（放行走审核流，app 不写库）",
     "leadCreatedAt": "账房落库时间",
-    "leadVerifiableData": "可核数据"
+    "leadVerifiableData": "可核数据",
+    "briefTitle": "晨报",
+    "briefWaiting": "等待 GROS 侧数据",
+    "briefDate": "轮次日期",
+    "briefHint": "概要 · 当日机会",
+    "decisionsTitle": "决策清单",
+    "decisionHint": "点击即处置 · 白名单命令本地执行",
+    "decisionApprove": "批准",
+    "decisionReject": "驳回",
+    "decisionDone": "已处置",
+    "decisionDeadline": "截止",
+    "decisionPendingDays": "已挂 {{days}} 天"
   },
   "execution": {
     "title": "执行记录",
@@ -307,8 +333,6 @@
     "recoveredFrom": "成果已恢复自"
   },
   "timeline": {
-    "undoRemove": "已移除「{{name}}」",
-    "undo": "撤销",
     "projectList": "项目列表",
     "allActive": "全部活跃",
     "count": "{{total}} 条",
@@ -336,6 +360,30 @@
     "approval": "执行被暂停/需要授权——续跑、修订封存包，或取消？",
     "adjudication": "存在两条可行路径，需要人工裁决。",
     "scopePath": "候选改动越出了封存范围。完整现场（diff、新文件、路径分类）已封存在 bundle 的 scene/ 目录；修订后的新包首次执行会自动恢复现场（仅限同一 base）。修订范围还是取消？",
-    "scopeForbiddenOrCount": "候选触碰了禁区/控制平面路径，或改动文件数超过最后熔断上限——改范围救不了它。请修订封存包（去掉该目标或提高上限），或取消。"
+    "scopeForbiddenOrCount": "候选触碰了禁区/控制平面路径，或改动文件数超过最后熔断上限——改范围救不了它。请修订封存包（去掉该目标或提高上限），或取消。",
+    "option": {
+      "retry": "重试",
+      "resume": "续跑",
+      "cancel": "取消",
+      "revise_scope": "修订范围并继续",
+      "revise_package": "修订封存包",
+      "transfer_manual": "转人工",
+      "manual": "转人工",
+      "reject": "拒绝"
+    }
+  },
+  "fleet": {
+    "off": "夜间管线关",
+    "ok": "链路正常",
+    "missed": "窗口漏跑 {{date}}",
+    "outbox": "投递积压 {{count}}",
+    "receipts": "回执待处理 {{count}}",
+    "unmatched": "未匹配回执 {{count}}",
+    "digest": "昨晚 {{date}} · 共{{total}}条 ✓{{accepted}} 待审{{review}} 失败{{failed}}"
+  },
+  "overview": {
+    "empty": "各项目暂无在办事项",
+    "epicCount": "{{count}} 在办方案",
+    "jumpTitle": "打开该项目的方案追踪页"
   }
 }

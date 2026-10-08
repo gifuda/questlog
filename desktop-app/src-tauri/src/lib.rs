@@ -7,6 +7,7 @@ pub mod execution_store;
 pub mod executor_sandbox;
 pub mod executors;
 pub mod file_lock;
+pub mod fleet_health;
 mod models;
 pub mod runner;
 pub mod runner_config;
@@ -59,6 +60,7 @@ pub fn run() {
             commands::get_arb_board,
             commands::set_arb_board,
             commands::submit_arb_control,
+            commands::run_arb_decision,
             // 执行状态模块 (G2 — Runner state)
             commands::get_executions,
             commands::get_current_execution,
@@ -82,6 +84,8 @@ pub fn run() {
             commands::set_epic_auto_execute,
             commands::get_decision_requests,
             commands::resolve_decision_request,
+            // 跨机链路健康（只读聚合）
+            commands::get_fleet_health,
             // 执行记忆 (AttemptBundle Trace Query)
             commands::get_attempt_bundles,
             commands::get_attempt_detail,

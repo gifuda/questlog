@@ -23,7 +23,9 @@
     "themeLight": "Light",
     "themeSystem": "System",
     "langZh": "中文",
-    "langEn": "English"
+    "langEn": "English",
+    "overviewTab": "Overview",
+    "dismiss": "Dismiss"
   },
   "kanban": {
     "tagFilter": "Tag",
@@ -75,7 +77,19 @@
     },
     "autoOn": "🌙 Nightly",
     "autoOff": "Nightly",
-    "autoToggleTitle": "Toggle: allow the collector to auto-run this read-only research todo in the nightly window (03:00–06:00) and write back the result"
+    "autoToggleTitle": "Toggle: allow the collector to auto-run this read-only research todo in the nightly window (03:00–06:00) and write back the result",
+    "autoNotScheduled": "This project is not in the nightly schedule list — enabling auto-process will have no effect (see todo_schedule.projects)",
+    "autoBadgeToggle": "Click to cancel nightly auto",
+    "autoConfirmOn": "Read-only research only · confirm",
+    "viewPlan": "View plan",
+    "autoState": {
+      "preparing": "Packaged, awaiting pickup",
+      "published": "Dispatched, awaiting execution",
+      "closed": "Closed",
+      "superseded": "Superseded by new revision"
+    },
+    "autoNoSchedule": "Nightly pipeline is not enabled at all (no todo_schedule in runner-config)",
+    "autoCancelShort": "Cancel auto"
   },
   "column": {
     "add": "Add",
@@ -167,7 +181,8 @@
     "sumBlocked": "Blocked",
     "sumDone": "Done",
     "archived": "Archived plans",
-    "archivedHint": "Done plans are auto-archived; set status back to restore"
+    "archivedHint": "Done plans are auto-archived; set status back to restore",
+    "autoOrigin": "Auto-created from a nightly todo"
   },
   "arb": {
     "title": "Arb Opportunities",
@@ -221,7 +236,18 @@
     "leadToResearch": "To research",
     "leadToResearchHint": "Copy research prompt → paste into a GROS session (promote via review flow, no direct write)",
     "leadCreatedAt": "Ledger created at",
-    "leadVerifiableData": "Verifiable data"
+    "leadVerifiableData": "Verifiable data",
+    "briefTitle": "Morning brief",
+    "briefWaiting": "Waiting for GROS data",
+    "briefDate": "Brief date",
+    "briefHint": "Headline · today's opportunities",
+    "decisionsTitle": "Decision queue",
+    "decisionHint": "Click to dispose · whitelisted command runs locally",
+    "decisionApprove": "Approve",
+    "decisionReject": "Reject",
+    "decisionDone": "Disposed",
+    "decisionDeadline": "Due",
+    "decisionPendingDays": "pending {{days}}d"
   },
   "execution": {
     "title": "Execution",
@@ -307,8 +333,6 @@
     "recoveredFrom": "Scene recovered from"
   },
   "timeline": {
-    "undoRemove": "Removed \"{{name}}\"",
-    "undo": "Undo",
     "projectList": "Projects",
     "allActive": "All active",
     "count": "{{total}} items",
@@ -336,6 +360,30 @@
     "approval": "Execution was paused or needs authorization. Resume, revise the package, or cancel?",
     "adjudication": "Two valid paths — human adjudication required.",
     "scopePath": "The candidate changed paths outside the sealed scope. The full scene is captured in the bundle's scene/; a revised package's first attempt auto-restores it (same base only). Revise scope or cancel?",
-    "scopeForbiddenOrCount": "The candidate touched a forbidden/control-plane path or exceeded the last-resort file-count breaker — no scope revision can fix this. Revise the package (drop the goal or raise max) or cancel."
+    "scopeForbiddenOrCount": "The candidate touched a forbidden/control-plane path or exceeded the last-resort file-count breaker — no scope revision can fix this. Revise the package (drop the goal or raise max) or cancel.",
+    "option": {
+      "retry": "Retry",
+      "resume": "Resume",
+      "cancel": "Cancel",
+      "revise_scope": "Revise scope & continue",
+      "revise_package": "Revise package",
+      "transfer_manual": "Hand off",
+      "manual": "Hand off",
+      "reject": "Reject"
+    }
+  },
+  "fleet": {
+    "off": "Nightly off",
+    "ok": "Link healthy",
+    "missed": "Window missed {{date}}",
+    "outbox": "Outbox backlog {{count}}",
+    "receipts": "Receipts pending {{count}}",
+    "unmatched": "Unmatched receipts {{count}}",
+    "digest": "Last night {{date}} · {{total}} done, ✓{{accepted}}, review {{review}}, failed {{failed}}"
+  },
+  "overview": {
+    "empty": "No active items across projects",
+    "epicCount": "{{count}} active plans",
+    "jumpTitle": "Open this project’s plan board"
   }
 }

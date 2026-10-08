@@ -85,6 +85,40 @@ export interface ArbSettledHypothesis {
   close_reason: string;
 }
 
+/**
+ * 晨报段（契约 v4 增补 2026-10-08，需求文件第 8 节）。
+ * board.json 由 GROS-01 board-export 产出（与 decisions 段同批代码窗口），
+ * 该段未产出前整卡置灰。全字段可 null（null 容忍铁律）。
+ */
+export interface ArbBriefOpportunity {
+  title: string | null;
+  priority: string | null;
+}
+
+export interface ArbBrief {
+  /** 轮次日期（YYYY-MM-DD） */
+  brief_date: string | null;
+  /** 概要一句话 */
+  headline: string | null;
+  opportunities: ArbBriefOpportunity[] | null;
+}
+
+/**
+ * 决策项（契约 v4 A 段：decision-queue 档案元素原样透传，采集机不加工）。
+ * cmd_approve / cmd_reject 是 GROS 预生成的完整薄壳命令草稿——app 不组装命令，
+ * 只做白名单校验后执行；系统事项类无可执行动作则 cmd 为 null（纯展示，无按钮）。
+ */
+export interface ArbDecisionItem {
+  id: string | null;
+  item: string | null;
+  advice: string | null;
+  /** YYYY-MM-DD；null = 无截止 */
+  deadline: string | null;
+  pending_days: number | null;
+  cmd_approve: string | null;
+  cmd_reject: string | null;
+}
+
 export interface ArbSummary {
   open: number;
   settled: number;
@@ -114,4 +148,10 @@ interface ArbSummaryShape {
    */
   leads?: ArbLead[];
   control?: ArbControl;
+  /**
+   * 契约 v4 增量段（2026-10-08 晨报卡片）。undefined = GROS 侧未产出（UI
+   * 置灰「等待 GROS 侧数据」）；[] / {} = 已产出但为空。全字段允许 null。
+   */
+  brief?: ArbBrief;
+  decisions?: ArbDecisionItem[];
 }
