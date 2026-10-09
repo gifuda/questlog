@@ -11,6 +11,27 @@ import Badge from "./Badge";
 import { epicStatusBadge } from "../epicConstants";
 import type { EpicStatus } from "../types/epics";
 
+/** 日期 → 距今天的天数（本地时区，日历日差）。解析失败返回 null。 */
+function daysAgo(dateStr: string | null | undefined): number | null {
+  if (!dateStr) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateStr.trim());
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
+  if (Number.isNaN(d)) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return Math.round((today - d) / 86400000);
+}
+
+/** 时效徽章：今天=绿、昨天=灰、更久=琥珀色标年龄。日期缺失/不可解析不渲染。 */
+function AgeBadge({ date }: { date: string | null | undefined }) {
+  const { t } = useTranslation();
+  const age = daysAgo(date);
+  if (age === null) return null;
+  if (age <= 0) return <Badge tone="success">{t("morning.today")}</Badge>;
+  if (age === 1) return <Badge tone="muted">{t("morning.yesterday")}</Badge>;
+  return <Badge tone="amber">{t("morning.daysAgo", { days: age })}</Badge>;
+}
 /** get_epics_global 的行形状（后端返回 Epic 子集 + project 归属）。 */
 interface OverviewEpic {
   id: string;
@@ -117,7 +138,11 @@ export default function MorningBriefing({ projects, onGoto }: MorningProps) {
         <div className="flex items-center gap-2 px-3.5 pt-2.5 pb-1.5">
           <span className="text-[14px] font-semibold text-heading">☀ {t("morning.briefTitle")}</span>
           <span className="text-[11px] font-mono text-faint">{brief?.brief_date ?? "—"}</span>
-          <span className="ml-auto text-[11px] text-faint">{t("morning.sources")}</span>
+          <AgeBadge date={brief?.brief_date} />
+          <span className="ml-auto text-[11px] text-faint">
+            {t("morning.sources")}
+            {arb?.generated_at && ` · ${t("morning.exportedAt", { ts: arb.generated_at.slice(0, 10) })}`}
+          </span>
         </div>
         {brief === undefined || brief === null ? (
           <div className="px-3.5 pb-2.5 text-[11px] text-faint">{t("morning.briefWaiting")}</div>
@@ -142,7 +167,21 @@ export default function MorningBriefing({ projects, onGoto }: MorningProps) {
           </>
         )}
         <div className="px-3.5 pb-2.5 border-t border-line/50 pt-2">
-          <div className="text-[11px] text-faint mb-1">{t("morning.nightly")}</div>
+          <div className="flex items-center gap-2 text-[11px] text-faint mb-1">
+            {/* digest 语义诚实：只有真的是昨夜才说"昨夜"，否则标明是最近一次 */}
+            <span>
+              {health?.digest
+                ? daysAgo(health.digest.date) === 0
+                  ? t("morning.nightly")
+                  : daysAgo(health.digest.date) === 1
+                    ? t("morning.nightlyYesterday")
+                    : t("morning.nightlyRecent")
+                : t("morning.nightly")}
+            </span>
+            {health?.digest && daysAgo(health.digest.date) !== null && daysAgo(health.digest.date)! > 1 && (
+              <AgeBadge date={health.digest.date} />
+            )}
+          </div>
           {health?.digest ? (
             <div className="text-[13px] text-body">
               🌙 <span className="font-mono">{health.digest.date}</span>

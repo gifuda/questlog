@@ -243,6 +243,8 @@
     "decisionApprove": "批准",
     "decisionReject": "驳回",
     "decisionDone": "已处置",
+    "decisionExecuted": "已执行 {{time}} · 待导出确认",
+    "decisionExecutedReset": "board.json 每日 09:00 重新导出，已处置项届时自然消失；点击可重置重新处置",
     "decisionDeadline": "截止",
     "decisionPendingDays": "已挂 {{days}} 天"
   },
@@ -412,6 +414,12 @@
     "decNightlyGo": "确认 →",
     "decDrq": "决策请求",
     "decDrqNone": "Runner 无阻塞",
-    "decDrqGo": "处置 →"
+    "decDrqGo": "处置 →",
+    "today": "今天",
+    "yesterday": "昨天",
+    "daysAgo": "{{days}} 天前",
+    "nightlyYesterday": "前天机器产出",
+    "nightlyRecent": "最近一次机器产出",
+    "exportedAt": "导出于 {{ts}}"
   }
 }

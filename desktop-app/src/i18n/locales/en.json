@@ -243,6 +243,8 @@
     "decisionApprove": "Approve",
     "decisionReject": "Reject",
     "decisionDone": "Disposed",
+    "decisionExecuted": "Executed {{time}} · awaiting export",
+    "decisionExecutedReset": "board.json re-exports daily at 09:00; disposed items disappear then. Click to reset and re-run",
     "decisionDeadline": "Due",
     "decisionPendingDays": "pending {{days}}d"
   },
@@ -412,6 +414,12 @@
     "decNightlyGo": "Review →",
     "decDrq": "Decision requests",
     "decDrqNone": "Runner unblocked",
-    "decDrqGo": "Handle →"
+    "decDrqGo": "Handle →",
+    "today": "today",
+    "yesterday": "yesterday",
+    "daysAgo": "{{days}}d ago",
+    "nightlyYesterday": "Machine output (day before yesterday)",
+    "nightlyRecent": "Latest machine output",
+    "exportedAt": "exported {{ts}}"
   }
 }
