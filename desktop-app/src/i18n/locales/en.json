@@ -420,6 +420,9 @@
     "daysAgo": "{{days}}d ago",
     "nightlyYesterday": "Machine output (day before yesterday)",
     "nightlyRecent": "Latest machine output",
-    "exportedAt": "exported {{ts}}"
+    "exportedAt": "exported {{ts}}",
+    "alertStaleBrief": "Briefing content is {{days}}d old (radar round {{date}}) — check the collector radar pipeline",
+    "alertExportStale": "board.json export pipeline stalled (last export {{ts}})",
+    "alertOverdue": "Decision {{id}} overdue by {{days}}d"
   }
 }

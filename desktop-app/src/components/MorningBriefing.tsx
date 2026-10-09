@@ -32,6 +32,38 @@ function AgeBadge({ date }: { date: string | null | undefined }) {
   if (age === 1) return <Badge tone="muted">{t("morning.yesterday")}</Badge>;
   return <Badge tone="amber">{t("morning.daysAgo", { days: age })}</Badge>;
 }
+/** 时效告警：晨报内容超龄 / 导出停滞 / 决策逾期。无告警返回空数组。 */
+function useStalenessAlerts(
+  arb: ReturnType<typeof useArbBoard>["data"],
+): { tone: "amber" | "danger"; text: string }[] {
+  const { t } = useTranslation();
+  const alerts: { tone: "amber" | "danger"; text: string }[] = [];
+  const briefAge = daysAgo(arb?.brief?.brief_date);
+  if (briefAge !== null && briefAge >= 2) {
+    alerts.push({
+      tone: "amber",
+      text: t("morning.alertStaleBrief", { days: briefAge, date: arb?.brief?.brief_date }),
+    });
+  }
+  const exportAge = daysAgo(arb?.generated_at);
+  if (exportAge !== null && exportAge >= 1) {
+    alerts.push({
+      tone: "danger",
+      text: t("morning.alertExportStale", { ts: arb?.generated_at?.slice(0, 10) }),
+    });
+  }
+  for (const d of arb?.decisions ?? []) {
+    const overdue = daysAgo(d.deadline);
+    if (overdue !== null && overdue > 0) {
+      alerts.push({
+        tone: "danger",
+        text: t("morning.alertOverdue", { id: d.id ?? "?", days: overdue }),
+      });
+    }
+  }
+  return alerts;
+}
+
 /** get_epics_global 的行形状（后端返回 Epic 子集 + project 归属）。 */
 interface OverviewEpic {
   id: string;
@@ -130,9 +162,21 @@ export default function MorningBriefing({ projects, onGoto }: MorningProps) {
   }, [projects, epics, items]);
 
   const brief = arb?.brief;
+  const alerts = useStalenessAlerts(arb);
 
   return (
     <div className="h-full overflow-y-auto px-4 py-3 flex flex-col gap-3">
+      {/* ── 时效告警条：数据停滞/决策逾期在最顶端 ── */}
+      {alerts.length > 0 && (
+        <div className="rounded-lg border border-amber/30 bg-amber-bg px-3 py-2 flex flex-col gap-1">
+          {alerts.map((a, i) => (
+            <div key={i} className={`flex items-center gap-2 text-[11px] ${a.tone === "danger" ? "text-danger" : "text-amber"}`}>
+              <span>{a.tone === "danger" ? "⛔" : "⚠️"}</span>
+              <span>{a.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {/* ── 晨报卡（D2 合一；各源独立降级） ── */}
       <div className="rounded-xl border border-line bg-surface">
         <div className="flex items-center gap-2 px-3.5 pt-2.5 pb-1.5">

@@ -420,6 +420,9 @@
     "daysAgo": "{{days}} 天前",
     "nightlyYesterday": "前天机器产出",
     "nightlyRecent": "最近一次机器产出",
-    "exportedAt": "导出于 {{ts}}"
+    "exportedAt": "导出于 {{ts}}",
+    "alertStaleBrief": "晨报内容已 {{days}} 天未更新（雷达轮 {{date}}），请检查采集机雷达管线",
+    "alertExportStale": "board.json 导出管线停滞（最后导出 {{ts}}）",
+    "alertOverdue": "{{id}} 决策已逾期 {{days}} 天"
   }
 }
