@@ -80,8 +80,8 @@ export default function ArbBoard() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* 汇总条（需求 3.5） */}
-      <div className="px-4 py-2.5 border-b border-line bg-surface/30 flex items-center gap-3 text-[11px] text-muted flex-wrap">
+      {/* 汇总条（需求 3.5）——置顶横贯，双栏之上 */}
+      <div className="px-4 py-2.5 border-b border-line bg-surface/30 flex items-center gap-3 text-[11px] text-muted flex-wrap shrink-0">
         <span className="font-bold text-heading">📈 {t("arb.title")}</span>
         <span className="text-accent">{t("arb.summaryOpen", { count: summary.open })}</span>
         <span className="text-muted">{t("arb.summarySettled", { count: summary.settled })}</span>
@@ -94,59 +94,70 @@ export default function ArbBoard() {
         <span className="text-faint ml-auto">{t("arb.readOnlyHint")}</span>
       </div>
 
-      {/* 决策处置区（契约 v4）——本页第一行动区，紧跟汇总条。
-          晨报概要已并入晨报页（D2），这里只留处置。 */}
-      <DecisionsSection decisions={data.decisions} />
-
-      {/* 自动化控制条（契约 v3 B 控制区；GROS-01 增量 #2 未落地时置灰） */}
+      {/* 自动化控制条（契约 v3 B；GROS-01 增量 #2 未落地时置灰）——
+          2026-10-08 用户裁定回顶部全宽：配置旋钮是全局参数，不属左栏行动流。 */}
       <ControlBar control={data.control} />
 
-      {/* 过滤 + 排序 */}
-      <div className="px-4 py-2 border-b border-line flex items-center gap-2">
-        {(["all", "open", "settled"] as ArbFilter[]).map((f) => (
-          <button
-            key={f}
-            className={`text-[11px] px-2.5 py-1 rounded-full transition-colors ${
-              filter === f ? "bg-accent text-white" : "text-muted hover:bg-elevated"
-            }`}
-            onClick={() => setFilter(f)}
-          >
-            {t(`arb.filter_${f}`)}
-          </button>
-        ))}
-        <div className="ml-auto flex items-center gap-1.5">
-          <span className="text-[10px] text-faint">{t("arb.sortBy")}</span>
-          {(["diff", "annualized"] as ArbSort[]).map((s) => (
-            <button
-              key={s}
-              className={`text-[11px] px-2 py-0.5 rounded transition-colors ${
-                sort === s ? "bg-surface text-heading" : "text-faint hover:text-body"
-              }`}
-              onClick={() => setSort(s)}
-            >
-              {t(`arb.sort_${s}`)}
-            </button>
-          ))}
+      {/* 双栏（2026-10-08 第一性重排）：终结"固定上段+滚动下段"单列模型——
+          决策区不封顶、线索区 max-h 截断、卡片区 flex-1 在 500px 视口被挤成 0px，
+          三者互斥地争一根垂直轴。改为水平分轴：左行动栏（决策处置+侦察线索，
+          随栏整体滚动，无任何截断上限），右主区（假设库=页面主体，独占剩余
+          高度与宽度）。全页恰好两个并列滚动上下文，零嵌套。 */}
+      <div className="flex flex-1 min-h-0">
+        {/* 左行动栏：决策处置区（契约 v4，第一行动区=栏顶）→ 侦察线索
+            （契约 v3 A，GROS-01 增量 #2 未落地时置灰）。晨报概要已并入
+            晨报页（D2），这里只留处置。 */}
+        <div className="w-80 shrink-0 border-r border-line overflow-y-auto">
+          <DecisionsSection decisions={data.decisions} />
+          <LeadsSection leads={data.leads} />
         </div>
-      </div>
 
-      {/* 侦察线索（契约 v3 A 线索段；GROS-01 增量 #2 未落地时置灰） */}
-      <LeadsSection leads={data.leads} />
+        {/* 右主区：过滤 + 排序 + 假设卡列表 */}
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+          <div className="px-4 py-2 border-b border-line flex items-center gap-2 shrink-0">
+            {(["all", "open", "settled"] as ArbFilter[]).map((f) => (
+              <button
+                key={f}
+                className={`text-[11px] px-2.5 py-1 rounded-full transition-colors ${
+                  filter === f ? "bg-accent text-white" : "text-muted hover:bg-elevated"
+                }`}
+                onClick={() => setFilter(f)}
+              >
+                {t(`arb.filter_${f}`)}
+              </button>
+            ))}
+            <div className="ml-auto flex items-center gap-1.5">
+              <span className="text-[10px] text-faint">{t("arb.sortBy")}</span>
+              {(["diff", "annualized"] as ArbSort[]).map((s) => (
+                <button
+                  key={s}
+                  className={`text-[11px] px-2 py-0.5 rounded transition-colors ${
+                    sort === s ? "bg-surface text-heading" : "text-faint hover:text-body"
+                  }`}
+                  onClick={() => setSort(s)}
+                >
+                  {t(`arb.sort_${s}`)}
+                </button>
+              ))}
+            </div>
+          </div>
 
-      {/* 卡片列表 */}
-      <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
-        {showOpen && openItems.length === 0 && (
-          <div className="text-[11px] text-faint text-center py-4">{t("arb.noOpen")}</div>
-        )}
-        {showOpen && openItems.map((h) => (
-          <OpenCard key={h.id} item={h} />
-        ))}
-        {showSettled && settledItems.length === 0 && filter === "settled" && (
-          <div className="text-[11px] text-faint text-center py-4">{t("arb.noSettled")}</div>
-        )}
-        {showSettled && settledItems.map((h) => (
-          <SettledCard key={h.id} item={h} />
-        ))}
+          {/* 卡片列表 */}
+          <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+            {showOpen && openItems.length === 0 && (
+              <div className="text-[11px] text-faint text-center py-4">{t("arb.noOpen")}</div>
+            )}
+            {showOpen && openItems.map((h) => (
+              <OpenCard key={h.id} item={h} />
+            ))}
+            {showSettled && settledItems.length === 0 && filter === "settled" && (
+              <div className="text-[11px] text-faint text-center py-4">{t("arb.noSettled")}</div>
+            )}
+            {showSettled && settledItems.map((h) => (
+              <SettledCard key={h.id} item={h} />
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -167,6 +178,34 @@ function fmtSigned(v: number | null | undefined, digits = 4): string {
 function fmtNum(v: number | null | undefined, digits = 1): string {
   if (v === null || v === undefined || typeof v !== "number" || Number.isNaN(v)) return "—";
   return v.toFixed(digits);
+}
+
+// ── 决策处置持久标记 ──
+// board.json 每日 09:00 才在采集机重导出（com.gros.daily-export），处置写走
+// SSH 薄壳直达采集机 → "执行成功"与"从导出消失"之间隔着最长约一天。✓ 若只存
+// 组件 state，切 tab/重启即丢、按钮复活（2026-10-08 用户实测"按了又回来"）。
+// 标记存 localStorage（跨刷新/跨重启）：键=决策 id，值=执行命令哈希+时间；
+// 下一轮导出该项自然消失即清除；导出换日重生成草稿（hash 不匹配）自动失效
+// 可重跑——与 ControlBar 同一套 pending 回显纪律，回显（消失）是唯一真值。
+type ExecutedMark = { hash: string; at: number };
+const EXECUTED_LS_KEY = "arb-decisions-executed-v1";
+
+function hashCmd(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+function loadExecuted(): Record<string, ExecutedMark> {
+  try {
+    const v = JSON.parse(localStorage.getItem(EXECUTED_LS_KEY) ?? "{}");
+    if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, ExecutedMark>;
+  } catch { /* 损坏即弃，从空开始 */ }
+  return {};
+}
+
+function saveExecuted(v: Record<string, ExecutedMark>) {
+  try { localStorage.setItem(EXECUTED_LS_KEY, JSON.stringify(v)); } catch { /* 存储不可用则仅内存态 */ }
 }
 
 // ══════════════════════════════════════════════
@@ -375,8 +414,9 @@ function ControlBar({ control }: { control?: ArbControl }) {
   const step = (param: string, cur: number, delta: number, lo: number, hi: number) =>
     submit(param, String(Math.min(hi, Math.max(lo, cur + delta))));
 
+  // 顶部全宽横排（2026-10-08 用户裁定：配置旋钮回顶部，不放左栏）。
   return (
-    <div className="px-4 py-1.5 border-b border-line/50 flex items-center gap-3 text-[11px] flex-wrap">
+    <div className="px-4 py-1.5 border-b border-line/50 flex items-center gap-3 text-[11px] flex-wrap shrink-0">
       <span className="text-faint shrink-0">🎛 {t("arb.controlTitle")}</span>
 
       {/* 雷达模型 */}
@@ -492,7 +532,9 @@ function LeadsSection({ leads }: { leads?: ArbLead[] }) {
   }
 
   return (
-    <div className="px-3 pt-2.5 pb-1 shrink-0">
+    // 栏尾段：pb-3 收底；列表不再自带 max-h 截断——左栏整体滚动（2026-10-08
+    // 双栏化，93 条线索时代 224px 内滚窗只露 4 条是"展示不完备"主因之一）。
+    <div className="px-3 pt-2.5 pb-3">
       <div className="flex items-center gap-2 mb-1.5">
         <span className="text-[11px] font-medium text-heading">🛰 {t("arb.leadsTitle")}</span>
         <span className="text-[10px] text-faint">{visible.length}</span>
@@ -501,7 +543,7 @@ function LeadsSection({ leads }: { leads?: ArbLead[] }) {
       {visible.length === 0 ? (
         <div className="text-[10px] text-faint py-1">{t("arb.noLeads")}</div>
       ) : (
-        <div className="flex flex-col gap-1.5 max-h-56 overflow-y-auto">
+        <div className="flex flex-col gap-1.5">
           {visible.map((lead) => (
             <LeadCard key={lead.id} lead={lead} />
           ))}
@@ -592,11 +634,31 @@ function LeadCard({ lead }: { lead: ArbLead }) {
 // 处置 = 本地执行 GROS 预生成的 cmd 草稿（app 不组装命令），白名单硬约束
 // 在 Rust 侧 run_arb_decision 统一把守（唯一执行口）。写走薄壳（账房留痕），
 // 读走下一轮 board.json 导出——已处置项自然消失，与控制区同一单向双通道。
+// 处置标记持久化（localStorage，见 ExecutedMark）：执行成功≠已消失，两态
+// 之间隔着下一轮 09:00 导出，期间显示琥珀"待导出确认"。
 // 降级：decisions undefined（契约 v4 前旧数据）→ 置灰「等待 GROS 侧数据」；
 // 空数组 = 今日无决策，整区不渲染。
 // ══════════════════════════════════════════════
 function DecisionsSection({ decisions }: { decisions?: ArbDecisionItem[] }) {
   const { t } = useTranslation();
+  const [executed, setExecuted] = useState<Record<string, ExecutedMark>>(loadExecuted);
+
+  // 清理：导出里已消失的 id（被消费/换日）同步移除，防存储无限增长。
+  useEffect(() => {
+    if (!decisions) return;
+    setExecuted((prev) => {
+      const live = new Set(decisions.map((d) => d.id).filter(Boolean) as string[]);
+      let changed = false;
+      const next: Record<string, ExecutedMark> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (live.has(k)) next[k] = v;
+        else changed = true;
+      }
+      if (!changed) return prev;
+      saveExecuted(next);
+      return next;
+    });
+  }, [decisions]);
 
   if (decisions === undefined) {
     return (
@@ -609,8 +671,24 @@ function DecisionsSection({ decisions }: { decisions?: ArbDecisionItem[] }) {
   const items = Array.isArray(decisions) ? decisions : [];
   if (items.length === 0) return null;
 
+  const markExecuted = (id: string, cmd: string) => {
+    setExecuted((prev) => {
+      const next = { ...prev, [id]: { hash: hashCmd(cmd), at: Date.now() } };
+      saveExecuted(next);
+      return next;
+    });
+  };
+  const resetExecuted = (id: string) => {
+    setExecuted((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      saveExecuted(next);
+      return next;
+    });
+  };
+
   return (
-    <div className="px-3 pt-2.5 pb-2 border-b border-line/50 shrink-0">
+    <div className="px-3 pt-2.5 pb-2 border-b border-line/50">
       <div className="flex items-center gap-2 mb-1.5">
         <span className="text-[13px] font-medium text-heading">☑ {t("arb.decisionsTitle")}</span>
         <span className="text-[11px] text-faint tabular-nums">{items.length}</span>
@@ -618,7 +696,13 @@ function DecisionsSection({ decisions }: { decisions?: ArbDecisionItem[] }) {
       </div>
       <div className="flex flex-col gap-1.5">
         {items.map((d, i) => (
-          <DecisionRow key={d.id ?? `idx-${i}`} item={d} />
+          <DecisionRow
+            key={d.id ?? `idx-${i}`}
+            item={d}
+            mark={d.id ? executed[d.id] : undefined}
+            onExecuted={markExecuted}
+            onReset={resetExecuted}
+          />
         ))}
       </div>
     </div>
@@ -640,41 +724,54 @@ function isDeadlineNear(deadline: string | null | undefined): boolean {
 
 // ══════════════════════════════════════════════
 // DecisionRow — 单条决策（D# 编号制）
-// 按钮态机：idle → running（禁用）→ done（已处置 ✓，双按钮禁用）；
-// 失败：错误输出原样显示、不自动重试（按钮保留，用户可自行再点——
-// "不重试"指 app 不自动重试，禁死会让环境类失败无法人工恢复）。
+// 按钮态：idle → running（禁用）→ 成功后交持久标记渲染琥珀
+// 「已执行 HH:MM · 待导出确认」（点击徽章可重置重跑）；失败：错误输出原样
+// 显示、不自动重试（按钮保留，用户可自行再点——"不重试"指 app 不自动重试）。
 // 仅 cmd 非空的项渲染对应按钮；cmd 均空 = 系统事项，纯展示。
 // ══════════════════════════════════════════════
-function DecisionRow({ item: d }: { item: ArbDecisionItem }) {
+function DecisionRow({ item: d, mark, onExecuted, onReset }: {
+  item: ArbDecisionItem;
+  mark?: ExecutedMark;
+  onExecuted: (id: string, cmd: string) => void;
+  onReset: (id: string) => void;
+}) {
   const { t } = useTranslation();
-  const [state, setState] = useState<"idle" | "running" | "done">("idle");
+  const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const id = d.id ?? "?";
+  // 标记与当前草稿比对：导出换日重生成 cmd（hash 不匹配）→ 旧标记失效，按钮回来。
+  const executedHere =
+    mark != null &&
+    (mark.hash === hashCmd(d.cmd_approve ?? "") || mark.hash === hashCmd(d.cmd_reject ?? ""));
 
   async function run(kind: "approve" | "reject") {
     const cmd = kind === "approve" ? d.cmd_approve : d.cmd_reject;
-    if (!cmd || state === "running" || state === "done") return;
-    setState("running");
+    if (!cmd || running || executedHere) return;
+    setRunning(true);
     setError(null);
     try {
       await runArbDecision(cmd);
-      setState("done");
+      // 成功≠已消失：薄壳已执行（采集机留痕），board.json 每日 09:00 才重导出，
+      // 进入持久"待导出确认"态。
+      onExecuted(id, cmd);
     } catch (e) {
       // 失败原样显示错误输出；不自动重试
-      setState("idle");
       setError(String(e));
+    } finally {
+      setRunning(false);
     }
   }
 
   const canApprove = d.cmd_approve != null && d.cmd_approve !== "";
   const canReject = d.cmd_reject != null && d.cmd_reject !== "";
   const deadlineNear = isDeadlineNear(d.deadline);
-  const busy = state === "running";
 
   return (
-    <div className={`rounded-lg border px-2.5 py-1.5 ${state === "done" ? "border-success/30 bg-success/5" : "border-line bg-surface/40"}`}>
+    <div className={`rounded-lg border px-2.5 py-1.5 ${executedHere ? "border-amber/30 bg-amber/5" : "border-line bg-surface/40"}`}>
       <div className="flex items-center gap-2 min-w-0">
-        <Badge tone={state === "done" ? "success" : "accent"} className="shrink-0 font-mono">
-          {d.id ?? "?"}
+        <Badge tone={executedHere ? "amber" : "accent"} className="shrink-0 font-mono">
+          {id}
         </Badge>
         <span className="text-[11px] flex-1 truncate text-body min-w-0" title={d.item ?? ""}>
           {d.item ?? "—"}
@@ -698,29 +795,36 @@ function DecisionRow({ item: d }: { item: ArbDecisionItem }) {
             ⏰ {t("arb.decisionDeadline")}: {d.deadline}
           </span>
         )}
-        {/* 处置按钮（仅 cmd 非空的项；已处置显示 ✓ 徽章） */}
-        {state === "done" ? (
-          <Badge tone="success" className="shrink-0">✓ {t("arb.decisionDone")}</Badge>
+        {/* 处置态：琥珀「已执行·待导出确认」（点击重置可重跑）；否则渲染处置按钮 */}
+        {executedHere && mark ? (
+          <Badge
+            tone="amber"
+            className="shrink-0 cursor-pointer"
+            title={t("arb.decisionExecutedReset")}
+            onClick={() => onReset(id)}
+          >
+            ⏳ {t("arb.decisionExecuted", { time: fmtClock(mark.at) })}
+          </Badge>
         ) : (
           <>
             {canApprove && (
               <button
                 className="text-[11px] px-2.5 py-1 rounded bg-success/15 text-success hover:bg-success/25 disabled:opacity-40 shrink-0"
-                disabled={busy}
+                disabled={running}
                 onClick={() => run("approve")}
                 title={d.cmd_approve ?? ""}
               >
-                {busy ? "⏳" : t("arb.decisionApprove")}
+                {running ? "⏳" : t("arb.decisionApprove")}
               </button>
             )}
             {canReject && (
               <button
                 className="text-[11px] px-2.5 py-1 rounded bg-danger/15 text-danger hover:bg-danger/25 disabled:opacity-40 shrink-0"
-                disabled={busy}
+                disabled={running}
                 onClick={() => run("reject")}
                 title={d.cmd_reject ?? ""}
               >
-                {busy ? "⏳" : t("arb.decisionReject")}
+                {running ? "⏳" : t("arb.decisionReject")}
               </button>
             )}
           </>
@@ -734,4 +838,11 @@ function DecisionRow({ item: d }: { item: ArbDecisionItem }) {
       )}
     </div>
   );
+}
+
+/** 时间戳 → HH:MM（本地时区，处置标记展示用）。 */
+function fmtClock(at: number): string {
+  const d = new Date(at);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
