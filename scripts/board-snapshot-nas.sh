@@ -64,6 +64,23 @@ else
   exit 1
 fi
 
+# 4b. TopLEe 仓每日 bundle（W02 阶段2 2026-10-12：NAS taopuli.git 为一次性快照无自动更新，
+#     并入本脚本复用通道与调度，避免新增 M4 常开服务；git bundle 单文件原子可恢复）
+TL="$HOME/韬普利TopLEe"
+DAYB="taopuli-$(date +%Y%m%d).bundle"
+if git -C "$TL" bundle create "/tmp/$DAYB" --all >/dev/null 2>&1; then
+  if cat "/tmp/$DAYB" | ssh -o BatchMode=yes -o ConnectTimeout=10 nas \
+       "cat > /volume2/git/$DAYB.part && mv /volume2/git/$DAYB.part /volume2/git/$DAYB"; then
+    log "OK TopLEe bundle $(du -h "/tmp/$DAYB" | cut -f1)"
+  else
+    log "FAIL TopLEe bundle 传输"
+  fi
+  rm -f "/tmp/$DAYB"
+else
+  log "WARN TopLEe bundle create 失败"
+fi
+ssh -o BatchMode=yes -o ConnectTimeout=10 nas 'find /volume2/git -maxdepth 1 -name "taopuli-*.bundle" -mtime +30 -delete' 2>/dev/null || true
+
 # 4. 30 天轮转
 ssh -o BatchMode=yes -o ConnectTimeout=10 nas \
   'find /volume2/db-backup/board-snapshots -maxdepth 1 -mindepth 1 -type d -name "20*" -mtime +30 -exec rm -rf {} +' 2>/dev/null || true
