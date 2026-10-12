@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$HOME/编程架构包/桌面清单贴"
+REPO_ROOT="${HOME:?HOME 未设置，拒绝执行}/编程架构包/桌面清单贴"
 TARGET_DIR="$REPO_ROOT/desktop-app/src-tauri/target"
 LOG_DIR="$HOME/questlog-runtime/logs"
 LOG_FILE="$LOG_DIR/target-eviction.log"
