@@ -15,6 +15,8 @@
 set -uo pipefail
 
 REMOTE="${QUESTLOG_BRIDGE_REMOTE:-m5p}"
+# S5: marker 携带 API 基址（GUI 据此切换 API 客户端模式）
+API_BASE="${QUESTLOG_API_BASE:-http://powermac-mini.tail545d90.ts.net:5889}"
 MIRROR="$HOME/questlog-mirror"
 PREFIX_FROM="/Users/power"
 
@@ -57,7 +59,7 @@ done < /tmp/ql-bridge-projects.$$
 rm -f /tmp/ql-bridge-projects.$$
 
 # 4) 标记最后写（内容 = data_root::RemoteConfig JSON）
-printf '%s' "{\"prefix_from\":\"$PREFIX_FROM\",\"mirror_root\":\"$MIRROR\",\"api_base\":\"${QUESTLOG_API_BASE:-}\"}" \
+printf '%s' "{\"prefix_from\":\"$PREFIX_FROM\",\"mirror_root\":\"$MIRROR\",\"api_base\":\"$API_BASE\"}" \
   > "$MIRROR/REMOTE_ACTIVE.tmp"
 mv "$MIRROR/REMOTE_ACTIVE.tmp" "$MIRROR/REMOTE_ACTIVE"
 
