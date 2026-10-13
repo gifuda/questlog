@@ -2,9 +2,9 @@
 # questlog-bridge-mirror.sh — S4 过渡镜像桥（m5p → M4 单向只读 rsync）
 #
 # 职责：把 m5p 权威副本（注册表 + questlog-runtime + 各项目板文件）拉到本机
-# 独立镜像根 ~/questlog-mirror/，并维护 REMOTE_ACTIVE 标记（GUI 据此进入
-# 远程只读模式：读镜像、写命令 Rust 层拒绝）。镜像生命周期 = S4 切流 → S5
-# 客户端化交付，S5 后撤桥删根。
+# 独立镜像根 ~/questlog-mirror/，并维护远程模式标记 ~/.questlog-remote-mode.json
+# （GUI 据此进入远程只读模式：读镜像、写命令 Rust 层拒绝）。镜像生命周期 =
+# S4 切流 → S5 客户端化交付，S5 后撤桥删根。
 #
 # 纪律：
 #  - 单向只读，绝无 M4 → m5p 回写（单写者纪律）
@@ -59,8 +59,11 @@ done < /tmp/ql-bridge-projects.$$
 rm -f /tmp/ql-bridge-projects.$$
 
 # 4) 标记最后写（内容 = data_root::RemoteConfig JSON）
+#    S5.1: marker 固定在 $HOME/.questlog-remote-mode.json，迁出镜像根
+#    （撤桥删镜像根不误伤运行态）；镜像根内旧 REMOTE_ACTIVE 不再写（遗留不删）。
+MARKER="$HOME/.questlog-remote-mode.json"
 printf '%s' "{\"prefix_from\":\"$PREFIX_FROM\",\"mirror_root\":\"$MIRROR\",\"api_base\":\"$API_BASE\"}" \
-  > "$MIRROR/REMOTE_ACTIVE.tmp"
-mv "$MIRROR/REMOTE_ACTIVE.tmp" "$MIRROR/REMOTE_ACTIVE"
+  > "$MARKER.tmp"
+mv "$MARKER.tmp" "$MARKER"
 
 log "OK mirror synced (registry + runtime + board files)"

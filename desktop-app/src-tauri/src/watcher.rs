@@ -11,6 +11,24 @@ const EXECUTIONS_FILENAME: &str = "executions.json";
 const PACKAGES_FILENAME: &str = "packages.json";
 const BOARD_FILENAME: &str = "board.json";
 
+/// A6: arb board config source — API in remote mode (the registry lives on
+/// the authority machine, not in the local mirror), local discovery
+/// otherwise. The board.json file itself is still read/watched locally
+/// (M4 keeps its own GROS export — by design).
+fn arb_board_path() -> Option<String> {
+    if crate::remote_client::enabled() {
+        let cfg: discovery::ArbBoardConfig = crate::remote_client::get_into("/api/arb-config")
+            .map_err(|e| {
+                log::warn!("arb config fetch failed, arb watch skipped: {e}");
+                e
+            })
+            .ok()?;
+        cfg.enabled.then_some(cfg.board_path)
+    } else {
+        discovery::enabled_arb_board_path()
+    }
+}
+
 pub fn start_watching(app: &AppHandle) {
     // S5 remote API mode: reads/writes live on the authority API — there is
     // no mirror to watch. Only the (local) arb board leg keeps its watch;
@@ -64,7 +82,7 @@ pub fn start_watching(app: &AppHandle) {
     // usually lives in a subdirectory of the GROS project, which no project-
     // root watch covers, so it needs its own watch. Config changes (enable +
     // path) take effect on next app start.
-    if let Some(board_path) = discovery::enabled_arb_board_path() {
+    if let Some(board_path) = arb_board_path() {
         let board = std::path::PathBuf::from(&board_path);
         match board.parent() {
             Some(parent) if parent.exists() => {

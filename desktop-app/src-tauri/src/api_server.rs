@@ -270,6 +270,12 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
                 .collect();
             ok(serde_json::json!({ "projects": projects }))
         }
+        // A1: the SAME payload as the GUI get_projects command (counts/
+        // active_epics/last_active_at assembled from authority data) — the
+        // M4 client stops joining local mirror files for counts.
+        ("GET", "/api/projects-full") => map_store(crate::commands::get_projects_impl(
+            &crate::discovery::discover_projects(),
+        )),
         ("GET", "/api/todos") => match query_get(req, "project") {
             Some(p) if project_allowed(&p) => {
                 map_store(crate::store::read_todos(std::path::Path::new(&p)))
@@ -284,7 +290,26 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             Some(_) => err(404, "unknown project path (not in registry)"),
             None => err(400, "missing query param: project"),
         },
-        ("GET", "/api/executions") => map_store(crate::execution_store::list_executions()),
+        // A2/A3: view fields (retries_remaining / package_display_no) are
+        // filled HERE from authority-side runtime data — clients get the
+        // fully-shaped list without any local mirror join.
+        ("GET", "/api/executions") => map_store(
+            crate::execution_store::list_executions().map(|mut execs| {
+                crate::commands::fill_execution_view_fields(&mut execs);
+                execs
+            }),
+        ),
+        // A3: "currently running" banner payload — title lookup runs here
+        // against the authority's own board paths.
+        ("GET", "/api/current-execution") => {
+            map_store(crate::commands::get_current_execution())
+        }
+        // A6/A7: arb panel config — the registry lives on the authority
+        // machine; the board.json FILE itself stays local on M4 (by design).
+        ("GET", "/api/arb-config") => ok(match crate::discovery::get_arb_board_config() {
+            Some(c) => serde_json::to_value(c).unwrap_or_default(),
+            None => serde_json::json!({ "enabled": false, "board_path": "" }),
+        }),
         ("GET", "/api/decision-requests") => {
             let include_resolved = query_get(req, "include_resolved")
                 .map(|v| v == "true" || v == "1")

@@ -2,9 +2,10 @@
 //!
 //! When the marker file exists, this process is a READ-ONLY mirror client:
 //! board/runtime reads are re-rooted into the local mirror directory and
-//! every write path fails closed with an explicit error. The marker is
-//! created/removed by the S4 bridge rsync job; its absence is the normal
-//! local-authority mode with zero behavior change.
+//! every write path fails closed with an explicit error. The marker lives
+//! at `~/.questlog-remote-mode.json` (fixed home location, OUTSIDE the
+//! mirror root) and is created/removed by the S4 bridge rsync job; its
+//! absence is the normal local-authority mode with zero behavior change.
 //!
 //! Mirror layout contract (produced by the bridge job):
 //!   <mirror_root>/.todo-board.json          ← authority registry
@@ -34,13 +35,17 @@ static REMOTE: OnceLock<Option<RemoteConfig>> = OnceLock::new();
 /// a diverging local copy (audit M5).
 static READ_ONLY_DEGRADED: OnceLock<bool> = OnceLock::new();
 
-/// Marker file inside the mirror root; QUESTLOG_REMOTE_CONFIG overrides the
-/// location for tests. Content = RemoteConfig JSON.
+/// Marker file at a fixed home location (`~/.questlog-remote-mode.json`) —
+/// it must live OUTSIDE the mirror root so the bridge job can rsync/clean
+/// the mirror without disturbing the mode switch (and so撤桥删镜像根不误伤
+/// 运行态). The bridge job writes it last via tmp+mv.
+/// QUESTLOG_REMOTE_CONFIG overrides the location for tests.
+/// Content = RemoteConfig JSON.
 fn marker_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("QUESTLOG_REMOTE_CONFIG") {
         return Some(PathBuf::from(p));
     }
-    dirs::home_dir().map(|h| h.join("questlog-mirror").join("REMOTE_ACTIVE"))
+    dirs::home_dir().map(|h| h.join(".questlog-remote-mode.json"))
 }
 
 enum MarkerState {

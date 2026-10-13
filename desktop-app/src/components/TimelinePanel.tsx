@@ -177,7 +177,7 @@ export default function TimelinePanel() {
     });
   }
 
-  function openInMain(_projectPath: string) {
+  function openInMain() {
     // navigate_to_project was never a registered command (silent dead link);
     // show_main_window is registered — reveal the main window instead.
     invoke("show_main_window").catch(() => {});
@@ -563,7 +563,7 @@ function AllItems({
   onNavigate,
 }: {
   items: ItemSummary[];
-  onNavigate: (projectPath: string) => void;
+  onNavigate: () => void;
 }) {
   const { t, i18n } = useTranslation();
   if (items.length === 0) {
@@ -578,7 +578,7 @@ function AllItems({
         >
           <button
             className="flex-1 text-left min-w-0"
-            onClick={() => onNavigate(item.project_path!)}
+            onClick={() => onNavigate()}
           >
             <div className="flex items-center gap-2">
               <span className="text-xs">{typeIcons[item.type]}</span>
@@ -622,7 +622,7 @@ function ProjectDetailList({
   data: ProjectDetail;
   collapsed: Set<string>;
   onToggle: (type: string) => void;
-  onNavigate: (projectPath: string) => void;
+  onNavigate: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const groups = typeOrder.map((type) => ({
@@ -661,7 +661,7 @@ function ProjectDetailList({
                 >
                   <button
                     className="flex-1 text-left min-w-0"
-                    onClick={() => onNavigate(data.project_path)}
+                    onClick={() => onNavigate()}
                   >
                     <div className="flex items-center gap-2">
                       {g.type === "todo" && item.processing && (

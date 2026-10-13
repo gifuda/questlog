@@ -46,16 +46,6 @@ pub fn validate_project_path_list(
     Ok(canonical)
 }
 
-/// Validate a project_path coming from the frontend (State-locking wrapper
-/// around validate_project_path_list).
-pub fn validate_project_path(
-    project_path: &str,
-    state: &State<AppState>,
-) -> Result<PathBuf, String> {
-    let projects = state.projects.lock().map_err(|e| e.to_string())?;
-    validate_project_path_list(project_path, &projects)
-}
-
 /// Forward webview JS errors to the stdout log. WKWebView console is
 /// invisible in release builds; this bridge makes render-time crashes
 /// diagnosable (see main.tsx error listeners).
@@ -64,26 +54,13 @@ pub fn diag_report_error(msg: String) {
     eprintln!("[webview-error] {msg}");
 }
 
-/// Wire shape of /api/projects entries ({"name","path"} objects).
-#[derive(serde::Deserialize)]
-struct RemoteNamePath {
-    name: String,
-    path: PathBuf,
-}
-
 #[tauri::command]
 pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
     if crate::remote_client::enabled() {
-        // Map the API's name/path list back into the registry shape and run
-        // the SAME local assembly so the returned JSON stays identical.
-        let v = crate::remote_client::get_json("/api/projects")?;
-        let list: Vec<RemoteNamePath> = serde_json::from_value(
-            v.get("projects").cloned().unwrap_or(serde_json::Value::Null),
-        )
-        .map_err(|e| format!("api shape mismatch: {e}"))?;
-        let pairs: Vec<(String, PathBuf)> =
-            list.into_iter().map(|x| (x.name, x.path)).collect();
-        return get_projects_impl(&pairs);
+        // A1: counts/active_epics/last_active_at are assembled SERVER-side
+        // (/api/projects-full runs get_projects_impl on authority data) —
+        // no local mirror-file join for counts anymore.
+        return crate::remote_client::get_into("/api/projects-full");
     }
     let projects = state.projects.lock().map_err(|e| e.to_string())?;
     get_projects_impl(&projects)
@@ -645,7 +622,10 @@ pub fn get_epics(
         ))?;
         return Ok(epics_to_json(&data, &project_path));
     }
-    let path = validate_project_path(&project_path, &state)?;
+    let path = {
+        let projects = state.projects.lock().map_err(|e| e.to_string())?;
+        validate_project_path_list(&project_path, &projects)?
+    };
     let data = epic_store::read_epics(&path)?;
     Ok(epics_to_json(&data, &project_path))
 }
@@ -1190,9 +1170,16 @@ pub fn delete_step_impl(
 #[tauri::command]
 pub fn get_arb_board() -> Result<serde_json::Value, String> {
     // Off 时也带上已保存的路径，Settings 面板要显示当前配置。
-    let (enabled, saved_path) = match discovery::get_arb_board_config() {
-        Some(c) => (c.enabled, c.board_path),
-        None => (false, String::new()),
+    // A6: api 模式下配置来自权威 API（注册表在 m5p 侧，不再读本地镜像
+    // 注册表）；board.json 本体仍读 M4 本地（设计内——M4 有本地 GROS 导出）。
+    let (enabled, saved_path) = if crate::remote_client::enabled() {
+        let cfg: discovery::ArbBoardConfig = crate::remote_client::get_into("/api/arb-config")?;
+        (cfg.enabled, cfg.board_path)
+    } else {
+        match discovery::get_arb_board_config() {
+            Some(c) => (c.enabled, c.board_path),
+            None => (false, String::new()),
+        }
     };
     if !enabled {
         return Ok(serde_json::json!({ "status": "off", "board_path": saved_path }));
@@ -1590,20 +1577,21 @@ fn arr_len(v: &serde_json::Value) -> u64 {
 
 #[tauri::command]
 pub fn get_executions() -> Result<Vec<crate::execution_store::Execution>, String> {
-    let mut executions = if crate::remote_client::enabled() {
-        crate::remote_client::get_into("/api/executions")?
-    } else {
-        crate::execution_store::list_executions()?
-    };
+    if crate::remote_client::enabled() {
+        // A2: the API already returns view fields filled from authority-side
+        // runtime data — no local mirror join here.
+        return crate::remote_client::get_into("/api/executions");
+    }
+    let mut executions = crate::execution_store::list_executions()?;
     fill_execution_view_fields(&mut executions);
     Ok(executions)
 }
 
 /// S0-A/C: fill the view-only retries_remaining in ONE package read
 /// (map join, not per-row reads) so the UI can disable the retry button
-/// on an exhausted budget and explain why. Shared by the local and the
-/// remote read path so both return the same shape.
-fn fill_execution_view_fields(executions: &mut [crate::execution_store::Execution]) {
+/// on an exhausted budget and explain why. Shared by the local read path
+/// and the /api/executions server route so both return the same shape.
+pub fn fill_execution_view_fields(executions: &mut [crate::execution_store::Execution]) {
     let caps = crate::execution_store::budget_caps_by_package().unwrap_or_default();
     let display_nos = crate::execution_store::display_nos_by_package().unwrap_or_default();
     for exec in executions.iter_mut() {
@@ -1620,11 +1608,12 @@ fn fill_execution_view_fields(executions: &mut [crate::execution_store::Executio
 /// titles, for the App's "currently running" banner.
 #[tauri::command]
 pub fn get_current_execution() -> Result<Option<serde_json::Value>, String> {
-    let all: Vec<crate::execution_store::Execution> = if crate::remote_client::enabled() {
-        crate::remote_client::get_into("/api/executions")?
-    } else {
-        crate::execution_store::list_executions()?
-    };
+    if crate::remote_client::enabled() {
+        // A3: banner payload (incl. step/epic title lookup against the
+        // authority's board paths) is assembled SERVER-side.
+        return crate::remote_client::get_into("/api/current-execution");
+    }
+    let all = crate::execution_store::list_executions()?;
     current_execution_payload(freshest_inflight(all))
 }
 
