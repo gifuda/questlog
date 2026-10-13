@@ -109,6 +109,7 @@ pub fn read_ledger() -> Result<LedgerFile, String> {
 pub fn mutate_ledger<T>(
     f: impl FnOnce(&mut HashMap<String, LedgerEntry>) -> Result<T, String>,
 ) -> Result<T, String> {
+    crate::data_root::guard_write()?;
     let dir = crate::execution_store::runtime_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir runtime: {e}"))?;
     let _lock = FileLock::acquire(&ledger_path())?;

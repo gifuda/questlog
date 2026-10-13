@@ -64,6 +64,9 @@ struct Registry {
 }
 
 fn registry_path() -> Result<PathBuf, String> {
+    if let Some(p) = crate::data_root::registry_override() {
+        return Ok(p);
+    }
     let home = dirs::home_dir().ok_or("no home dir")?;
     Ok(home.join(REGISTRY_FILE))
 }
@@ -139,6 +142,7 @@ fn write_registry(reg: &Registry) -> Result<(), String> {
 /// mutateRegistry); Rust RMWs must hold it too or the two sides lose each
 /// other's updates (G1 / link-trace R8).
 fn mutate_registry<T>(f: impl FnOnce(&mut Registry) -> Result<T, String>) -> Result<T, String> {
+    crate::data_root::guard_write()?;
     let path = registry_path()?;
     let _lock = crate::file_lock::FileLock::acquire(&path)?;
     let mut reg = read_registry();

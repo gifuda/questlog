@@ -18,7 +18,8 @@ pub fn start_watching(app: &AppHandle) {
         Err(_) => return,
     };
 
-    let registry_path = dirs::home_dir().map(|h| h.join(REGISTRY_FILENAME));
+    let registry_path = crate::data_root::registry_override()
+        .or_else(|| dirs::home_dir().map(|h| h.join(REGISTRY_FILENAME)));
 
     let (tx, rx) = mpsc::channel();
     let mut watcher = match RecommendedWatcher::new(
@@ -41,7 +42,10 @@ pub fn start_watching(app: &AppHandle) {
     // creation of .todos.json / .epics.json when the MCP pushes for the first
     // time. Watching individual files misses the initial create.
     for (name, path) in &projects {
-        if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
+        // Remote mirror mode: watch the local mirror copy, not the
+        // authority path (which does not exist on this machine).
+        let watch_path = crate::data_root::map_read(path);
+        if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
             log::warn!("failed to watch parent dir for {name}: {e}");
         } else {
             log::info!("watching {name}: {}", path.display());

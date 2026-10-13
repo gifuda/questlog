@@ -91,6 +91,7 @@ pub struct NewDecisionRequest<'a> {
 /// Create one unresolved request per execution/kind/revision. Repeated Runner
 /// error handling therefore cannot flood the human inbox.
 pub fn create_request(input: NewDecisionRequest<'_>) -> Result<DecisionRequest, String> {
+    crate::data_root::guard_write()?;
     let path = decisions_path();
     file_lock::with_file_lock(&path, || {
         let mut data = read_file()?;
@@ -141,6 +142,7 @@ pub fn resolve_request(
     resolution: &str,
     resolved_by: &str,
 ) -> Result<DecisionRequest, String> {
+    crate::data_root::guard_write()?;
     if resolution.trim().is_empty() {
         return Err("resolution must not be empty".to_string());
     }

@@ -2481,6 +2481,12 @@ pub fn stop_runner() {
 /// Ensure the Runner thread is running (start if not).
 /// Called when a project is enabled — no-op if already running.
 pub fn ensure_running() {
+    // Mirror clients must not execute packages locally (S3/S4): execution
+    // is the authority machine's job, writes would bypass the single writer.
+    if crate::data_root::is_remote() {
+        log::warn!("Runner: remote mirror mode — refusing to start the engine thread");
+        return;
+    }
     if !is_running() {
         start_runner_thread(RunnerConfig {
             enabled: true,

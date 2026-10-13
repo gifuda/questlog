@@ -14,7 +14,7 @@ static UNIQUE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// Read .epics.json from a project directory.
 /// Returns default empty structure if file doesn't exist.
 pub fn read_epics(project_dir: &Path) -> Result<EpicsFile, String> {
-    let path = project_dir.join(FILENAME);
+    let path = crate::data_root::map_read(&project_dir.join(FILENAME));
     if !path.exists() {
         return Ok(EpicsFile {
             version: 1,
@@ -45,7 +45,7 @@ pub fn read_epics(project_dir: &Path) -> Result<EpicsFile, String> {
 /// each other's temp file; the last rename wins but the file is never
 /// observed half-written.
 pub fn write_epics(project_dir: &Path, data: &mut EpicsFile) -> Result<(), String> {
-    let path = project_dir.join(FILENAME);
+    let path = crate::data_root::map_read(&project_dir.join(FILENAME));
     data.revision = data.revision.saturating_add(1);
     let tmp = path.with_extension(format!(
         "tmp-{}-{}-{}",
@@ -165,7 +165,8 @@ pub fn mutate_epics<F>(project_dir: &Path, f: F) -> Result<EpicsFile, String>
 where
     F: FnOnce(&mut EpicsFile) -> Result<(), String>,
 {
-    let path = project_dir.join(FILENAME);
+    crate::data_root::guard_write()?;
+    let path = crate::data_root::map_read(&project_dir.join(FILENAME));
     crate::file_lock::with_file_lock(&path, || {
         let mut data = read_epics(project_dir)?;
         f(&mut data)?;

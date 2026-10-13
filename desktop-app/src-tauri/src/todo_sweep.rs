@@ -676,6 +676,11 @@ pub fn start_tick_thread() {
 /// One tick: recover stale preparing entries → finalize receipts (always) →
 /// sweep inside the nightly window. Every action re-checks its own gates.
 pub fn tick_once() {
+    // Remote mirror clients never run the nightly chain — the authority
+    // machine's headless process owns it (S3/S4 single-writer discipline).
+    if crate::data_root::is_remote() {
+        return;
+    }
     let cfg = crate::runner_config::get_todo_schedule();
     let _ = recover_preparing_entries();
     let tenants = crate::discovery::discover_projects();

@@ -17,7 +17,7 @@ static UNIQUE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// deserialize cleanly, drop the ones that don't (logged to stderr). This way a
 /// single corrupt item costs one todo, not the whole project.
 pub fn read_todos(project_dir: &Path) -> Result<TodosFile, String> {
-    let path = project_dir.join(FILENAME);
+    let path = crate::data_root::map_read(&project_dir.join(FILENAME));
     if !path.exists() {
         return Ok(TodosFile {
             version: 1,
@@ -168,7 +168,7 @@ fn coerce_enum_fields(mut val: serde_json::Value) -> serde_json::Value {
 /// preserved on write by `mutate_todos`.
 #[allow(dead_code)] // consumer arrives in G4 (scheduler); tests exercise it now
 pub fn read_todos_strict(project_dir: &Path) -> Result<TodosFile, String> {
-    let path = project_dir.join(FILENAME);
+    let path = crate::data_root::map_read(&project_dir.join(FILENAME));
     if !path.exists() {
         return Ok(TodosFile {
             version: 1,
@@ -209,7 +209,8 @@ pub fn mutate_todos<T>(
     project_dir: &Path,
     f: impl FnOnce(&mut serde_json::Value) -> Result<T, String>,
 ) -> Result<T, String> {
-    let path = project_dir.join(FILENAME);
+    crate::data_root::guard_write()?;
+    let path = crate::data_root::map_read(&project_dir.join(FILENAME));
     let _lock = FileLock::acquire(&path)?;
 
     let mut root: serde_json::Value = if path.exists() {

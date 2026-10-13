@@ -1,7 +1,9 @@
+pub mod api_server;
 pub mod attempt_bundle;
 mod commands;
+pub mod data_root;
 pub mod decision_store;
-mod discovery;
+pub mod discovery;
 pub mod epic_store;
 pub mod execution_store;
 pub mod executor_sandbox;
@@ -15,7 +17,7 @@ pub mod runner_git;
 pub mod todo_finalization;
 pub mod todo_ledger;
 pub mod todo_sweep;
-mod store;
+pub mod store;
 mod tray;
 mod watcher;
 
@@ -83,6 +85,7 @@ pub fn run() {
             commands::get_fleet_health,
         ])
         .setup(|app| {
+            crate::data_root::init();
             tray::setup_tray(app);
             let handle = app.handle().clone();
             watcher::start_watching(&handle);

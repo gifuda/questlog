@@ -211,6 +211,7 @@ pub fn read_config() -> RunnerRuntimeConfig {
 }
 
 fn write_config(config: &mut RunnerRuntimeConfig) -> Result<(), String> {
+    crate::data_root::guard_write()?;
     ensure_runtime_dir()?;
     let path = config_path();
     config.revision = config.revision.saturating_add(1);

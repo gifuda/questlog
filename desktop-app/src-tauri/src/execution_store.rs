@@ -166,7 +166,10 @@ pub struct ExecutionEvent {
 // ─── Path resolution ───
 
 pub fn runtime_dir() -> PathBuf {
-    // Priority: QUESTLOG_RUNTIME env > home dir
+    // Priority: remote mirror override > QUESTLOG_RUNTIME env > home dir
+    if let Some(dir) = crate::data_root::runtime_override() {
+        return dir;
+    }
     if let Ok(dir) = std::env::var("QUESTLOG_RUNTIME") {
         return PathBuf::from(dir);
     }
@@ -368,6 +371,7 @@ pub fn claim_package(
     base_sha: &str,
     runner_id: &str,
 ) -> Result<Execution, String> {
+    crate::data_root::guard_write()?;
     let now = now_ts();
     let pid = std::process::id();
     let lease = ExecutionLease {
@@ -654,6 +658,7 @@ pub fn release_lease(
 /// stopped. Queued work can be cancelled immediately; running work is moved to
 /// a request state that the supervising Runner observes and acts upon.
 pub fn request_control(execution_id: &str, pause: bool) -> Result<ExecutionStatus, String> {
+    crate::data_root::guard_write()?;
     let now = now_ts();
     let data = mutate_executions(|data| {
         let exec = data
@@ -946,6 +951,7 @@ pub fn get_execution(id: &str) -> Result<Execution, String> {
 /// a Runner timeout auto-retry racing a human resolve("retry") yields exactly
 /// one child, never two.
 pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
+    crate::data_root::guard_write()?;
     // Package policy read (separate store): the attempt budget cap.
     // S0-C: the cap counts CONSUMED BUDGET, not attempt numbers — a human
     // cancel/pause or a preflight/policy block leaves the budget untouched.
