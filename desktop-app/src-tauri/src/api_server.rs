@@ -37,6 +37,7 @@ struct Request {
     method: String,
     path: String,
     query: Vec<(String, String)>,
+    content_type: Option<String>,
     body: Vec<u8>,
 }
 
@@ -45,13 +46,28 @@ fn handle(mut stream: TcpStream) {
     let Some(req) = read_request(&mut stream) else {
         return;
     };
-    let (code, body) = route(&req);
+    // POST endpoints are JSON-only: this also blocks browser-origin
+    // simple-request forgeries (sendBeacon/form posts are text/plain or
+    // urlencoded and get rejected without ever reaching a route; a JSON
+    // cross-origin fetch needs a CORS preflight this server never grants).
+    let (code, body) = if req.method == "POST"
+        && !req
+            .content_type
+            .as_deref()
+            .unwrap_or("")
+            .contains("application/json")
+    {
+        (415, serde_json::json!({ "error": "Content-Type must be application/json" }))
+    } else {
+        route(&req)
+    };
     let payload = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
     let status = match code {
         200 => "200 OK",
         400 => "400 Bad Request",
         404 => "404 Not Found",
         405 => "405 Method Not Allowed",
+        415 => "415 Unsupported Media Type",
         _ => "500 Internal Server Error",
     };
     let _ = write!(
@@ -89,10 +105,13 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let target = parts.next()?.to_string();
 
     let mut content_length = 0usize;
+    let mut content_type: Option<String> = None;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             if name.trim().eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse().unwrap_or(0);
+            } else if name.trim().eq_ignore_ascii_case("content-type") {
+                content_type = Some(value.trim().to_string());
             }
         }
     }
@@ -125,6 +144,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         method,
         path,
         query,
+        content_type,
         body,
     })
 }
@@ -176,6 +196,14 @@ fn query_get(req: &Request, key: &str) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
+/// Registry allowlist for path-taking read endpoints — the API must not
+/// become an arbitrary-path file reader (audit M7).
+fn project_allowed(project_path: &str) -> bool {
+    crate::discovery::discover_projects()
+        .iter()
+        .any(|(_, path)| path.to_string_lossy() == project_path)
+}
+
 fn ok(v: serde_json::Value) -> (u16, serde_json::Value) {
     (200, v)
 }
@@ -218,15 +246,17 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             ok(serde_json::json!({ "projects": projects }))
         }
         ("GET", "/api/todos") => match query_get(req, "project") {
-            Some(p) => {
+            Some(p) if project_allowed(&p) => {
                 map_store(crate::store::read_todos(std::path::Path::new(&p)))
             }
+            Some(_) => err(404, "unknown project path (not in registry)"),
             None => err(400, "missing query param: project"),
         },
         ("GET", "/api/epics") => match query_get(req, "project") {
-            Some(p) => {
+            Some(p) if project_allowed(&p) => {
                 map_store(crate::epic_store::read_epics(std::path::Path::new(&p)))
             }
+            Some(_) => err(404, "unknown project path (not in registry)"),
             None => err(400, "missing query param: project"),
         },
         ("GET", "/api/executions") => map_store(crate::execution_store::list_executions()),
@@ -240,11 +270,17 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             Ok(v) => {
                 let id = v.get("id").and_then(|x| x.as_str());
                 let resolution = v.get("resolution").and_then(|x| x.as_str());
-                let by = v.get("resolved_by").and_then(|x| x.as_str()).unwrap_or("api");
                 match (id, resolution) {
-                    (Some(id), Some(res)) => map_store(crate::decision_store::resolve_request(
-                        id, res, by,
-                    )),
+                    // Same contract as the GUI command (§5.1): a resolution
+                    // triggers its legal action (retry/cancel/blocked) and a
+                    // FAILED action rolls the decision back — never resolved
+                    // without its effect (audit M2).
+                    (Some(id), Some(res)) => {
+                        map_store(crate::commands::resolve_decision_request(
+                            id.to_string(),
+                            res.to_string(),
+                        ))
+                    }
                     _ => err(400, "body needs non-empty 'id' and 'resolution'"),
                 }
             }
@@ -335,6 +371,7 @@ mod tests {
             method: "POST".into(),
             path: "/health".into(),
             query: vec![],
+            content_type: None,
             body: vec![],
         };
         let (code, _) = route(&req);
@@ -347,6 +384,7 @@ mod tests {
             method: "GET".into(),
             path: "/nope".into(),
             query: vec![],
+            content_type: None,
             body: vec![],
         };
         let (code, body) = route(&req);
@@ -360,9 +398,24 @@ mod tests {
             method: "GET".into(),
             path: "/api/todos".into(),
             query: vec![],
+            content_type: None,
             body: vec![],
         };
         let (code, _) = route(&req);
         assert_eq!(code, 400);
+    }
+
+    #[test]
+    fn route_todos_rejects_unknown_project() {
+        let req = Request {
+            method: "GET".into(),
+            path: "/api/todos".into(),
+            query: vec![("project".into(), "/definitely/not/registered".into())],
+            content_type: None,
+            body: vec![],
+        };
+        let (code, body) = route(&req);
+        assert_eq!(code, 404);
+        assert!(body.get("error").is_some());
     }
 }

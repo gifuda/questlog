@@ -26,6 +26,10 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Read the remote-mirror marker BEFORE any discovery — mirror clients
+    // must resolve the registry against the mirror from the very first
+    // read (audit M1: discovery here feeds AppState + watcher targets).
+    crate::data_root::init();
     let project_list = discovery::discover_projects();
 
     tauri::Builder::default()
@@ -85,7 +89,6 @@ pub fn run() {
             commands::get_fleet_health,
         ])
         .setup(|app| {
-            crate::data_root::init();
             tray::setup_tray(app);
             let handle = app.handle().clone();
             watcher::start_watching(&handle);

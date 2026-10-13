@@ -240,6 +240,7 @@ fn mutate_executions_with<F, T>(f: F) -> Result<(ExecutionsFile, T), String>
 where
     F: FnOnce(&mut ExecutionsFile) -> Result<T, String>,
 {
+    crate::data_root::guard_write()?;
     ensure_runtime_dir()?;
     let path = executions_path();
     file_lock::with_file_lock(&path, || {
@@ -254,6 +255,7 @@ where
 
 /// Append an event to the append-only event log (JSONL).
 pub fn log_event(event: &ExecutionEvent) -> Result<(), String> {
+    crate::data_root::guard_write()?;
     ensure_runtime_dir()?;
     let path = events_path();
     let line = serde_json::to_string(event).map_err(|e| format!("serialize event error: {e}"))?;
@@ -1600,6 +1602,7 @@ pub fn reanchor_package(
     project_path: &str,
     step_id: &str,
 ) -> Result<TaskPackageSummary, String> {
+    crate::data_root::guard_write()?;
     let path = packages_path();
     if !path.exists() {
         return Err("packages.json missing".to_string());
@@ -1686,6 +1689,7 @@ pub fn reanchor_package(
 /// Mark a package as consumed (status → "passed" or "failed") in packages.json.
 /// This prevents the Runner from re-picking the same package.
 pub fn mark_package_status(package_id: &str, status: &str) -> Result<(), String> {
+    crate::data_root::guard_write()?;
     let path = packages_path();
     if !path.exists() {
         return Ok(());

@@ -102,6 +102,7 @@ pub fn bundle_dir(execution_id: &str) -> Result<PathBuf, String> {
 
 /// Create the bundle directory for an execution. Idempotent.
 pub fn create_bundle_dir(execution_id: &str) -> Result<PathBuf, String> {
+    crate::data_root::guard_write()?;
     let dir = bundle_dir(execution_id)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir bundle dir: {e}"))?;
     Ok(dir)

@@ -26,6 +26,10 @@ pub struct RemoteConfig {
 }
 
 static REMOTE: OnceLock<Option<RemoteConfig>> = OnceLock::new();
+/// Marker present but unparseable → read-only degraded mode (identity
+/// mapping, writes refused). Fails toward read-only, never toward writing
+/// a diverging local copy (audit M5).
+static READ_ONLY_DEGRADED: OnceLock<bool> = OnceLock::new();
 
 /// Marker file inside the mirror root; QUESTLOG_REMOTE_CONFIG overrides the
 /// location for tests. Content = RemoteConfig JSON.
@@ -36,22 +40,51 @@ fn marker_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join("questlog-mirror").join("REMOTE_ACTIVE"))
 }
 
-fn load() -> Option<RemoteConfig> {
-    let path = marker_path()?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<RemoteConfig>(&raw) {
-        Ok(cfg) if cfg.prefix_from.starts_with('/') && cfg.mirror_root.is_absolute() => Some(cfg),
-        _ => None,
+enum MarkerState {
+    Absent,
+    Active(RemoteConfig),
+    Corrupt,
+}
+
+/// Pure marker evaluation — no statics touched, safe to unit test.
+fn read_marker() -> MarkerState {
+    let Some(path) = marker_path() else {
+        return MarkerState::Absent;
+    };
+    if !path.exists() {
+        return MarkerState::Absent;
+    }
+    match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<RemoteConfig>(&raw).ok())
+    {
+        Some(cfg) if cfg.prefix_from.starts_with('/') && cfg.mirror_root.is_absolute() => {
+            MarkerState::Active(cfg)
+        }
+        _ => MarkerState::Corrupt,
     }
 }
 
-/// Read the marker once at process start (lib.rs setup / headless main).
+/// Read the marker once at process start (lib.rs run() head — BEFORE any
+/// discovery — / headless main).
 pub fn init() {
-    let _ = REMOTE.set(load());
+    match read_marker() {
+        MarkerState::Absent => {
+            let _ = REMOTE.set(None);
+        }
+        MarkerState::Active(cfg) => {
+            let _ = REMOTE.set(Some(cfg));
+        }
+        MarkerState::Corrupt => {
+            let _ = REMOTE.set(None);
+            let _ = READ_ONLY_DEGRADED.set(true);
+        }
+    }
 }
 
 pub fn is_remote() -> bool {
     REMOTE.get().map(|o| o.is_some()).unwrap_or(false)
+        || READ_ONLY_DEGRADED.get().copied().unwrap_or(false)
 }
 
 fn cfg() -> Option<&'static RemoteConfig> {
@@ -163,5 +196,20 @@ mod tests {
     fn write_guard_fail_closed_only_in_remote_mode() {
         assert!(guard_write_with(None).is_ok());
         assert!(guard_write_with(Some(&cfg())).is_err());
+    }
+
+    #[test]
+    fn corrupt_marker_reads_as_degraded() {
+        // A present-but-unparseable marker must evaluate Corrupt (pure fn —
+        // statics untouched), which init() translates into read-only
+        // degraded mode instead of silently regaining local write authority.
+        let dir = std::env::temp_dir().join(format!("ql-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let marker = dir.join("REMOTE_ACTIVE");
+        std::fs::write(&marker, "not json at all").expect("write marker");
+        std::env::set_var("QUESTLOG_REMOTE_CONFIG", &marker);
+        let state = read_marker();
+        std::env::remove_var("QUESTLOG_REMOTE_CONFIG");
+        assert!(matches!(state, MarkerState::Corrupt));
     }
 }

@@ -148,6 +148,7 @@ pub fn read_sweep_state() -> SweepState {
 }
 
 pub fn write_sweep_state(state: &SweepState) -> Result<(), String> {
+    crate::data_root::guard_write()?;
     let path = sweep_state_path();
     let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let json = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;

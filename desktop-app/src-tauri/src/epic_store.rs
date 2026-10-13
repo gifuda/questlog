@@ -45,6 +45,7 @@ pub fn read_epics(project_dir: &Path) -> Result<EpicsFile, String> {
 /// each other's temp file; the last rename wins but the file is never
 /// observed half-written.
 pub fn write_epics(project_dir: &Path, data: &mut EpicsFile) -> Result<(), String> {
+    crate::data_root::guard_write()?;
     let path = crate::data_root::map_read(&project_dir.join(FILENAME));
     data.revision = data.revision.saturating_add(1);
     let tmp = path.with_extension(format!(
