@@ -11,6 +11,7 @@ pub mod executors;
 pub mod file_lock;
 pub mod fleet_health;
 mod models;
+pub mod remote_client;
 pub mod runner;
 pub mod runner_config;
 pub mod runner_git;

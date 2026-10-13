@@ -17,7 +17,21 @@ fn main() {
     init_logger();
     let args: Vec<String> = std::env::args().collect();
     let serve = args.iter().any(|a| a == "--serve");
-    let bind = flag_value(&args, "--bind").unwrap_or_else(|| "127.0.0.1:5889".to_string());
+    // --bind may appear multiple times (S5): one listener thread per address
+    // (e.g. loopback + tailnet interface). At least one bind, default loopback.
+    let mut binds: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--bind" {
+            if let Some(v) = args.get(i + 1) {
+                binds.push(v.clone());
+            }
+        }
+        i += 1;
+    }
+    if binds.is_empty() {
+        binds.push("127.0.0.1:5889".to_string());
+    }
 
     app_lib::data_root::init();
     if app_lib::data_root::is_remote() {
@@ -47,29 +61,31 @@ fn main() {
     log::info!(
         "questlog-headless up (pid {}, api {})",
         std::process::id(),
-        if serve { format!("http://{bind}") } else { "off".to_string() }
+        if serve {
+            binds.iter().map(|b| format!("http://{b}")).collect::<Vec<_>>().join(", ")
+        } else {
+            "off".to_string()
+        }
     );
 
     if serve {
-        if let Err(e) = app_lib::api_server::serve(&bind) {
-            eprintln!("questlog-headless: {e}");
-            std::process::exit(1);
+        let mut handles = Vec::new();
+        for b in binds {
+            handles.push(std::thread::spawn(move || {
+                if let Err(e) = app_lib::api_server::serve(&b) {
+                    eprintln!("questlog-headless: {e}");
+                    std::process::exit(1);
+                }
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
         }
     } else {
         loop {
             std::thread::park();
         }
     }
-}
-
-fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == flag {
-            return it.next().cloned();
-        }
-    }
-    None
 }
 
 /// Minimal stdout logger — the GUI uses tauri-plugin-log, which the

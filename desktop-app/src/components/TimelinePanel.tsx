@@ -177,8 +177,10 @@ export default function TimelinePanel() {
     });
   }
 
-  function openInMain(projectPath: string) {
-    invoke("navigate_to_project", { projectPath }).catch(() => {});
+  function openInMain(_projectPath: string) {
+    // navigate_to_project was never a registered command (silent dead link);
+    // show_main_window is registered — reveal the main window instead.
+    invoke("show_main_window").catch(() => {});
     getCurrentWindow().hide();
   }
 

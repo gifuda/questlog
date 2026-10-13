@@ -227,6 +227,31 @@ fn parse_body(req: &Request) -> Result<serde_json::Value, (u16, serde_json::Valu
     serde_json::from_slice(&req.body).map_err(|e| err(400, format!("bad JSON body: {e}")))
 }
 
+// ── S5: body-field extraction helpers for the write routes ──
+
+/// Optional string field.
+fn s<'a>(v: &'a serde_json::Value, k: &str) -> Option<&'a str> {
+    v.get(k).and_then(|x| x.as_str())
+}
+/// Optional owned string field.
+fn os(v: &serde_json::Value, k: &str) -> Option<String> {
+    s(v, k).map(|x| x.to_string())
+}
+/// Optional boolean field.
+fn ob(v: &serde_json::Value, k: &str) -> Option<bool> {
+    v.get(k).and_then(|x| x.as_bool())
+}
+/// Optional string-array field.
+fn ovec(v: &serde_json::Value, k: &str) -> Option<Vec<String>> {
+    v.get(k)
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+}
+/// Required string field — 400 with the exact missing key name.
+fn need<'a>(v: &'a serde_json::Value, k: &str) -> Result<&'a str, (u16, serde_json::Value)> {
+    s(v, k).ok_or_else(|| err(400, format!("body needs '{k}'")))
+}
+
 fn route(req: &Request) -> (u16, serde_json::Value) {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/health") => ok(serde_json::json!({
@@ -340,6 +365,209 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
                     _ => err(400, "body needs 'id' and boolean 'pause'"),
                 }
             }
+            Err(e) => e,
+        },
+        // ── S5: M4 client read surface (thin wraps of the commands' _impl
+        // cores — same store locks as the GUI command layer). ──
+        ("GET", "/api/trash") => map_store(crate::commands::get_trash()),
+        ("GET", "/api/all-active") => map_store(crate::commands::get_all_active_impl(
+            &crate::discovery::discover_projects(),
+        )),
+        ("GET", "/api/epics-global") => map_store(crate::commands::get_epics_global_impl(
+            &crate::discovery::discover_projects(),
+        )),
+        ("GET", "/api/project-items") => match query_get(req, "project") {
+            Some(p) if project_allowed(&p) => map_store(
+                crate::commands::get_project_items_impl(&crate::discovery::discover_projects(), p),
+            ),
+            Some(_) => err(404, "unknown project path (not in registry)"),
+            None => err(400, "missing query param: project"),
+        },
+        ("GET", "/api/epic-auto-execute") => {
+            match (query_get(req, "epic_id"), query_get(req, "project")) {
+                (Some(epic_id), Some(project)) => {
+                    map_store(crate::commands::get_epic_auto_execute(epic_id, project))
+                }
+                _ => err(400, "missing query params: epic_id and project"),
+            }
+        }
+        ("POST", "/api/epic-auto-execute") => match parse_body(req) {
+            Ok(v) => match (need(&v, "epic_id"), need(&v, "project_path")) {
+                (Ok(epic_id), Ok(project_path)) => map_store(
+                    crate::commands::set_epic_auto_execute(
+                        epic_id.to_string(),
+                        project_path.to_string(),
+                        ob(&v, "auto_execute"),
+                    ),
+                ),
+                (Err(e), _) | (_, Err(e)) => e,
+            },
+            Err(e) => e,
+        },
+        ("GET", "/api/runner-project-status") => match query_get(req, "project") {
+            Some(p) => map_store(crate::commands::get_runner_project_status(p)),
+            None => err(400, "missing query param: project"),
+        },
+        ("GET", "/api/executor-options") => map_store(crate::commands::get_executor_options()),
+        ("GET", "/api/todo-counts") => {
+            let mut counts = Vec::new();
+            let mut total: u64 = 0;
+            for (name, path) in crate::discovery::discover_projects() {
+                let active = crate::store::read_todos(&path)
+                    .map(|d| {
+                        d.items
+                            .iter()
+                            .filter(|i| {
+                                i.status == crate::models::ItemStatus::Active
+                                    && i.item_type == crate::models::ItemType::Todo
+                            })
+                            .count() as u64
+                    })
+                    .unwrap_or(0);
+                total += active;
+                counts.push(serde_json::json!({
+                    "name": name,
+                    "path": path.to_string_lossy(),
+                    "active": active
+                }));
+            }
+            ok(serde_json::json!({ "counts": counts, "total": total }))
+        }
+        ("GET", "/api/todo-status") => map_store(crate::commands::get_todo_status_impl(
+            &crate::discovery::discover_projects(),
+            query_get(req, "project"),
+        )),
+        // ── S5: M4 client write surface (thin wraps of the _impl cores). ──
+        ("POST", "/api/todos/add") => match parse_body(req) {
+            Ok(v) => match (need(&v, "project_path"), need(&v, "item_type"), need(&v, "title")) {
+                (Ok(pp), Ok(item_type), Ok(title)) => {
+                    map_store(crate::commands::add_todo_impl(
+                        &crate::discovery::discover_projects(),
+                        pp.to_string(),
+                        item_type.to_string(),
+                        title.to_string(),
+                        os(&v, "content"),
+                        os(&v, "suggestion"),
+                        ovec(&v, "tags"),
+                        os(&v, "priority"),
+                    ))
+                }
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/todos/update") => match parse_body(req) {
+            Ok(v) => match (need(&v, "project_path"), need(&v, "id")) {
+                (Ok(pp), Ok(id)) => map_store(crate::commands::update_todo_impl(
+                    &crate::discovery::discover_projects(),
+                    pp.to_string(),
+                    id.to_string(),
+                    os(&v, "status"),
+                    os(&v, "content"),
+                    ovec(&v, "tags"),
+                    os(&v, "priority"),
+                    os(&v, "title"),
+                    os(&v, "item_type"),
+                    ob(&v, "processing"),
+                    ob(&v, "auto_process"),
+                    ob(&v, "auto_ack"),
+                )),
+                (Err(e), _) | (_, Err(e)) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/epics/add") => match parse_body(req) {
+            Ok(v) => match (need(&v, "project_path"), need(&v, "title")) {
+                (Ok(pp), Ok(title)) => map_store(crate::commands::add_epic_impl(
+                    &crate::discovery::discover_projects(),
+                    pp.to_string(),
+                    title.to_string(),
+                    os(&v, "description"),
+                    os(&v, "priority"),
+                    ovec(&v, "depends_on"),
+                    os(&v, "parent_id"),
+                    os(&v, "acceptance"),
+                )),
+                (Err(e), _) | (_, Err(e)) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/epics/update") => match parse_body(req) {
+            Ok(v) => match (need(&v, "project_path"), need(&v, "id")) {
+                (Ok(pp), Ok(id)) => map_store(crate::commands::update_epic_impl(
+                    &crate::discovery::discover_projects(),
+                    pp.to_string(),
+                    id.to_string(),
+                    os(&v, "title"),
+                    os(&v, "description"),
+                    os(&v, "status"),
+                    os(&v, "priority"),
+                    ovec(&v, "depends_on"),
+                    os(&v, "links_doc"),
+                    os(&v, "links_branch"),
+                    os(&v, "links_note"),
+                    os(&v, "acceptance"),
+                    os(&v, "close_reason"),
+                )),
+                (Err(e), _) | (_, Err(e)) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/epics/delete") => match parse_body(req) {
+            Ok(v) => match (need(&v, "project_path"), need(&v, "id")) {
+                (Ok(pp), Ok(id)) => map_store(crate::commands::delete_epic_impl(
+                    &crate::discovery::discover_projects(),
+                    pp.to_string(),
+                    id.to_string(),
+                )),
+                (Err(e), _) | (_, Err(e)) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/steps/add") => match parse_body(req) {
+            Ok(v) => {
+                match (need(&v, "project_path"), need(&v, "epic_id"), need(&v, "title")) {
+                    (Ok(pp), Ok(epic_id), Ok(title)) => {
+                        map_store(crate::commands::add_step_impl(
+                            &crate::discovery::discover_projects(),
+                            pp.to_string(),
+                            epic_id.to_string(),
+                            title.to_string(),
+                            os(&v, "description"),
+                            ovec(&v, "depends_on"),
+                        ))
+                    }
+                    (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => e,
+                }
+            }
+            Err(e) => e,
+        },
+        ("POST", "/api/steps/update") => match parse_body(req) {
+            Ok(v) => match (need(&v, "project_path"), need(&v, "id")) {
+                (Ok(pp), Ok(id)) => map_store(crate::commands::update_step_impl(
+                    &crate::discovery::discover_projects(),
+                    pp.to_string(),
+                    id.to_string(),
+                    os(&v, "title"),
+                    os(&v, "description"),
+                    os(&v, "stage"),
+                    v.get("order").and_then(|x| x.as_u64()).map(|o| o as u32),
+                    ovec(&v, "depends_on"),
+                    os(&v, "todo_ref"),
+                )),
+                (Err(e), _) | (_, Err(e)) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/steps/delete") => match parse_body(req) {
+            Ok(v) => match (need(&v, "project_path"), need(&v, "id")) {
+                (Ok(pp), Ok(id)) => map_store(crate::commands::delete_step_impl(
+                    &crate::discovery::discover_projects(),
+                    pp.to_string(),
+                    id.to_string(),
+                )),
+                (Err(e), _) | (_, Err(e)) => e,
+            },
             Err(e) => e,
         },
         (m, p) if p.starts_with("/api/") || p == "/health" => {

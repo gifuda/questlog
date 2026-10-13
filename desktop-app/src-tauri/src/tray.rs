@@ -123,29 +123,45 @@ pub fn setup_tray(app: &App) {
     let app_handle = app.handle().clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(30));
-        let state = app_handle.state::<crate::commands::AppState>();
-        let total = if let Ok(projects) = state.projects.lock() {
-            projects
-                .iter()
-                .map(|(_, path)| {
-                    crate::store::read_todos(path)
-                        .map(|d| {
-                            d.items
-                                .iter()
-                                .filter(|i| {
-                                    i.status == crate::models::ItemStatus::Active
-                                        && i.item_type == crate::models::ItemType::Todo
-                                })
-                                .count()
-                        })
-                        .unwrap_or(0)
-                })
-                .sum()
+        // S5 remote mode: the counts live on the authority — ask the API. An
+        // unreachable authority must NOT render a fake "0" badge: `ok=false`
+        // shows "!" instead (unavailable, not empty).
+        let (total, ok) = if crate::remote_client::enabled() {
+            match crate::remote_client::get_json("/api/todo-counts") {
+                Ok(v) => (
+                    v.get("total").and_then(|t| t.as_u64()).unwrap_or(0) as usize,
+                    true,
+                ),
+                Err(_) => (0, false),
+            }
         } else {
-            0
+            let state = app_handle.state::<crate::commands::AppState>();
+            let total = if let Ok(projects) = state.projects.lock() {
+                projects
+                    .iter()
+                    .map(|(_, path)| {
+                        crate::store::read_todos(path)
+                            .map(|d| {
+                                d.items
+                                    .iter()
+                                    .filter(|i| {
+                                        i.status == crate::models::ItemStatus::Active
+                                            && i.item_type == crate::models::ItemType::Todo
+                                    })
+                                    .count()
+                            })
+                            .unwrap_or(0)
+                    })
+                    .sum()
+            } else {
+                0
+            };
+            (total, true)
         };
         if let Some(tray) = app_handle.tray_by_id("main") {
-            let badge = if total > 0 {
+            let badge = if !ok {
+                "!".to_string()
+            } else if total > 0 {
                 total.to_string()
             } else {
                 String::new()

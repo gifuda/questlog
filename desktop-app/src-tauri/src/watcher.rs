@@ -12,6 +12,12 @@ const PACKAGES_FILENAME: &str = "packages.json";
 const BOARD_FILENAME: &str = "board.json";
 
 pub fn start_watching(app: &AppHandle) {
+    // S5 remote API mode: reads/writes live on the authority API — there is
+    // no mirror to watch. Only the (local) arb board leg keeps its watch;
+    // project/registry/runtime watches are skipped. The event loop itself
+    // stays as-is (it simply receives no board events).
+    let api_mode = crate::remote_client::enabled();
+
     let state = app.state::<AppState>();
     let projects = match state.projects.lock() {
         Ok(p) => p.clone(),
@@ -41,14 +47,16 @@ pub fn start_watching(app: &AppHandle) {
     // We watch the project directory itself (NonRecursive) so that we catch
     // creation of .todos.json / .epics.json when the MCP pushes for the first
     // time. Watching individual files misses the initial create.
-    for (name, path) in &projects {
-        // Remote mirror mode: watch the local mirror copy, not the
-        // authority path (which does not exist on this machine).
-        let watch_path = crate::data_root::map_read(path);
-        if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
-            log::warn!("failed to watch parent dir for {name}: {e}");
-        } else {
-            log::info!("watching {name}: {}", path.display());
+    if !api_mode {
+        for (name, path) in &projects {
+            // Remote mirror mode: watch the local mirror copy, not the
+            // authority path (which does not exist on this machine).
+            let watch_path = crate::data_root::map_read(path);
+            if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
+                log::warn!("failed to watch parent dir for {name}: {e}");
+            } else {
+                log::info!("watching {name}: {}", path.display());
+            }
         }
     }
 
@@ -71,24 +79,28 @@ pub fn start_watching(app: &AppHandle) {
     }
 
     // Watch the central registry for new/deleted projects
-    if let Some(ref rp) = registry_path {
-        if rp.exists() {
-            if let Err(e) = watcher.watch(rp, RecursiveMode::NonRecursive) {
-                log::warn!("failed to watch registry: {e}");
-            } else {
-                log::info!("watching registry: {}", rp.display());
+    if !api_mode {
+        if let Some(ref rp) = registry_path {
+            if rp.exists() {
+                if let Err(e) = watcher.watch(rp, RecursiveMode::NonRecursive) {
+                    log::warn!("failed to watch registry: {e}");
+                } else {
+                    log::info!("watching registry: {}", rp.display());
+                }
             }
         }
     }
 
     // Watch the Runtime Store directory for execution/package state changes.
     // This lets the UI refresh when the Runner processes a package.
-    let runtime_dir = crate::execution_store::runtime_dir();
-    if runtime_dir.exists() {
-        if let Err(e) = watcher.watch(&runtime_dir, RecursiveMode::NonRecursive) {
-            log::warn!("failed to watch runtime dir: {e}");
-        } else {
-            log::info!("watching runtime: {}", runtime_dir.display());
+    if !api_mode {
+        let runtime_dir = crate::execution_store::runtime_dir();
+        if runtime_dir.exists() {
+            if let Err(e) = watcher.watch(&runtime_dir, RecursiveMode::NonRecursive) {
+                log::warn!("failed to watch runtime dir: {e}");
+            } else {
+                log::info!("watching runtime: {}", runtime_dir.display());
+            }
         }
     }
 

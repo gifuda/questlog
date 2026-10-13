@@ -23,6 +23,9 @@ pub struct RemoteConfig {
     pub prefix_from: String,
     /// Local mirror root (absolute).
     pub mirror_root: PathBuf,
+    /// S5: m5p API 基址（如 "http://powermac-mini:5889"）。缺省=无 API（桥接期纯镜像只读）。
+    #[serde(default)]
+    pub api_base: Option<String>,
 }
 
 static REMOTE: OnceLock<Option<RemoteConfig>> = OnceLock::new();
@@ -91,6 +94,12 @@ fn cfg() -> Option<&'static RemoteConfig> {
     REMOTE.get().unwrap_or(&None).as_ref()
 }
 
+/// S5: the m5p authority API base from the marker, if configured. Absent =
+/// bridge-phase pure-mirror read-only mode (no API to talk to).
+pub fn api_base() -> Option<&'static str> {
+    cfg().and_then(|c| c.api_base.as_deref())
+}
+
 /// Re-root an authority-machine path into the local mirror for READS.
 /// Paths outside `prefix_from` (e.g. the local gros board.json) pass
 /// through unchanged. Identity when not in remote mode.
@@ -153,6 +162,7 @@ mod tests {
         RemoteConfig {
             prefix_from: "/data/auth".to_string(),
             mirror_root: PathBuf::from("/mirror/questlog"),
+            api_base: None,
         }
     }
 

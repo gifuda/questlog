@@ -2353,7 +2353,8 @@ static LAST_PROCESSED: AtomicU32 = AtomicU32::new(0);
 static POLL_INTERVAL_SECS: AtomicU64 = AtomicU64::new(10);
 
 /// Live Runner status exposed to the UI via `get_runner_runtime_status`.
-#[derive(Debug, Clone, serde::Serialize)]
+/// Deserialize added in S5 so the remote (API) branch can reuse this type.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunnerRuntimeStatus {
     /// Intent flag: is the Runner supposed to be running?
     pub running: bool,

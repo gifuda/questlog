@@ -8,6 +8,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { useRefreshFallback } from "./useRefreshFallback";
 
 export interface ExecutionLease {
   execution_id: string;
@@ -94,14 +95,14 @@ export function useExecutions() {
       refresh();
     });
 
-    // Refresh every 5s while mounted (for heartbeat updates)
-    const interval = setInterval(refresh, 5000);
-
     return () => {
       unlisten.then((fn) => fn());
-      clearInterval(interval);
     };
   }, [refresh]);
+
+  // Fallback refresh (poll + window focus) — S5: also covers remote mode
+  // where no local watcher events arrive.
+  useRefreshFallback(refresh);
 
   return { executions, loading, refresh };
 }
@@ -388,9 +389,11 @@ export function useDecisionRequests() {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 5000);
-    return () => clearInterval(interval);
   }, [refresh]);
+
+  // S5: fallback refresh (poll + window focus) keeps the inbox fresh in
+  // remote mode (no local decision-store watcher events).
+  useRefreshFallback(refresh);
 
   const resolve = useCallback(async (requestId: string, resolution: string) => {
     try {

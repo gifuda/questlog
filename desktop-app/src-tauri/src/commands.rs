@@ -16,13 +16,13 @@ pub struct AppState {
     pub projects: std::sync::Mutex<Vec<(String, PathBuf)>>,
 }
 
-/// Validate a project_path coming from the frontend:
-/// canonicalize it, require it exists as a directory, and require it matches a
-/// registered project (the UI only ever operates on registered projects).
+/// Validate a project_path against an explicit registry allowlist:
+/// canonicalize it, require it exists as a directory, and require it matches
+/// a registered project (the UI only ever operates on registered projects).
 /// Returns the canonical PathBuf on success.
-pub fn validate_project_path(
+pub fn validate_project_path_list(
     project_path: &str,
-    state: &State<AppState>,
+    projects: &[(String, PathBuf)],
 ) -> Result<PathBuf, String> {
     let raw = PathBuf::from(project_path);
     let canonical = raw
@@ -34,7 +34,6 @@ pub fn validate_project_path(
             canonical.display()
         ));
     }
-    let projects = state.projects.lock().map_err(|e| e.to_string())?;
     let registered = projects
         .iter()
         .any(|(_, p)| p.canonicalize().map(|c| c == canonical).unwrap_or(false));
@@ -47,6 +46,16 @@ pub fn validate_project_path(
     Ok(canonical)
 }
 
+/// Validate a project_path coming from the frontend (State-locking wrapper
+/// around validate_project_path_list).
+pub fn validate_project_path(
+    project_path: &str,
+    state: &State<AppState>,
+) -> Result<PathBuf, String> {
+    let projects = state.projects.lock().map_err(|e| e.to_string())?;
+    validate_project_path_list(project_path, &projects)
+}
+
 /// Forward webview JS errors to the stdout log. WKWebView console is
 /// invisible in release builds; this bridge makes render-time crashes
 /// diagnosable (see main.tsx error listeners).
@@ -55,9 +64,36 @@ pub fn diag_report_error(msg: String) {
     eprintln!("[webview-error] {msg}");
 }
 
+/// Wire shape of /api/projects entries ({"name","path"} objects).
+#[derive(serde::Deserialize)]
+struct RemoteNamePath {
+    name: String,
+    path: PathBuf,
+}
+
 #[tauri::command]
 pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    if crate::remote_client::enabled() {
+        // Map the API's name/path list back into the registry shape and run
+        // the SAME local assembly so the returned JSON stays identical.
+        let v = crate::remote_client::get_json("/api/projects")?;
+        let list: Vec<RemoteNamePath> = serde_json::from_value(
+            v.get("projects").cloned().unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(|e| format!("api shape mismatch: {e}"))?;
+        let pairs: Vec<(String, PathBuf)> =
+            list.into_iter().map(|x| (x.name, x.path)).collect();
+        return get_projects_impl(&pairs);
+    }
     let projects = state.projects.lock().map_err(|e| e.to_string())?;
+    get_projects_impl(&projects)
+}
+
+/// Plain core: build the project tab list (counts, active epics, last
+/// activity) from an explicit registry allowlist.
+pub fn get_projects_impl(
+    projects: &[(String, std::path::PathBuf)],
+) -> Result<Vec<serde_json::Value>, String> {
     let mut result = vec![];
     for (name, path) in projects.iter() {
         // A corrupt .todos.json must NOT hide the whole project from the board.
@@ -110,7 +146,22 @@ pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, St
 
 #[tauri::command]
 pub fn get_todos(project_path: String, state: State<AppState>) -> Result<TodosFile, String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into(&format!(
+            "/api/todos?project={}",
+            crate::remote_client::urlencode(&project_path)
+        ));
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    get_todos_impl(&projects, project_path)
+}
+
+/// Plain core: validate against an explicit allowlist and read the board file.
+pub fn get_todos_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+) -> Result<TodosFile, String> {
+    let path = validate_project_path_list(&project_path, projects)?;
     store::read_todos(&path)
 }
 
@@ -141,7 +192,57 @@ pub fn update_todo(
     auto_process: Option<bool>,
     auto_ack: Option<bool>,
 ) -> Result<(), String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({
+            "project_path": project_path,
+            "id": id,
+            "status": status,
+            "content": content,
+            "tags": tags,
+            "priority": priority,
+            "title": title,
+            "item_type": item_type,
+            "processing": processing,
+            "auto_process": auto_process,
+            "auto_ack": auto_ack,
+        });
+        crate::remote_client::post_json("/api/todos/update", &body)?;
+        return Ok(());
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    update_todo_impl(
+        &projects,
+        project_path,
+        id,
+        status,
+        content,
+        tags,
+        priority,
+        title,
+        item_type,
+        processing,
+        auto_process,
+        auto_ack,
+    )
+}
+
+/// Plain core: projects = registry allowlist (API routes pass
+/// discover_projects()). Body identical to the former command body.
+pub fn update_todo_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+    id: String,
+    status: Option<String>,
+    content: Option<String>,
+    tags: Option<Vec<String>>,
+    priority: Option<String>,
+    title: Option<String>,
+    item_type: Option<String>,
+    processing: Option<bool>,
+    auto_process: Option<bool>,
+    auto_ack: Option<bool>,
+) -> Result<(), String> {
+    let path = validate_project_path_list(&project_path, projects)?;
     let mut archived_quickly = false;
 
     // G1: every .todos.json write goes through mutate_todos — cross-process
@@ -247,7 +348,45 @@ pub fn add_todo(
     tags: Option<Vec<String>>,
     priority: Option<String>,
 ) -> Result<TodoItem, String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({
+            "project_path": project_path,
+            "item_type": item_type,
+            "title": title,
+            "content": content,
+            "suggestion": suggestion,
+            "tags": tags,
+            "priority": priority,
+        });
+        let v = crate::remote_client::post_json("/api/todos/add", &body)?;
+        return serde_json::from_value(v).map_err(|e| format!("api shape mismatch: {e}"));
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    add_todo_impl(
+        &projects,
+        project_path,
+        item_type,
+        title,
+        content,
+        suggestion,
+        tags,
+        priority,
+    )
+}
+
+/// Plain core: projects = registry allowlist (API routes pass
+/// discover_projects()). Body identical to the former command body.
+pub fn add_todo_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+    item_type: String,
+    title: String,
+    content: Option<String>,
+    suggestion: Option<String>,
+    tags: Option<Vec<String>>,
+    priority: Option<String>,
+) -> Result<TodoItem, String> {
+    let path = validate_project_path_list(&project_path, projects)?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let item = TodoItem {
@@ -325,6 +464,9 @@ pub fn undo_remove_project(
 
 #[tauri::command]
 pub fn get_trash() -> Result<Vec<discovery::TrashEntry>, String> {
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into("/api/trash");
+    }
     discovery::list_trash()
 }
 
@@ -370,7 +512,22 @@ pub fn get_project_items(
     project_path: String,
     state: State<AppState>,
 ) -> Result<serde_json::Value, String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into(&format!(
+            "/api/project-items?project={}",
+            crate::remote_client::urlencode(&project_path)
+        ));
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    get_project_items_impl(&projects, project_path)
+}
+
+/// Plain core: active items for one project grouped by type.
+pub fn get_project_items_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+) -> Result<serde_json::Value, String> {
+    let path = validate_project_path_list(&project_path, projects)?;
     let data = store::read_todos(&path)?;
     let project_name = path
         .file_name()
@@ -410,7 +567,17 @@ pub fn get_project_items(
 /// Used by the floating panel timeline view.
 #[tauri::command]
 pub fn get_all_active(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into("/api/all-active");
+    }
     let projects = state.projects.lock().map_err(|e| e.to_string())?;
+    get_all_active_impl(&projects)
+}
+
+/// Plain core: all active items across the given registry, newest first.
+pub fn get_all_active_impl(
+    projects: &[(String, std::path::PathBuf)],
+) -> Result<Vec<serde_json::Value>, String> {
     let mut items: Vec<serde_json::Value> = vec![];
     for (name, path) in projects.iter() {
         let data = match store::read_todos(path) {
@@ -469,6 +636,15 @@ pub fn get_epics(
     project_path: String,
     state: State<AppState>,
 ) -> Result<serde_json::Value, String> {
+    if crate::remote_client::enabled() {
+        // /api/epics returns the RAW EpicsFile; the frontend shape is built
+        // by the same local pure function so remote == local output.
+        let data: crate::models::EpicsFile = crate::remote_client::get_into(&format!(
+            "/api/epics?project={}",
+            crate::remote_client::urlencode(&project_path)
+        ))?;
+        return Ok(epics_to_json(&data, &project_path));
+    }
     let path = validate_project_path(&project_path, &state)?;
     let data = epic_store::read_epics(&path)?;
     Ok(epics_to_json(&data, &project_path))
@@ -477,7 +653,17 @@ pub fn get_epics(
 /// Global summary across ALL registered projects (aggregate dashboard).
 #[tauri::command]
 pub fn get_epics_global(state: State<AppState>) -> Result<serde_json::Value, String> {
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into("/api/epics-global");
+    }
     let projects = state.projects.lock().map_err(|e| e.to_string())?;
+    get_epics_global_impl(&projects)
+}
+
+/// Plain core: aggregate epic summary across the given registry.
+pub fn get_epics_global_impl(
+    projects: &[(String, std::path::PathBuf)],
+) -> Result<serde_json::Value, String> {
     let mut all_epics: Vec<serde_json::Value> = vec![];
     for (name, path) in projects.iter() {
         let data = match epic_store::read_epics(path) {
@@ -545,7 +731,44 @@ pub fn add_epic(
     parent_id: Option<String>,
     acceptance: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({
+            "project_path": project_path,
+            "title": title,
+            "description": description,
+            "priority": priority,
+            "depends_on": depends_on,
+            "parent_id": parent_id,
+            "acceptance": acceptance,
+        });
+        return crate::remote_client::post_json("/api/epics/add", &body);
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    add_epic_impl(
+        &projects,
+        project_path,
+        title,
+        description,
+        priority,
+        depends_on,
+        parent_id,
+        acceptance,
+    )
+}
+
+/// Plain core: projects = registry allowlist. Body identical to the former
+/// command body.
+pub fn add_epic_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+    title: String,
+    description: Option<String>,
+    priority: Option<String>,
+    depends_on: Option<Vec<String>>,
+    parent_id: Option<String>,
+    acceptance: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let path = validate_project_path_list(&project_path, projects)?;
     let now = chrono::Utc::now().to_rfc3339();
     let id = format!("epic_{}", uuid::Uuid::new_v4().simple());
 
@@ -605,7 +828,59 @@ pub fn update_epic(
     acceptance: Option<String>,
     close_reason: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({
+            "project_path": project_path,
+            "id": id,
+            "title": title,
+            "description": description,
+            "status": status,
+            "priority": priority,
+            "depends_on": depends_on,
+            "links_doc": links_doc,
+            "links_branch": links_branch,
+            "links_note": links_note,
+            "acceptance": acceptance,
+            "close_reason": close_reason,
+        });
+        return crate::remote_client::post_json("/api/epics/update", &body);
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    update_epic_impl(
+        &projects,
+        project_path,
+        id,
+        title,
+        description,
+        status,
+        priority,
+        depends_on,
+        links_doc,
+        links_branch,
+        links_note,
+        acceptance,
+        close_reason,
+    )
+}
+
+/// Plain core: projects = registry allowlist. Body identical to the former
+/// command body.
+pub fn update_epic_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+    id: String,
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    priority: Option<String>,
+    depends_on: Option<Vec<String>>,
+    links_doc: Option<String>,
+    links_branch: Option<String>,
+    links_note: Option<String>,
+    acceptance: Option<String>,
+    close_reason: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let path = validate_project_path_list(&project_path, projects)?;
     let new_status = match &status {
         Some(s) => Some(EpicStatus::from_str(s)?),
         None => None,
@@ -677,7 +952,21 @@ pub fn delete_epic(
     state: State<AppState>,
     id: String,
 ) -> Result<serde_json::Value, String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({ "project_path": project_path, "id": id });
+        return crate::remote_client::post_json("/api/epics/delete", &body);
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    delete_epic_impl(&projects, project_path, id)
+}
+
+/// Plain core: delete an epic and its steps (registry allowlist validated).
+pub fn delete_epic_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let path = validate_project_path_list(&project_path, projects)?;
     let data = epic_store::mutate_epics(&path, |file| {
         file.epics.retain(|e| e.id != id);
         file.steps.retain(|s| s.epic_id != id);
@@ -700,7 +989,30 @@ pub fn add_step(
     description: Option<String>,
     depends_on: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({
+            "project_path": project_path,
+            "epic_id": epic_id,
+            "title": title,
+            "description": description,
+            "depends_on": depends_on,
+        });
+        return crate::remote_client::post_json("/api/steps/add", &body);
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    add_step_impl(&projects, project_path, epic_id, title, description, depends_on)
+}
+
+/// Plain core: add a step (registry allowlist validated).
+pub fn add_step_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+    epic_id: String,
+    title: String,
+    description: Option<String>,
+    depends_on: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    let path = validate_project_path_list(&project_path, projects)?;
     let now = chrono::Utc::now().to_rfc3339();
     let id = format!("step_{}", uuid::Uuid::new_v4().simple());
 
@@ -754,7 +1066,46 @@ pub fn update_step(
     depends_on: Option<Vec<String>>,
     todo_ref: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({
+            "project_path": project_path,
+            "id": id,
+            "title": title,
+            "description": description,
+            "stage": stage,
+            "order": order,
+            "depends_on": depends_on,
+            "todo_ref": todo_ref,
+        });
+        return crate::remote_client::post_json("/api/steps/update", &body);
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    update_step_impl(
+        &projects,
+        project_path,
+        id,
+        title,
+        description,
+        stage,
+        order,
+        depends_on,
+        todo_ref,
+    )
+}
+
+/// Plain core: update a step (registry allowlist validated).
+pub fn update_step_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+    id: String,
+    title: Option<String>,
+    description: Option<String>,
+    stage: Option<String>,
+    order: Option<u32>,
+    depends_on: Option<Vec<String>>,
+    todo_ref: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let path = validate_project_path_list(&project_path, projects)?;
     let new_stage = match &stage {
         Some(s) => Some(StepStage::from_str(s)?),
         None => None,
@@ -804,7 +1155,21 @@ pub fn delete_step(
     state: State<AppState>,
     id: String,
 ) -> Result<serde_json::Value, String> {
-    let path = validate_project_path(&project_path, &state)?;
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({ "project_path": project_path, "id": id });
+        return crate::remote_client::post_json("/api/steps/delete", &body);
+    }
+    let projects = state.projects.lock().map_err(|e| format!("state: {e}"))?.clone();
+    delete_step_impl(&projects, project_path, id)
+}
+
+/// Plain core: delete a step (registry allowlist validated).
+pub fn delete_step_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: String,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let path = validate_project_path_list(&project_path, projects)?;
     let data = epic_store::mutate_epics(&path, |file| {
         file.steps.retain(|s| s.id != id);
         Ok(())
@@ -1225,10 +1590,20 @@ fn arr_len(v: &serde_json::Value) -> u64 {
 
 #[tauri::command]
 pub fn get_executions() -> Result<Vec<crate::execution_store::Execution>, String> {
-    let mut executions = crate::execution_store::list_executions()?;
-    // S0-A/C: fill the view-only retries_remaining in ONE package read
-    // (map join, not per-row reads) so the UI can disable the retry button
-    // on an exhausted budget and explain why.
+    let mut executions = if crate::remote_client::enabled() {
+        crate::remote_client::get_into("/api/executions")?
+    } else {
+        crate::execution_store::list_executions()?
+    };
+    fill_execution_view_fields(&mut executions);
+    Ok(executions)
+}
+
+/// S0-A/C: fill the view-only retries_remaining in ONE package read
+/// (map join, not per-row reads) so the UI can disable the retry button
+/// on an exhausted budget and explain why. Shared by the local and the
+/// remote read path so both return the same shape.
+fn fill_execution_view_fields(executions: &mut [crate::execution_store::Execution]) {
     let caps = crate::execution_store::budget_caps_by_package().unwrap_or_default();
     let display_nos = crate::execution_store::display_nos_by_package().unwrap_or_default();
     for exec in executions.iter_mut() {
@@ -1238,7 +1613,6 @@ pub fn get_executions() -> Result<Vec<crate::execution_store::Execution>, String
         }
         exec.package_display_no = display_nos.get(&exec.package_id).copied();
     }
-    Ok(executions)
 }
 
 /// What is the Runner working on right now — the freshest in-flight
@@ -1246,7 +1620,20 @@ pub fn get_executions() -> Result<Vec<crate::execution_store::Execution>, String
 /// titles, for the App's "currently running" banner.
 #[tauri::command]
 pub fn get_current_execution() -> Result<Option<serde_json::Value>, String> {
-    let inflight = crate::execution_store::list_executions()?
+    let all: Vec<crate::execution_store::Execution> = if crate::remote_client::enabled() {
+        crate::remote_client::get_into("/api/executions")?
+    } else {
+        crate::execution_store::list_executions()?
+    };
+    current_execution_payload(freshest_inflight(all))
+}
+
+/// Freshest queued/running/candidate/verifying execution, newest updated_at
+/// first (the selection half of get_current_execution).
+fn freshest_inflight(
+    execs: Vec<crate::execution_store::Execution>,
+) -> Option<crate::execution_store::Execution> {
+    execs
         .into_iter()
         .filter(|e| {
             matches!(
@@ -1257,7 +1644,14 @@ pub fn get_current_execution() -> Result<Option<serde_json::Value>, String> {
                     | crate::execution_store::ExecutionStatus::Verifying
             )
         })
-        .max_by_key(|e| e.updated_at);
+        .max_by_key(|e| e.updated_at)
+}
+
+/// Plain core: render the banner payload for the selected execution (body
+/// identical to the former command body after the list read).
+fn current_execution_payload(
+    inflight: Option<crate::execution_store::Execution>,
+) -> Result<Option<serde_json::Value>, String> {
     let Some(exec) = inflight else {
         return Ok(None);
     };
@@ -1303,6 +1697,11 @@ pub fn get_current_execution() -> Result<Option<serde_json::Value>, String> {
 
 #[tauri::command]
 pub fn cancel_execution(id: String) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({ "id": id, "pause": false });
+        crate::remote_client::post_json("/api/executions/control", &body)?;
+        return Ok(());
+    }
     crate::execution_store::request_control(&id, false).map(|_| ())
 }
 
@@ -1310,11 +1709,21 @@ pub fn cancel_execution(id: String) -> Result<(), String> {
 pub fn retry_execution(id: String) -> Result<String, String> {
     // Evidence-aware retry: create a NEW attempt preserving the parent's evidence.
     // The parent execution row is never modified — its bundle stays sealed.
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({ "id": id });
+        let v = crate::remote_client::post_json("/api/executions/retry", &body)?;
+        return serde_json::from_value(v).map_err(|e| format!("api shape mismatch: {e}"));
+    }
     crate::execution_store::create_retry_attempt(&id)
 }
 
 #[tauri::command]
 pub fn pause_execution(id: String) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({ "id": id, "pause": true });
+        crate::remote_client::post_json("/api/executions/control", &body)?;
+        return Ok(());
+    }
     crate::execution_store::request_control(&id, true).map(|_| ())
 }
 
@@ -1323,11 +1732,15 @@ pub fn pause_execution(id: String) -> Result<(), String> {
 /// vs "switched on but not running" vs "stale (no poll in a while)".
 #[tauri::command]
 pub fn get_runner_runtime_status() -> Result<crate::runner::RunnerRuntimeStatus, String> {
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into("/api/runner/status");
+    }
     Ok(crate::runner::runtime_status())
 }
 
 /// A model entry under a provider in the ZCode CLI config.
-#[derive(Debug, Clone, serde::Serialize)]
+/// Deserialize added in S5 so the remote (API) branch can reuse this type.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecutorModelOption {
     /// Full model id ("provider/model") to store in runner-config.
     pub id: String,
@@ -1342,14 +1755,14 @@ pub struct ExecutorModelOption {
     pub thinking_default: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecutorProviderOption {
     pub name: String,
     pub display_name: String,
     pub models: Vec<ExecutorModelOption>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecutorOptions {
     pub providers: Vec<ExecutorProviderOption>,
     /// Currently selected "provider/model"; None = CLI default.
@@ -1426,6 +1839,9 @@ fn executor_models_from_provider(
 /// configured".
 #[tauri::command]
 pub fn get_executor_options() -> Result<ExecutorOptions, String> {
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into("/api/executor-options");
+    }
     let mut providers: Vec<ExecutorProviderOption> = Vec::new();
 
     let provider_self_contained = |def: &serde_json::Value| -> bool {
@@ -1554,6 +1970,24 @@ pub fn get_todo_status(
     project_path: Option<String>,
     state: State<AppState>,
 ) -> Result<serde_json::Value, String> {
+    if crate::remote_client::enabled() {
+        let query = project_path
+            .as_ref()
+            .map(|p| format!("?project={}", crate::remote_client::urlencode(p)))
+            .unwrap_or_default();
+        return crate::remote_client::get_into(&format!("/api/todo-status{query}"));
+    }
+    let projects = state.projects.lock().map_err(|e| e.to_string())?.clone();
+    get_todo_status_impl(&projects, project_path)
+}
+
+/// Plain core: todo pipeline status; projects = registry allowlist. Body
+/// identical to the former command body (the state lock replaced by the
+/// explicit list).
+pub fn get_todo_status_impl(
+    projects: &[(String, std::path::PathBuf)],
+    project_path: Option<String>,
+) -> Result<serde_json::Value, String> {
     let schedule = crate::runner_config::get_todo_schedule();
     let sweep_state = crate::todo_ledger::read_sweep_state();
     let ledger = crate::todo_ledger::read_ledger()?;
@@ -1574,7 +2008,6 @@ pub fn get_todo_status(
     // 项目名按注册表路径匹配（realpath 对齐，兼容软链/尾斜杠差异）。
     let project_ref = match &project_path {
         Some(pp) => {
-            let projects = state.projects.lock().map_err(|e| e.to_string())?;
             let target = std::fs::canonicalize(pp).unwrap_or_else(|_| std::path::PathBuf::from(pp));
             projects
                 .iter()
@@ -1628,8 +2061,18 @@ pub fn get_todo_status(
 /// 无新写路径。
 #[tauri::command]
 pub fn get_fleet_health(state: State<AppState>) -> Result<serde_json::Value, String> {
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into("/api/fleet-health");
+    }
     let projects = state.projects.lock().map_err(|e| e.to_string())?.clone();
-    crate::fleet_health::collect(&projects)
+    get_fleet_health_impl(&projects)
+}
+
+/// Plain core: fleet health snapshot for an explicit registry allowlist.
+pub fn get_fleet_health_impl(
+    projects: &[(String, std::path::PathBuf)],
+) -> Result<serde_json::Value, String> {
+    crate::fleet_health::collect(projects)
 }
 
 /// Get the Runner status for a specific project (global + project + effective).
@@ -1637,6 +2080,12 @@ pub fn get_fleet_health(state: State<AppState>) -> Result<serde_json::Value, Str
 pub fn get_runner_project_status(
     project_path: String,
 ) -> Result<crate::runner_config::ProjectRunnerStatus, String> {
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into(&format!(
+            "/api/runner-project-status?project={}",
+            crate::remote_client::urlencode(&project_path)
+        ));
+    }
     Ok(crate::runner_config::get_project_status(&project_path))
 }
 
@@ -1646,6 +2095,16 @@ pub fn set_runner_project_enabled(
     project_path: String,
     enabled: bool,
 ) -> Result<crate::runner_config::ProjectRunnerStatus, String> {
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({ "project_path": project_path, "enabled": enabled });
+        crate::remote_client::post_json("/api/runner/project-enabled", &body)?;
+        // The control endpoint echoes the request; the command contract is
+        // the full status — read it back from the status endpoint.
+        return crate::remote_client::get_into(&format!(
+            "/api/runner-project-status?project={}",
+            crate::remote_client::urlencode(&project_path)
+        ));
+    }
     crate::runner_config::set_project_enabled(&project_path, enabled)?;
     Ok(crate::runner_config::get_project_status(&project_path))
 }
@@ -1654,6 +2113,14 @@ pub fn set_runner_project_enabled(
 /// poll cycle, regardless of per-project switches.
 #[tauri::command]
 pub fn set_runner_global_enabled(enabled: bool) -> Result<bool, String> {
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({ "enabled": enabled });
+        let v = crate::remote_client::post_json("/api/runner/global-enabled", &body)?;
+        return v
+            .get("enabled")
+            .and_then(|x| x.as_bool())
+            .ok_or_else(|| "api shape mismatch: missing 'enabled'".to_string());
+    }
     crate::runner_config::set_globally_enabled(enabled)?;
     Ok(crate::runner_config::is_globally_enabled())
 }
@@ -1664,6 +2131,13 @@ pub fn get_epic_auto_execute(
     epic_id: String,
     project_path: String,
 ) -> Result<Option<bool>, String> {
+    if crate::remote_client::enabled() {
+        return crate::remote_client::get_into(&format!(
+            "/api/epic-auto-execute?epic_id={}&project={}",
+            crate::remote_client::urlencode(&epic_id),
+            crate::remote_client::urlencode(&project_path)
+        ));
+    }
     let dir = std::path::PathBuf::from(&project_path);
     let data = crate::epic_store::read_epics(&dir)?;
     let epic = data
@@ -1682,6 +2156,15 @@ pub fn set_epic_auto_execute(
     project_path: String,
     auto_execute: Option<bool>,
 ) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({
+            "epic_id": epic_id,
+            "project_path": project_path,
+            "auto_execute": auto_execute,
+        });
+        crate::remote_client::post_json("/api/epic-auto-execute", &body)?;
+        return Ok(());
+    }
     let dir = std::path::PathBuf::from(&project_path);
     crate::epic_store::mutate_epics(&dir, |data| {
         let epic = data
@@ -1709,6 +2192,11 @@ pub fn resolve_decision_request(
     request_id: String,
     resolution: String,
 ) -> Result<crate::decision_store::DecisionRequest, String> {
+    if crate::remote_client::enabled() {
+        let body = serde_json::json!({ "id": request_id, "resolution": resolution });
+        let v = crate::remote_client::post_json("/api/decision-requests/resolve", &body)?;
+        return serde_json::from_value(v).map_err(|e| format!("api shape mismatch: {e}"));
+    }
     let request = crate::decision_store::resolve_request(&request_id, &resolution, "ui-user")?;
 
     // §5.1: resolve triggers a legal state transition, not a direct pass.

@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { useRefreshFallback } from "./useRefreshFallback";
 
 export interface NightDigest {
   date: string;
@@ -96,9 +97,11 @@ export function useFleetHealth() {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 15000);
-    return () => clearInterval(interval);
   }, [refresh]);
+
+  // S5: fallback refresh (poll + window focus) — the sole refresh source in
+  // remote mode (no local watcher events) and the self-heal for missed ones.
+  useRefreshFallback(refresh);
 
   return { health, refresh };
 }
