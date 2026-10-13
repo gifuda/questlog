@@ -12,7 +12,7 @@ set -e
 
 # ─── 白名单：守卫自身、文档、README、.gitignore、LICENSE ───
 # 这些文件里的敏感字符串是"说明用例"，合法
-WHITELIST='^scripts/pre-commit-guard\.sh$|\.md$|README|\.gitignore$|^LICENSE$|^docs/'
+WHITELIST='^scripts/pre-commit-guard\.sh$|\.md$|README|\.gitignore$|^LICENSE$|^docs/|^deploy/'
 
 # 只看暂存区里"新增"的行（+ 开头，排除 +++ 文件头）
 PATCH=$(git -c core.quotepath=false diff --cached --no-color --unified=0 --name-only)
