@@ -73,10 +73,10 @@ fn main() {
         // not yet assigned at boot — loopback keeps serving; KeepAlive
         // restarts recover the rest). Exit only if EVERY bind failed.
         let total = binds.len();
-        let fail_count = std::sync::atomic::AtomicUsize::new(0);
+        let fail_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut handles = Vec::new();
         for b in binds {
-            let fails = &fail_count;
+            let fails = fail_count.clone();
             handles.push(std::thread::spawn(move || {
                 if let Err(e) = app_lib::api_server::serve(&b) {
                     eprintln!("questlog-headless: bind {b} failed: {e}");
