@@ -341,12 +341,6 @@ pub fn get_todo_schedule() -> Option<TodoSchedule> {
     read_config().todo_schedule
 }
 
-pub fn set_todo_schedule(schedule: Option<TodoSchedule>) -> Result<(), String> {
-    let mut config = read_config();
-    config.todo_schedule = schedule;
-    write_config(&mut config)
-}
-
 /// Set the executor thinking level. Takes effect on the next worktree.
 pub fn set_executor_thinking(thinking: Option<String>) -> Result<(), String> {
     let mut config = read_config();

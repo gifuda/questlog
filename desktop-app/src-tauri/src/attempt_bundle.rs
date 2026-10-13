@@ -880,11 +880,6 @@ pub fn list_bundles_for_step(step_id: &str) -> Result<Vec<AttemptManifest>, Stri
     list_bundles_filtered(|m| m.step_id == step_id)
 }
 
-/// List all attempt manifests for a given epic.
-pub fn list_bundles_for_epic(epic_id: &str) -> Result<Vec<AttemptManifest>, String> {
-    list_bundles_filtered(|m| m.epic_id == epic_id)
-}
-
 fn list_bundles_filtered<F>(f: F) -> Result<Vec<AttemptManifest>, String>
 where
     F: Fn(&AttemptManifest) -> bool,

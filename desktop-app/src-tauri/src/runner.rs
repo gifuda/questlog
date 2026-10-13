@@ -2498,18 +2498,6 @@ pub fn is_running() -> bool {
     RUNNER_RUNNING.load(Ordering::SeqCst)
 }
 
-/// Enable or disable the Runner at runtime.
-/// Kept for backward compatibility (set_runner_enabled Tauri command).
-/// Prefer per-project control via runner_config::set_project_enabled.
-pub fn set_enabled(enabled: bool) -> bool {
-    if enabled {
-        ensure_running();
-    } else {
-        stop_runner();
-    }
-    enabled
-}
-
 /// Trusted acceptance command registry (mirrors the Node-side registry).
 /// command_id → (command, relative cwd).
 /// The Runner resolves command_ids here — it never accepts raw shell strings.

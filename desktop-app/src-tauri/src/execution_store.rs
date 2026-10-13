@@ -1043,11 +1043,6 @@ pub fn create_retry_attempt(parent_exec_id: &str) -> Result<String, String> {
     Ok(child_id)
 }
 
-/// Get the output directory for an execution.
-pub fn execution_output_dir(execution_id: &str) -> PathBuf {
-    outputs_dir().join(execution_id)
-}
-
 // ─── Package bridge: read packages.json written by Node MCP ───
 
 /// Minimal TaskPackage representation for the Runner to consume.

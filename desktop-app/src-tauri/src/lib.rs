@@ -64,17 +64,12 @@ pub fn run() {
             // 执行状态模块 (G2 — Runner state)
             commands::get_executions,
             commands::get_current_execution,
-            commands::get_execution,
             commands::cancel_execution,
             commands::retry_execution,
             commands::pause_execution,
-            commands::cleanup_stale_executions,
-            commands::set_runner_enabled,
-            commands::is_runner_running,
             commands::get_runner_runtime_status,
             commands::get_executor_options,
             commands::set_executor_model,
-            commands::set_todo_schedule,
             commands::get_todo_status,
             commands::set_executor_thinking,
             commands::get_runner_project_status,
@@ -86,10 +81,6 @@ pub fn run() {
             commands::resolve_decision_request,
             // 跨机链路健康（只读聚合）
             commands::get_fleet_health,
-            // 执行记忆 (AttemptBundle Trace Query)
-            commands::get_attempt_bundles,
-            commands::get_attempt_detail,
-            commands::get_attempt_file,
         ])
         .setup(|app| {
             tray::setup_tray(app);

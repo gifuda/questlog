@@ -291,30 +291,6 @@ pub fn actionable_steps<'a>(epic_id: &str, steps: &'a [Step]) -> Vec<&'a Step> {
         .collect()
 }
 
-/// List of valid stage transitions (forward path).
-#[allow(dead_code)]
-pub fn next_stage(stage: &StepStage) -> Option<StepStage> {
-    match stage {
-        StepStage::Pending => Some(StepStage::Designed),
-        StepStage::Designed => Some(StepStage::Coded),
-        StepStage::Coded => Some(StepStage::Verified),
-        StepStage::Verified => Some(StepStage::Observed),
-        StepStage::Observed => None,
-    }
-}
-
-/// Get the nth previous stage (for slider / rollback).
-#[allow(dead_code)]
-pub fn all_stages() -> [StepStage; 5] {
-    [
-        StepStage::Pending,
-        StepStage::Designed,
-        StepStage::Coded,
-        StepStage::Verified,
-        StepStage::Observed,
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
