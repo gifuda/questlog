@@ -9,6 +9,8 @@
 # 保留：NAS 侧 30 天轮转；静态板不变属正常，不按 mtime 判故障（手册 W02.7）。
 # 调度：com.questlog.board-snapshot 每日 21:10；launchd 对睡眠错过的日历任务
 #   唤醒后补跑（macOS 语义），无需 RunAtLoad。
+#   S4 后推送源= m5p（plist 迁移到 power 用户下，本脚本 $HOME 相对零改动）；
+#   TopLEe bundle 腿已拆出 scripts/taopuli-bundle-nas.sh 留 M4（源仓不动）。
 # 日志：~/questlog-runtime/logs/board-snapshot.log
 set -euo pipefail
 : "${HOME:?HOME 未设置，拒绝执行}"
@@ -63,23 +65,6 @@ else
   log "FAIL $DAY 推送失败（本地暂存已弃，不造成功戳）"
   exit 1
 fi
-
-# 4b. TopLEe 仓每日 bundle（W02 阶段2 2026-10-12：NAS taopuli.git 为一次性快照无自动更新，
-#     并入本脚本复用通道与调度，避免新增 M4 常开服务；git bundle 单文件原子可恢复）
-TL="$HOME/韬普利TopLEe"
-DAYB="taopuli-$(date +%Y%m%d).bundle"
-if git -C "$TL" bundle create "/tmp/$DAYB" --all >/dev/null 2>&1; then
-  if cat "/tmp/$DAYB" | ssh -o BatchMode=yes -o ConnectTimeout=10 nas \
-       "cat > /volume2/git/$DAYB.part && mv /volume2/git/$DAYB.part /volume2/git/$DAYB"; then
-    log "OK TopLEe bundle $(du -h "/tmp/$DAYB" | cut -f1)"
-  else
-    log "FAIL TopLEe bundle 传输"
-  fi
-  rm -f "/tmp/$DAYB"
-else
-  log "WARN TopLEe bundle create 失败"
-fi
-ssh -o BatchMode=yes -o ConnectTimeout=10 nas 'find /volume2/git -maxdepth 1 -name "taopuli-*.bundle" -mtime +30 -delete' 2>/dev/null || true
 
 # 4. 30 天轮转
 ssh -o BatchMode=yes -o ConnectTimeout=10 nas \
