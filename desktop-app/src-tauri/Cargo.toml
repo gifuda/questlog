@@ -1,5 +1,6 @@
 [package]
 name = "todo-board"
+default-run = "todo-board"
 version = "0.1.0"
 description = "QuestLog — Cross-conversation todo board for Claude Code"
 authors = []
