@@ -57,7 +57,7 @@ done < /tmp/ql-bridge-projects.$$
 rm -f /tmp/ql-bridge-projects.$$
 
 # 4) 标记最后写（内容 = data_root::RemoteConfig JSON）
-printf '%s' "{\"prefix_from\":\"$PREFIX_FROM\",\"mirror_root\":\"$MIRROR\"}" \
+printf '%s' "{\"prefix_from\":\"$PREFIX_FROM\",\"mirror_root\":\"$MIRROR\",\"api_base\":\"${QUESTLOG_API_BASE:-}\"}" \
   > "$MIRROR/REMOTE_ACTIVE.tmp"
 mv "$MIRROR/REMOTE_ACTIVE.tmp" "$MIRROR/REMOTE_ACTIVE"
 

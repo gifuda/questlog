@@ -10,6 +10,8 @@
         <string>--serve</string>
         <string>--bind</string>
         <string>127.0.0.1:5889</string>
+        <string>--bind</string>
+        <string>100.73.205.32:5889</string>
     </array>
     <!-- launchd 默认 PATH 不含 Homebrew——执行器探测序/CLI spawn 全靠这里 -->
     <key>EnvironmentVariables</key>

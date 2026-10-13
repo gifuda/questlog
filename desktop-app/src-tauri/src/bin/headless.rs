@@ -69,17 +69,27 @@ fn main() {
     );
 
     if serve {
+        // One failed bind must not take down the others (e.g. the tailnet IP
+        // not yet assigned at boot — loopback keeps serving; KeepAlive
+        // restarts recover the rest). Exit only if EVERY bind failed.
+        let total = binds.len();
+        let fail_count = std::sync::atomic::AtomicUsize::new(0);
         let mut handles = Vec::new();
         for b in binds {
+            let fails = &fail_count;
             handles.push(std::thread::spawn(move || {
                 if let Err(e) = app_lib::api_server::serve(&b) {
-                    eprintln!("questlog-headless: {e}");
-                    std::process::exit(1);
+                    eprintln!("questlog-headless: bind {b} failed: {e}");
+                    fails.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             }));
         }
         for h in handles {
             let _ = h.join();
+        }
+        if fail_count.load(std::sync::atomic::Ordering::SeqCst) == total {
+            eprintln!("questlog-headless: all binds failed");
+            std::process::exit(1);
         }
     } else {
         loop {

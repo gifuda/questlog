@@ -385,21 +385,23 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
         },
         ("GET", "/api/epic-auto-execute") => {
             match (query_get(req, "epic_id"), query_get(req, "project")) {
-                (Some(epic_id), Some(project)) => {
+                (Some(epic_id), Some(project)) if project_allowed(&project) => {
                     map_store(crate::commands::get_epic_auto_execute(epic_id, project))
                 }
+                (Some(_), Some(_)) => err(404, "unknown project path (not in registry)"),
                 _ => err(400, "missing query params: epic_id and project"),
             }
         }
         ("POST", "/api/epic-auto-execute") => match parse_body(req) {
             Ok(v) => match (need(&v, "epic_id"), need(&v, "project_path")) {
-                (Ok(epic_id), Ok(project_path)) => map_store(
+                (Ok(epic_id), Ok(project_path)) if project_allowed(project_path) => map_store(
                     crate::commands::set_epic_auto_execute(
                         epic_id.to_string(),
                         project_path.to_string(),
                         ob(&v, "auto_execute"),
                     ),
                 ),
+                (Ok(_), Ok(_)) => err(404, "unknown project path (not in registry)"),
                 (Err(e), _) | (_, Err(e)) => e,
             },
             Err(e) => e,

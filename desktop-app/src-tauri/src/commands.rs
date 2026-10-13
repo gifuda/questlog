@@ -2184,6 +2184,14 @@ pub fn set_epic_auto_execute(
 pub fn get_decision_requests(
     include_resolved: Option<bool>,
 ) -> Result<Vec<crate::decision_store::DecisionRequest>, String> {
+    if crate::remote_client::enabled() {
+        let qs = if include_resolved.unwrap_or(false) {
+            "?include_resolved=true"
+        } else {
+            ""
+        };
+        return crate::remote_client::get_into(&format!("/api/decision-requests{qs}"));
+    }
     crate::decision_store::list_requests(include_resolved.unwrap_or(false))
 }
 
