@@ -16,7 +16,7 @@ set -uo pipefail
 
 REMOTE="${QUESTLOG_BRIDGE_REMOTE:-m5p}"
 # S5: marker 携带 API 基址（GUI 据此切换 API 客户端模式）
-API_BASE="${QUESTLOG_API_BASE:-http://powermac-mini.tail545d90.ts.net:5889}"
+API_BASE="${QUESTLOG_API_BASE:-http://127.0.0.1:15889}"
 MIRROR="$HOME/questlog-mirror"
 PREFIX_FROM="/Users/power"
 
