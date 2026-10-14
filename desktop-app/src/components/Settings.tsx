@@ -77,7 +77,7 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-44 bg-surface border border-line rounded-lg shadow-xl py-2 z-50">
+        <div className="absolute right-0 top-full mt-1 w-72 max-h-[80vh] overflow-y-auto bg-surface border border-line rounded-lg shadow-xl py-2 z-50">
           <div className="px-3 pb-2 text-[10px] text-faint uppercase tracking-wider">{t("app.appearance")}</div>
           {themeOptions.map((opt) => (
             <button
@@ -166,32 +166,22 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
           <>
             <div className="my-1 border-t border-line" />
             <div className="px-3 py-1.5">
-              <div className="text-[10px] text-faint uppercase tracking-wider mb-1">
+              <div className="text-[10px] text-faint uppercase tracking-wider mb-1.5">
                 {t("settings.automationTitle")}
               </div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs text-body" title={t("settings.executorHint")}>
-                  🔧 {t("settings.executorRow")}
-                </span>
-                <ExecutorModelSelector />
+              <div className="text-xs text-body mb-1" title={t("settings.executorHint")}>
+                🔧 {t("settings.executorRow")}
               </div>
-              <div className="flex items-center justify-between gap-2 mt-1.5">
-                <span className="text-xs text-body" title={t("settings.nightlyHint")}>
-                  🌙 {t("settings.nightlyRow")}
-                  {nightly.status?.enabled && (
-                    <span className="text-[10px] text-faint ml-1">
-                      {String(nightly.status.model ?? "").split("/").pop()}
-                      {nightly.status.thinking ? ` · ${nightly.status.thinking}` : ""}
-                    </span>
-                  )}
-                </span>
-                {nightly.status?.enabled ? (
-                  <NightlyModelSelector />
-                ) : (
-                  <span className="text-[10px] text-faint">{t("settings.nightlyDisabled")}</span>
-                )}
+              <div className="mb-2"><ExecutorModelSelector /></div>
+              <div className="text-xs text-body mb-1" title={t("settings.nightlyHint")}>
+                🌙 {t("settings.nightlyRow")}
               </div>
-              <div className="text-[11px] text-faint mt-1 leading-relaxed">
+              {nightly.status?.enabled ? (
+                <NightlyModelSelector />
+              ) : (
+                <span className="text-[11px] text-faint">{t("settings.nightlyDisabled")}</span>
+              )}
+              <div className="text-[11px] text-faint mt-1.5 leading-relaxed">
                 {t("settings.automationNote")}
               </div>
             </div>

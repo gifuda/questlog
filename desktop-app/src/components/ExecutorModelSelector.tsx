@@ -65,7 +65,7 @@ function ModelPicker({
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-60 bg-surface border border-line rounded-lg shadow-xl py-2 z-50">
+        <div className="absolute right-0 top-full mt-1 w-64 bg-surface border border-line rounded-lg shadow-xl py-2 z-[60]">
           <div className="px-3 pb-2 text-[10px] text-faint uppercase tracking-wider">
             {t(titleKey)}
           </div>
