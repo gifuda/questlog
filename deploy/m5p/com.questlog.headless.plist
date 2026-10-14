@@ -21,6 +21,11 @@
         <key>RUST_LOG</key>
         <string>info</string>
     </dict>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>1024</integer>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

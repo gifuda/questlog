@@ -18,19 +18,47 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
+/// Concurrent-handler cap: one slow/stalled consumer (or a hanging file path
+/// behind it) must never exhaust threads+FDs and take the whole board down
+/// (2026-10-14 incident: iCloud-coordinated open() hung every all-projects
+/// request until EMFILE). Over cap → immediate 503 + close.
+const MAX_HANDLERS: usize = 48;
+
 pub fn serve(bind: &str) -> Result<(), String> {
     let listener = TcpListener::bind(bind).map_err(|e| format!("bind {bind}: {e}"))?;
     let _ = STARTED.set(std::time::Instant::now());
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     log::info!("[api] listening on http://{bind}");
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                std::thread::spawn(move || handle(s));
+                let now = active.load(std::sync::atomic::Ordering::SeqCst);
+                if now >= MAX_HANDLERS {
+                    log::warn!("[api] handler cap hit ({now}) — refusing connection");
+                    drop(s);
+                    continue;
+                }
+                let mut s = s;
+                let _ = s.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+                let guard = active.clone();
+                guard.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let _g = HandlerGuard(guard);
+                    handle(s);
+                });
             }
             Err(e) => log::warn!("[api] accept error: {e}"),
         }
     }
     Ok(())
+}
+
+/// Decrements the active-handler counter on scope exit.
+struct HandlerGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for HandlerGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 struct Request {
