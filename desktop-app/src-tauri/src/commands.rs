@@ -413,6 +413,12 @@ pub fn add_todo_impl(
 
 #[tauri::command]
 pub fn remove_project(name: String, state: State<AppState>) -> Result<(String, String), String> {
+    if crate::remote_client::enabled() {
+        let v = crate::remote_client::post_json("/api/registry/remove",
+            &serde_json::json!({"name": name}))?;
+        let path = v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        return Ok((name, path));
+    }
     let projects = state.projects.lock().map_err(|e| e.to_string())?;
     let path = projects
         .iter()
@@ -433,6 +439,11 @@ pub fn undo_remove_project(
     path: String,
     state: State<AppState>,
 ) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        crate::remote_client::post_json("/api/registry/undo-remove",
+            &serde_json::json!({"name": name, "path": path}))?;
+        return Ok(());
+    }
     discovery::add_project(&name, &path)?;
     let mut projects = state.projects.lock().map_err(|e| e.to_string())?;
     projects.push((name, PathBuf::from(&path)));
@@ -449,6 +460,11 @@ pub fn get_trash() -> Result<Vec<discovery::TrashEntry>, String> {
 
 #[tauri::command]
 pub fn restore_project(name: String, state: State<AppState>) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        crate::remote_client::post_json("/api/registry/restore",
+            &serde_json::json!({"name": name}))?;
+        return Ok(());
+    }
     discovery::restore_project(&name)?;
     // Refresh in-memory list
     let new_projects = discovery::discover_projects();
@@ -459,11 +475,21 @@ pub fn restore_project(name: String, state: State<AppState>) -> Result<(), Strin
 
 #[tauri::command]
 pub fn permanently_delete_project(name: String) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        crate::remote_client::post_json("/api/registry/permanently-delete",
+            &serde_json::json!({"name": name}))?;
+        return Ok(());
+    }
     discovery::permanently_delete(&name)
 }
 
 #[tauri::command]
 pub fn reorder_projects(names: Vec<String>, state: State<AppState>) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        crate::remote_client::post_json("/api/registry/reorder",
+            &serde_json::json!({"names": names}))?;
+        return Ok(());
+    }
     discovery::reorder_projects(&names)?;
     let mut projects = state.projects.lock().map_err(|e| e.to_string())?;
     let owned: Vec<(String, PathBuf)> = projects.drain(..).collect();
@@ -1224,6 +1250,11 @@ pub fn get_arb_board() -> Result<serde_json::Value, String> {
 /// This writes ONLY to the app's own registry — it never touches GROS data.
 #[tauri::command]
 pub fn set_arb_board(enabled: bool, board_path: Option<String>) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        crate::remote_client::post_json("/api/registry/arb-config",
+            &serde_json::json!({"enabled": enabled, "board_path": board_path}))?;
+        return Ok(());
+    }
     discovery::set_arb_board_config(
         enabled,
         board_path.as_deref().unwrap_or("exports/board.json"),

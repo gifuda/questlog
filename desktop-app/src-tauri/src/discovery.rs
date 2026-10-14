@@ -152,11 +152,15 @@ fn mutate_registry<T>(f: impl FnOnce(&mut Registry) -> Result<T, String>) -> Res
 }
 
 /// Read projects from the central registry file (~/.todo-board.json).
+/// Remote-mirror mode: the registry lists AUTHORITY paths (/Users/power/…)
+/// while the files actually live under the local mirror root — the exists()
+/// check must go through map_read or every project is filtered out and the
+/// GUI shows "未发现项目" (2026-10-14 incident).
 pub fn discover_projects() -> Vec<(String, PathBuf)> {
     read_registry()
         .projects
         .into_iter()
-        .filter(|e| PathBuf::from(&e.path).join(".todos.json").exists())
+        .filter(|e| crate::data_root::map_read(&PathBuf::from(&e.path).join(".todos.json")).exists())
         .map(|e| (e.name, PathBuf::from(e.path)))
         .collect()
 }
@@ -357,5 +361,68 @@ mod tests {
         let b = unique_tmp_path(&p);
         assert_ne!(a, b, "tmp names must be unique across calls");
         assert!(!a.exists());
+    }
+
+    /// Regression (2026-10-14 incident): in remote-mirror mode the registry
+    /// lists AUTHORITY paths (/Users/power/…) while files live under the
+    /// local mirror root. discover_projects must map_read the exists() check
+    /// or every project is filtered out and the GUI shows "未发现项目".
+    #[test]
+    fn remote_mode_discover_finds_mirror_projects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auth = tmp.path().join("auth-home");
+        let mirror = tmp.path().join("mirror");
+        std::fs::create_dir_all(auth.join("proj")).unwrap();
+        std::fs::create_dir_all(mirror.join("proj")).unwrap();
+
+        // Authority-side registry: project path is the AUTHORITY path; the
+        // authority .todos.json does NOT exist locally (it's on m5p).
+        let registry = format!(
+            r#"{{"projects":[{{"name":"demo","path":"{}"}}]}}"#,
+            auth.join("proj").display()
+        );
+        for root in [&auth, &mirror] {
+            std::fs::write(root.join(".todo-board.json"), &registry).unwrap();
+        }
+        // Mirror-side: the mirrored .todos.json EXISTS (rsynced from m5p).
+        std::fs::write(mirror.join("proj/.todos.json"), r#"{"items":[]}"#).unwrap();
+        // Authority-side: intentionally absent.
+
+        // Activate remote mode via the test-only marker override.
+        let marker = tmp.path().join("marker.json");
+        std::fs::write(
+            &marker,
+            format!(
+                r#"{{"prefix_from":"{}","mirror_root":"{}"}}"#,
+                auth.display(),
+                mirror.display()
+            ),
+        )
+        .unwrap();
+        // 进程隔离：data_root 的 remote 态是进程级 OnceLock——本测试若在同进程
+        // init()，会让并行运行的其他写路径测试（guard_write）全部假失败
+        // （2026-10-14 实发：57 例连坐）。改为重跑自身二进制、经 env 进子进程
+        // 断言，污染被限制在子进程内。
+        if std::env::var("QL_REMOTE_DISCOVER_CHILD").is_err() {
+            let exe = std::env::current_exe().unwrap();
+            let out = std::process::Command::new(exe)
+                .arg("remote_mode_discover_finds_mirror_projects")
+                .env("QL_REMOTE_DISCOVER_CHILD", "1")
+                .env("QUESTLOG_REMOTE_CONFIG", &marker)
+                .output()
+                .expect("spawn isolated child test");
+            assert!(
+                out.status.success(),
+                "isolated child test failed:\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        crate::data_root::init();
+
+        let found = discover_projects();
+        assert_eq!(found.len(), 1, "mirror project must be discovered, got {found:?}");
+        assert_eq!(found[0].0, "demo");
     }
 }

@@ -38,7 +38,6 @@ pub fn serve(bind: &str) -> Result<(), String> {
                     drop(s);
                     continue;
                 }
-                let mut s = s;
                 let _ = s.set_write_timeout(Some(std::time::Duration::from_secs(10)));
                 let guard = active.clone();
                 guard.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -464,6 +463,70 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             None => err(400, "missing query param: project"),
         },
         ("GET", "/api/executor-options") => map_store(crate::commands::get_executor_options()),
+        // ── 注册表管理（S5 后置：GUI 远程模式的项目生命周期与排序）──
+        ("POST", "/api/registry/reorder") => match parse_body(req) {
+            Ok(v) => match v.get("names").and_then(|x| x.as_array()) {
+                Some(arr) => {
+                    let names: Vec<String> = arr
+                        .iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect();
+                    map_store(crate::discovery::reorder_projects(&names)
+                        .map(|_| serde_json::json!({"reordered": names.len()})))
+                }
+                None => err(400, "body needs 'names': [string]"),
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/registry/remove") => match parse_body(req) {
+            Ok(v) => match need(&v, "name") {
+                Ok(name) => {
+                    // 回传 path 供 GUI 撤销流（undo-remove 需要 name+path）
+                    let path = crate::discovery::discover_projects()
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .map(|(_, p)| p.to_string_lossy().to_string());
+                    map_store(crate::discovery::remove_project(name)
+                        .map(|_| serde_json::json!({"removed": name, "path": path})))
+                }
+                Err(e) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/registry/undo-remove") => match parse_body(req) {
+            Ok(v) => match (need(&v, "name"), need(&v, "path")) {
+                (Ok(n), Ok(p)) => map_store(crate::discovery::add_project(n, p)
+                    .map(|_| serde_json::json!({"restored": n}))),
+                (Err(e), _) | (_, Err(e)) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/registry/restore") => match parse_body(req) {
+            Ok(v) => match need(&v, "name") {
+                Ok(name) => map_store(crate::discovery::restore_project(name)
+                    .map(|_| serde_json::json!({"restored": name}))),
+                Err(e) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/registry/permanently-delete") => match parse_body(req) {
+            Ok(v) => match need(&v, "name") {
+                Ok(name) => map_store(crate::discovery::permanently_delete(name)
+                    .map(|_| serde_json::json!({"deleted": name}))),
+                Err(e) => e,
+            },
+            Err(e) => e,
+        },
+        ("POST", "/api/registry/arb-config") => match parse_body(req) {
+            Ok(v) => match v.get("enabled").and_then(|x| x.as_bool()) {
+                Some(enabled) => map_store(crate::discovery::set_arb_board_config(
+                    enabled,
+                    v.get("board_path").and_then(|x| x.as_str()).unwrap_or("exports/board.json"),
+                ).map(|_| serde_json::json!({"enabled": enabled}))),
+                None => err(400, "body needs boolean 'enabled'"),
+            },
+            Err(e) => e,
+        },
         ("GET", "/api/todo-counts") => {
             let mut counts = Vec::new();
             let mut total: u64 = 0;
