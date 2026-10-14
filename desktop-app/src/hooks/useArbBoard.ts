@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useRefreshFallback } from "./useRefreshFallback";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ArbBoardFile } from "../types/arb";
@@ -27,6 +28,11 @@ export function useArbBoard() {
     const unlisten = listen<string>("arb-changed", () => { refresh(); });
     return () => { unlisten.then((f) => f()); };
   }, [refresh]);
+
+  // 轮询兜底（S5 后置修复）：arb-changed 事件可能丢失（watcher 配置腿
+  // API 失败/启动竞态），挂载单次加载会永久停在旧快照——与 useStore 等
+  // 钩子对齐，10s 轮询 + 窗口聚焦刷新。
+  useRefreshFallback(refresh);
 
   return { data, loading, refresh };
 }
