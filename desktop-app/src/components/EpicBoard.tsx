@@ -8,7 +8,6 @@ import { formatDate } from "../utils";
 import type { Epic, EpicStatus, GlobalEpic, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
 import ExecutionPanel, { DecisionInbox, RunningBanner } from "./ExecutionPanel";
-import ExecutorModelSelector from "./ExecutorModelSelector";
 
 /** i18n keys for epic status labels (statuses stay lowercase in data). */
 const epicStatusKey: Record<EpicStatus, string> = {
@@ -101,7 +100,6 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
         >
           ⏻ {projectStatus?.global_enabled ? t("execution.globalOn") : t("execution.globalOff")}
         </button>
-        <ExecutorModelSelector />
         <button
           onClick={toggleProjectRunner}
           disabled={projectLoading}

@@ -550,6 +550,28 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             }
             Err(e) => e,
         },
+        // 夜间研究链模型/思考档（全局设置入口；与施工执行器独立选型）
+        ("POST", "/api/runner/todo-schedule") => match parse_body(req) {
+            Ok(v) => {
+                let model = v.get("model").and_then(|x| x.as_str()).map(str::to_string);
+                let thinking = v.get("thinking").and_then(|x| x.as_str()).map(str::to_string);
+                if model.is_none() && thinking.is_none() {
+                    err(400, "body needs 'model' and/or 'thinking'")
+                } else {
+                    match crate::runner_config::set_todo_schedule_model(model, thinking) {
+                        Ok(()) => {
+                            let ts = crate::runner_config::get_todo_schedule();
+                            ok(serde_json::json!({
+                                "model": ts.as_ref().and_then(|t| t.model.clone()),
+                                "thinking": ts.as_ref().and_then(|t| t.thinking.clone()),
+                            }))
+                        }
+                        Err(e) => err(409, e),
+                    }
+                }
+            }
+            Err(e) => e,
+        },
         ("POST", "/api/registry/arb-config") => match parse_body(req) {
             Ok(v) => match v.get("enabled").and_then(|x| x.as_bool()) {
                 Some(enabled) => map_store(crate::discovery::set_arb_board_config(

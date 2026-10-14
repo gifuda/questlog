@@ -342,6 +342,27 @@ pub fn get_todo_schedule() -> Option<TodoSchedule> {
     read_config().todo_schedule
 }
 
+/// S5 后置（全局设置入口）：夜间研究链模型/思考档。仅在调度已配置时可改
+/// ——调度为空时夜间链本就不跑，先配窗口再谈模型。施工执行器是另一条
+/// 独立选型（set_executor_model），互不影响。
+pub fn set_todo_schedule_model(
+    model: Option<String>,
+    thinking: Option<String>,
+) -> Result<(), String> {
+    let mut config = read_config();
+    let ts = config
+        .todo_schedule
+        .as_mut()
+        .ok_or_else(|| "夜间调度未配置（todo_schedule 为空）——先配置调度窗口".to_string())?;
+    if let Some(m) = model {
+        ts.model = Some(m);
+    }
+    if let Some(t) = thinking {
+        ts.thinking = Some(t);
+    }
+    write_config(&mut config)
+}
+
 /// Set the executor thinking level. Takes effect on the next worktree.
 pub fn set_executor_thinking(thinking: Option<String>) -> Result<(), String> {
     let mut config = read_config();

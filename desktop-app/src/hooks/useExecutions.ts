@@ -266,6 +266,45 @@ export function useExecutorOptions() {
   return { options, select, selectThinking, refresh };
 }
 
+/** 夜间研究链（todo sweep）模型状态——与施工执行器独立选型。
+ * 当前值来自 get_todo_status.schedule；选项列表与执行器共用 ~/.zcode 配置。 */
+export function useNightlyModel() {
+  const [status, setStatus] = useState<{ model: string | null; thinking: string | null; enabled: boolean } | null>(null);
+  const [options, setOptions] = useState<ExecutorOptions | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [st, op] = await Promise.all([
+        invoke<{ schedule: { model?: string | null; thinking?: string | null } | null }>(
+          "get_todo_status", { projectPath: null }),
+        invoke<ExecutorOptions>("get_executor_options"),
+      ]);
+      setStatus({
+        model: st.schedule?.model ?? null,
+        thinking: st.schedule?.thinking ?? null,
+        enabled: !!st.schedule,
+      });
+      setOptions(op);
+    } catch {
+      setStatus(null);
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const select = useCallback(async (model: string) => {
+    await invoke("set_todo_schedule_model", { model, thinking: null });
+    await refresh();
+  }, [refresh]);
+
+  const selectThinking = useCallback(async (thinking: string | null) => {
+    await invoke("set_todo_schedule_model", { model: null, thinking });
+    await refresh();
+  }, [refresh]);
+
+  return { status, options, select, selectThinking, refresh };
+}
+
 /**
  * useProjectRunner — manage Runner execution for a specific project.
  * The global toggle must also be ON for execution to happen.

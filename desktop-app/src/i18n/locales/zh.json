@@ -331,7 +331,8 @@
     "blockedByProjectFirst": "方案授权已开，但项目信任（一次性设置）未开——开启项目开关后才会自动执行",
     "runningNow": "运行中",
     "sceneRecovered": "断点恢复",
-    "recoveredFrom": "成果已恢复自"
+    "recoveredFrom": "成果已恢复自",
+    "nightlySelectorTitle": "夜间链模型"
   },
   "timeline": {
     "projectList": "项目列表",
@@ -451,5 +452,14 @@
     "alertStaleBrief": "晨报内容已 {{days}} 天未更新（雷达轮 {{date}}），请检查采集机雷达管线",
     "alertExportStale": "board.json 导出管线停滞（最后导出 {{ts}}）",
     "alertOverdue": "{{id}} 决策已逾期 {{days}} 天"
+  },
+  "settings": {
+    "automationTitle": "自动化与模型",
+    "executorRow": "方案施工执行器",
+    "executorHint": "Runner 自动执行方案步骤（sealed 包）时使用的模型与思考档",
+    "nightlyRow": "夜间自动处理",
+    "nightlyHint": "待办清单夜间研究链（03:00-06:00）生产任务包用的模型与思考档",
+    "nightlyDisabled": "调度未配置",
+    "automationNote": "两条链各自独立选型；改动写入权威配置，下次任务生效。"
   }
 }

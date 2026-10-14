@@ -4,6 +4,8 @@ import { emit } from "@tauri-apps/api/event";
 import type { Theme } from "../hooks/useTheme";
 import { setLanguage, type AppLanguage } from "../i18n";
 import { setArbBoard, useArbBoard } from "../hooks/useArbBoard";
+import ExecutorModelSelector, { NightlyModelSelector } from "./ExecutorModelSelector";
+import { useNightlyModel } from "../hooks/useExecutions";
 
 interface SettingsProps {
   theme: Theme;
@@ -24,6 +26,15 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
       refreshArb();
     }
   }, [open, refreshArb]);
+
+  // 夜间研究链状态（自动化节显示调度窗与模型当前值）
+  const nightly = useNightlyModel();
+  const nightlyRefresh = nightly.refresh;
+  useEffect(() => {
+    if (open) {
+      void nightlyRefresh();
+    }
+  }, [open, nightlyRefresh]);
 
   useEffect(() => {
     if (open && arbData && !boardPath) {
@@ -148,6 +159,41 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
                 title={t("arb.pathHint")}
               />
               <div className="text-[11px] text-faint mt-0.5">{t("arb.pathHint")}</div>
+            </div>
+          </>
+
+          {/* 自动化与模型（app 级共性配置——施工执行器与夜间研究链独立选型） */}
+          <>
+            <div className="my-1 border-t border-line" />
+            <div className="px-3 py-1.5">
+              <div className="text-[10px] text-faint uppercase tracking-wider mb-1">
+                {t("settings.automationTitle")}
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-body" title={t("settings.executorHint")}>
+                  🔧 {t("settings.executorRow")}
+                </span>
+                <ExecutorModelSelector />
+              </div>
+              <div className="flex items-center justify-between gap-2 mt-1.5">
+                <span className="text-xs text-body" title={t("settings.nightlyHint")}>
+                  🌙 {t("settings.nightlyRow")}
+                  {nightly.status?.enabled && (
+                    <span className="text-[10px] text-faint ml-1">
+                      {String(nightly.status.model ?? "").split("/").pop()}
+                      {nightly.status.thinking ? ` · ${nightly.status.thinking}` : ""}
+                    </span>
+                  )}
+                </span>
+                {nightly.status?.enabled ? (
+                  <NightlyModelSelector />
+                ) : (
+                  <span className="text-[10px] text-faint">{t("settings.nightlyDisabled")}</span>
+                )}
+              </div>
+              <div className="text-[11px] text-faint mt-1 leading-relaxed">
+                {t("settings.automationNote")}
+              </div>
             </div>
           </>
         </div>

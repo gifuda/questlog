@@ -2004,6 +2004,21 @@ pub fn set_executor_thinking(thinking: Option<String>) -> Result<(), String> {
 }
 
 /// Set which model the Runner's executor uses ("provider/model", or None to
+/// S5 后置（全局设置入口）：夜间研究链模型/思考档——与施工执行器
+/// （set_executor_model）是两条独立选型，互不影响。
+#[tauri::command]
+pub fn set_todo_schedule_model(
+    model: Option<String>,
+    thinking: Option<String>,
+) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        crate::remote_client::post_json("/api/runner/todo-schedule",
+            &serde_json::json!({"model": model, "thinking": thinking}))?;
+        return Ok(());
+    }
+    crate::runner_config::set_todo_schedule_model(model, thinking)
+}
+
 /// use the ZCode CLI's own default). Takes effect on the next worktree.
 #[tauri::command]
 pub fn set_executor_model(model: Option<String>) -> Result<(), String> {

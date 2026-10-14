@@ -331,7 +331,8 @@
     "blockedByProjectFirst": "Plan authorized, but the project trust (one-time setting) is OFF — enable the project switch to auto-execute",
     "runningNow": "Running",
     "sceneRecovered": "Recovered",
-    "recoveredFrom": "Scene recovered from"
+    "recoveredFrom": "Scene recovered from",
+    "nightlySelectorTitle": "Nightly chain model"
   },
   "timeline": {
     "projectList": "Projects",
@@ -451,5 +452,14 @@
     "alertStaleBrief": "Briefing content is {{days}}d old (radar round {{date}}) — check the collector radar pipeline",
     "alertExportStale": "board.json export pipeline stalled (last export {{ts}})",
     "alertOverdue": "Decision {{id}} overdue by {{days}}d"
+  },
+  "settings": {
+    "automationTitle": "Automation & Models",
+    "executorRow": "Step executor",
+    "executorHint": "Model & thinking level the Runner uses for sealed plan steps",
+    "nightlyRow": "Nightly processing",
+    "nightlyHint": "Model & thinking level for the nightly todo research chain (03:00-06:00)",
+    "nightlyDisabled": "Schedule not configured",
+    "automationNote": "Independent selections per chain; writes to the authority config, effective on next task."
   }
 }

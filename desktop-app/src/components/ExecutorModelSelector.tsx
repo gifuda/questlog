@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { useExecutorOptions } from "../hooks/useExecutions";
+import { useExecutorOptions, useNightlyModel } from "../hooks/useExecutions";
 
 function Check({ on }: { on: boolean }) {
   if (!on) return null;
@@ -22,9 +22,18 @@ function Check({ on }: { on: boolean }) {
  * to the chosen level's params, so the choice holds regardless of the CLI's
  * global runtime reasoningLevel setting.
  */
-export default function ExecutorModelSelector() {
+function ModelPicker({
+  options, current, thinking, onSelect, onSelectThinking, showDefault, titleKey,
+}: {
+  options: import("../hooks/useExecutions").ExecutorOptions | null;
+  current: string | null;
+  thinking: string | null;
+  onSelect: (id: string) => void;
+  onSelectThinking: (level: string | null) => void;
+  showDefault: boolean;
+  titleKey: string;
+}) {
   const { t } = useTranslation();
-  const { options, select, selectThinking } = useExecutorOptions();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -37,13 +46,11 @@ export default function ExecutorModelSelector() {
     return () => document.removeEventListener("mousedown", onClick);
   }, [open]);
 
-  const current = options?.current_model ?? null;
   // Short label for the collapsed pill: "deepseek/deepseek-v4-flash" → "deepseek-v4-flash"
   const shortLabel = current ? current.split("/").slice(1).join("/") : t("execution.modelDefault");
   const currentModelDef = options?.providers
     .flatMap((p) => p.models)
     .find((m) => m.id === current);
-  const thinking = options?.current_thinking ?? null;
   const levels = currentModelDef?.thinking_levels ?? [];
 
   return (
@@ -60,7 +67,7 @@ export default function ExecutorModelSelector() {
       {open && (
         <div className="absolute right-0 top-full mt-1 w-60 bg-surface border border-line rounded-lg shadow-xl py-2 z-50">
           <div className="px-3 pb-2 text-[10px] text-faint uppercase tracking-wider">
-            {t("execution.modelSelectorTitle")}
+            {t(titleKey)}
           </div>
           {options && options.providers.length > 0 ? (
             options.providers.map((provider) => (
@@ -73,10 +80,10 @@ export default function ExecutorModelSelector() {
                       current === model.id ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
                     }`}
                     onClick={() => {
-                      void select(model.id);
-                      // Reset thinking when the chosen level doesn't exist on the new model
+                      onSelect(model.id);
+                      // 思考档随模型切换：新模型档位不含当前值时复位
                       if (thinking && !model.thinking_levels.includes(thinking)) {
-                        void selectThinking(null);
+                        onSelectThinking(null);
                       }
                     }}
                   >
@@ -92,15 +99,17 @@ export default function ExecutorModelSelector() {
 
           <div className="my-1 border-t border-line" />
 
-          <button
-            className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
-              current === null ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
-            }`}
-            onClick={() => void select(null)}
-          >
-            <span>{t("execution.modelDefault")}</span>
-            <Check on={current === null} />
-          </button>
+          {showDefault && (
+            <button
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
+                current === null ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
+              }`}
+              onClick={() => void onSelect("__default__")}
+            >
+              <span>{t("execution.modelDefault")}</span>
+              <Check on={current === null} />
+            </button>
+          )}
 
           <div className="my-1 border-t border-line" />
 
@@ -115,7 +124,7 @@ export default function ExecutorModelSelector() {
                   className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
                     thinking === level ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
                   }`}
-                  onClick={() => void selectThinking(level)}
+                  onClick={() => onSelectThinking(level)}
                 >
                   <span className="truncate">{t("execution.thinkingLevel", { level })}</span>
                   {currentModelDef?.thinking_default === level && (
@@ -130,7 +139,7 @@ export default function ExecutorModelSelector() {
                 className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
                   thinking === null ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
                 }`}
-                onClick={() => void selectThinking(null)}
+                onClick={() => onSelectThinking(null)}
               >
                 <span>{t("execution.thinkingFollowDefault")}</span>
                 <Check on={thinking === null} />
@@ -141,7 +150,7 @@ export default function ExecutorModelSelector() {
               className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
                 thinking === null ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
               }`}
-              onClick={() => void selectThinking(null)}
+              onClick={() => onSelectThinking(null)}
             >
               <span>{t("execution.thinkingFollowDefault")}</span>
               <Check on={thinking === null} />
@@ -154,5 +163,39 @@ export default function ExecutorModelSelector() {
         </div>
       )}
     </div>
+  );
+}
+
+
+/** 施工执行器选择器（方案步骤自动执行用）——挂在全局设置。 */
+export default function ExecutorModelSelector() {
+  const { options, select, selectThinking } = useExecutorOptions();
+  return (
+    <ModelPicker
+      options={options}
+      current={options?.current_model ?? null}
+      thinking={options?.current_thinking ?? null}
+      onSelect={(id) => { void select(id === "__default__" ? null : id); }}
+      onSelectThinking={(lv) => { void selectThinking(lv); }}
+      showDefault
+      titleKey="execution.modelSelectorTitle"
+    />
+  );
+}
+
+/** 夜间研究链选择器（待办自动处理用）——挂在全局设置；夜间链恒有显式模型，
+ *  无"默认"档。 */
+export function NightlyModelSelector() {
+  const { status, options, select, selectThinking } = useNightlyModel();
+  return (
+    <ModelPicker
+      options={options}
+      current={status?.model ?? null}
+      thinking={status?.thinking ?? null}
+      onSelect={(id) => { void select(id); }}
+      onSelectThinking={(lv) => { void selectThinking(lv); }}
+      showDefault={false}
+      titleKey="execution.nightlySelectorTitle"
+    />
   );
 }

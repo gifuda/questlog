@@ -77,6 +77,7 @@ pub fn run() {
             commands::get_runner_runtime_status,
             commands::get_executor_options,
             commands::set_executor_model,
+            commands::set_todo_schedule_model,
             commands::get_todo_status,
             commands::set_executor_thinking,
             commands::get_runner_project_status,
