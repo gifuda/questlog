@@ -2,8 +2,9 @@ import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { emit } from "@tauri-apps/api/event";
 import type { Theme } from "../hooks/useTheme";
-import { setLanguage, type AppLanguage } from "../i18n";
-import { setArbBoard, useArbBoard } from "../hooks/useArbBoard";
+import { setArbBoard } from "../hooks/useArbBoard";
+import { invoke } from "@tauri-apps/api/core";
+import { useCallback } from "react";
 import ExecutorModelSelector, { NightlyModelSelector } from "./ExecutorModelSelector";
 import { useNightlyModel } from "../hooks/useExecutions";
 
@@ -13,17 +14,26 @@ interface SettingsProps {
 }
 
 export default function Settings({ theme, onThemeChange }: SettingsProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  // 全局套利机会栏配置（app 级功能）。打开下拉时拉一次当前配置。
-  const { data: arbData, refresh: refreshArb } = useArbBoard();
+  // 全局套利机会栏配置（app 级功能）。只拉轻量配置——远程分支返回状态+
+  // 路径后仍会读整个 board.json（153KB）序列化过隧道，那是设置弹窗曾经的
+  // 秒开瓶颈；全量数据只有套利页需要，这里只取开关与路径。
+  const [arbCfg, setArbCfg] = useState<{ enabled: boolean; board_path: string } | null>(null);
   const [boardPath, setBoardPath] = useState("");
-  const arbEnabled = arbData?.status !== "off";
+  const refreshArb = useCallback(async () => {
+    try {
+      const c = await invoke<{ status?: string; board_path?: string }>("get_arb_board");
+      setArbCfg({ enabled: (c.status ?? "") !== "off", board_path: c.board_path ?? "" });
+    } catch {
+      setArbCfg(null);
+    }
+  }, []);
 
   useEffect(() => {
     if (open) {
-      refreshArb();
+      void refreshArb();
     }
   }, [open, refreshArb]);
 
@@ -37,20 +47,15 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
   }, [open, nightlyRefresh]);
 
   useEffect(() => {
-    if (open && arbData && !boardPath) {
-      setBoardPath(arbData.board_path ?? "");
+    if (open && arbCfg && !boardPath) {
+      setBoardPath(arbCfg.board_path);
     }
-  }, [open, arbData, boardPath]);
+  }, [open, arbCfg, boardPath]);
 
   const themeOptions: { value: Theme; label: string; icon: string }[] = [
     { value: "dark", label: t("app.themeDark"), icon: "🌙" },
     { value: "light", label: t("app.themeLight"), icon: "☀️" },
     { value: "system", label: t("app.themeSystem"), icon: "💻" },
-  ];
-
-  const langOptions: { value: AppLanguage; label: string; icon: string }[] = [
-    { value: "zh", label: t("app.langZh"), icon: "🇨🇳" },
-    { value: "en", label: t("app.langEn"), icon: "🇺🇸" },
   ];
 
   useEffect(() => {
@@ -99,24 +104,6 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
 
           <div className="my-1 border-t border-line" />
 
-          <div className="px-3 pb-2 text-[10px] text-faint uppercase tracking-wider">{t("app.language")}</div>
-          {langOptions.map((opt) => (
-            <button
-              key={opt.value}
-              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
-                i18n.resolvedLanguage?.startsWith(opt.value) ? "text-heading bg-elevated" : "text-body hover:bg-elevated"
-              }`}
-              onClick={() => { void setLanguage(opt.value); setOpen(false); }}
-            >
-              <span>{opt.icon}</span>
-              <span>{opt.label}</span>
-              {i18n.resolvedLanguage?.startsWith(opt.value) && (
-                <svg className="ml-auto w-3.5 h-3.5 text-accent" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" />
-                </svg>
-              )}
-            </button>
-          ))}
 
           {/* 套利机会栏（app 级全局功能）开关 + 数据源路径 */}
           <>
@@ -126,10 +113,10 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
                 <span className="text-xs text-body">📈 {t("app.arbTab")}</span>
                 <button
                   className={`w-8 h-4 rounded-full transition-colors relative ${
-                    arbEnabled ? "bg-accent" : "bg-elevated"
+                    arbCfg?.enabled ? "bg-accent" : "bg-elevated"
                   }`}
                   onClick={async () => {
-                    await setArbBoard(!arbEnabled, boardPath);
+                    await setArbBoard(!arbCfg?.enabled, boardPath);
                     await refreshArb();
                     // 通知 ArbBoard 面板刷新（hook 监听该事件）
                     void emit("arb-changed", "settings");
@@ -138,7 +125,7 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
                 >
                   <span
                     className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${
-                      arbEnabled ? "left-4" : "left-0.5"
+                      arbCfg?.enabled ? "left-4" : "left-0.5"
                     }`}
                   />
                 </button>
@@ -149,8 +136,8 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
                 onChange={(e) => setBoardPath(e.target.value)}
                 onBlur={async () => {
                   // 路径修改失焦即保存（保持当前 enabled 状态）
-                  if (arbData && boardPath !== (arbData.board_path ?? "")) {
-                    await setArbBoard(arbEnabled, boardPath);
+                  if (arbCfg && boardPath !== arbCfg.board_path) {
+                    await setArbBoard(arbCfg.enabled, boardPath);
                     await refreshArb();
                     void emit("arb-changed", "settings");
                   }

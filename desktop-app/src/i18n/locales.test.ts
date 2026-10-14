@@ -11,7 +11,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import zh from "./locales/zh.json";
-import en from "./locales/en.json";
 
 type Dict = Record<string, unknown>;
 
@@ -29,21 +28,12 @@ function flatten(d: Dict, prefix = ""): Record<string, string> {
 }
 
 const zhFlat = flatten(zh as Dict);
-const enFlat = flatten(en as Dict);
+
 
 describe("i18n dictionaries", () => {
-  it("zh and en have identical key sets", () => {
-    const zhKeys = Object.keys(zhFlat).sort();
-    const enKeys = Object.keys(enFlat).sort();
-    expect(enKeys).toEqual(zhKeys);
-  });
-
   it("every value is a non-empty string", () => {
     for (const [k, v] of Object.entries(zhFlat)) {
       expect(v.trim().length, `zh:${k} is empty`).toBeGreaterThan(0);
-    }
-    for (const [k, v] of Object.entries(enFlat)) {
-      expect(v.trim().length, `en:${k} is empty`).toBeGreaterThan(0);
     }
   });
 
