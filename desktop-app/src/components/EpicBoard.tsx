@@ -5,7 +5,7 @@ import { useEpics } from "../hooks/useEpics";
 import { useProjectRunner, useRunnerStatus, getEpicAutoExecute, setEpicAutoExecute } from "../hooks/useExecutions";
 import { epicStatusBadge, stageOrder, statusOptions, statusRank } from "../epicConstants";
 import { formatDate } from "../utils";
-import type { Epic, EpicStatus, StepStage } from "../types/epics";
+import type { Epic, EpicStatus, GlobalEpic, StepStage } from "../types/epics";
 import ConfirmButton from "./ConfirmButton";
 import ExecutionPanel, { DecisionInbox, RunningBanner } from "./ExecutionPanel";
 import ExecutorModelSelector from "./ExecutorModelSelector";
@@ -458,6 +458,7 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
   const [showAddStep, setShowAddStep] = useState(false);
   const [showAddChild, setShowAddChild] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [pkgCopied, setPkgCopied] = useState(false);
   const [autoExec, setAutoExec] = useState<boolean | null>(null);
   const isTopLevel = depth === 0;
 
@@ -682,6 +683,14 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
                 )}
                 <button className="text-accent hover:underline" onClick={(e) => { e.stopPropagation(); copyEpicRef(epic, t); }}>
                   {t("epic.copyContinue")}
+                </button>
+                <button className="text-accent hover:underline" onClick={(e) => {
+                  e.stopPropagation();
+                  copyEpicPackage(epic, projectPath, t);
+                  setPkgCopied(true);
+                  setTimeout(() => setPkgCopied(false), 1500);
+                }}>
+                  {pkgCopied ? t("epic.copied") : t("epic.copyPackage")}
                 </button>
                 <button className="text-muted hover:text-heading" onClick={(e) => { e.stopPropagation(); setEditing(true); }}>
                   {t("epic.edit")}
@@ -1034,6 +1043,88 @@ function copyEpicRef(epic: Epic, t: TFunction) {
     lines.push(t("protocol.actionableNone"));
   }
   lines.push(t("protocol.planId", { id: epic.id }));
+  navigator.clipboard.writeText(lines.join("\n")).then(() => {}).catch(() => {});
+}
+
+// ══════════════════════════════════════════════
+// copyEpicPackage — copies the FULL handoff package: everything a fresh
+// conversation needs to continue the plan without re-discovery (epic info,
+// per-step state incl. sealed-package summaries, continuation protocol,
+// MCP project_dir addressing). Keeps the short "继续方案" line for
+// protocol compatibility with mcp-server tool descriptions.
+// ══════════════════════════════════════════════
+function copyEpicPackage(epic: Epic, projectPath: string | undefined, t: TFunction) {
+  const g = epic as GlobalEpic;
+  const projPath = g.project_path || projectPath || "";
+  const projName = g.project || "";
+  // Clip long free-text fields; defuse i18next interpolation markers.
+  const clip = (s: string | null | undefined, n = 600) => {
+    const v = (s || "").trim().replace(/\{\{/g, "（（");
+    if (!v) return "—";
+    return v.length > n ? v.slice(0, n) + "…" : v;
+  };
+  const now = new Date();
+  const pad = (x: number) => String(x).padStart(2, "0");
+  const time = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+  const lines: string[] = [];
+  lines.push(t("protocol.pkg.title", { title: epic.title }));
+  lines.push(t("protocol.pkg.exportedAt", { time }));
+  lines.push("");
+  lines.push(t("protocol.pkg.info"));
+  lines.push(t("protocol.pkg.idLine", {
+    id: epic.id, status: epic.status_label, priority: epic.priority,
+    progress: epic.progress, steps: epic.step_count,
+  }));
+  if (projName || projPath) {
+    lines.push(t("protocol.pkg.projectLine", { project: projName || "—", path: projPath }));
+  }
+  lines.push(t("protocol.pkg.desc", { desc: clip(epic.description) }));
+  lines.push(t("protocol.pkg.acceptance", { text: clip(epic.acceptance, 400) }));
+  lines.push(t("protocol.pkg.depends", {
+    names: epic.depends_on_titles?.length ? epic.depends_on_titles.join("、") : "—",
+  }));
+  lines.push(t("protocol.pkg.links", {
+    doc: clip(epic.links?.doc, 200),
+    branch: clip(epic.links?.branch, 120),
+    note: clip(epic.links?.note, 300),
+  }));
+  lines.push("");
+  lines.push(t("protocol.pkg.steps"));
+  const steps = [...epic.steps].sort(
+    (a, b) => a.order - b.order || a.created_at.localeCompare(b.created_at),
+  );
+  steps.forEach((s, i) => {
+    const mark = s.actionable
+      ? t("protocol.pkg.stepReady")
+      : s.depends_on_titles?.length
+        ? t("protocol.pkg.stepPending", { names: s.depends_on_titles.join("、") })
+        : "";
+    lines.push(t("protocol.pkg.stepLine", { no: i + 1, title: s.title, stage: s.stage_label }) + mark);
+    const d = (s.description || "").trim();
+    if (d) lines.push(t("protocol.pkg.stepDesc", { desc: clip(d, 300) }));
+    if (s.package) {
+      lines.push(t("protocol.pkg.stepPkg", {
+        status: s.package.status,
+        pid: s.package.package_id.slice(0, 8),
+        objective: clip(s.package.objective, 200),
+      }));
+    }
+  });
+  if (epic.children?.length) {
+    lines.push("");
+    lines.push(t("protocol.pkg.children"));
+    epic.children.forEach((c) =>
+      lines.push(t("protocol.pkg.childLine", {
+        title: c.title, status: c.status_label, progress: c.progress, steps: c.step_count,
+      })),
+    );
+  }
+  lines.push("");
+  lines.push(t("protocol.pkg.protocol"));
+  for (let i = 1; i <= 5; i++) lines.push(t(`protocol.pkg.rule${i}`));
+  lines.push("");
+  lines.push(t("protocol.continuePlan", { title: epic.title }));
   navigator.clipboard.writeText(lines.join("\n")).then(() => {}).catch(() => {});
 }
 
