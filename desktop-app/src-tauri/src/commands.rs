@@ -1995,6 +1995,11 @@ pub fn get_executor_options() -> Result<ExecutorOptions, String> {
 /// next worktree.
 #[tauri::command]
 pub fn set_executor_thinking(thinking: Option<String>) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        crate::remote_client::post_json("/api/runner/executor-config",
+            &serde_json::json!({"thinking": thinking}))?;
+        return Ok(());
+    }
     crate::runner_config::set_executor_thinking(thinking)
 }
 
@@ -2002,6 +2007,11 @@ pub fn set_executor_thinking(thinking: Option<String>) -> Result<(), String> {
 /// use the ZCode CLI's own default). Takes effect on the next worktree.
 #[tauri::command]
 pub fn set_executor_model(model: Option<String>) -> Result<(), String> {
+    if crate::remote_client::enabled() {
+        crate::remote_client::post_json("/api/runner/executor-config",
+            &serde_json::json!({"model": model}))?;
+        return Ok(());
+    }
     crate::runner_config::set_executor_model(model)
 }
 

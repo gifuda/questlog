@@ -517,6 +517,39 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             },
             Err(e) => e,
         },
+        // F5 补口：执行器模型/思考档（GUI 设置页写通道）
+        ("POST", "/api/runner/executor-config") => match parse_body(req) {
+            Ok(v) => {
+                let model = v.get("model").and_then(|x| x.as_str());
+                let thinking = v.get("thinking").and_then(|x| x.as_str());
+                let clear_thinking = v.get("clear_thinking").map(|x| x == true).unwrap_or(false);
+                if model.is_none() && thinking.is_none() && !clear_thinking {
+                    err(400, "body needs 'model' and/or 'thinking' (or clear_thinking)")
+                } else {
+                    let r = (|| -> Result<(), String> {
+                        if let Some(m) = model {
+                            let m = if m.is_empty() { None } else { Some(m.to_string()) };
+                            crate::runner_config::set_executor_model(m)?;
+                        }
+                        if clear_thinking {
+                            crate::runner_config::set_executor_thinking(None)?;
+                        } else if let Some(t) = thinking {
+                            let t = if t.is_empty() { None } else { Some(t.to_string()) };
+                            crate::runner_config::set_executor_thinking(t)?;
+                        }
+                        Ok(())
+                    })();
+                    match r {
+                        Ok(()) => ok(serde_json::json!({
+                            "model": crate::runner_config::get_executor_model(),
+                            "thinking": crate::runner_config::get_executor_thinking(),
+                        })),
+                        Err(e) => err(409, e),
+                    }
+                }
+            }
+            Err(e) => e,
+        },
         ("POST", "/api/registry/arb-config") => match parse_body(req) {
             Ok(v) => match v.get("enabled").and_then(|x| x.as_bool()) {
                 Some(enabled) => map_store(crate::discovery::set_arb_board_config(
