@@ -1340,11 +1340,35 @@ pub fn run_arb_decision(cmd: String) -> Result<String, String> {
         } else {
             stderr.trim()
         };
+        // 幂等语义：服务端"状态流转不允许: X → X(...)"（同态流转）说明该决策
+        // 已在账房消费——决策清单是晨报生成的快照，天然滞后于账房实况。此时
+        // 按"已生效"处理（前端标记已处置），而不是让用户撞硬错误。
+        if let Some(state) = same_state_transition(err_out) {
+            return Ok(format!(
+                "已在账房生效（当前状态: {state}）——决策清单为晨报快照，该项此前已处置"
+            ));
+        }
         Err(format!(
             "exit {}: {}",
             out.status.code().unwrap_or(-1),
             err_out
         ))
+    }
+}
+
+/// 检测服务端同态流转错误「状态流转不允许: X → X(…)」——X→X 即目标态已是
+/// 当前态，导出快照滞后的幂等信号。返回该状态名。
+fn same_state_transition(err: &str) -> Option<String> {
+    const MARKER: &str = "状态流转不允许: ";
+    let rest = err.split(MARKER).nth(1)?;
+    let pair = rest.split('(').next()?.trim();
+    let mut parts = pair.split("→");
+    let from = parts.next()?.trim();
+    let to = parts.next()?.trim();
+    if !from.is_empty() && from == to {
+        Some(from.to_string())
+    } else {
+        None
     }
 }
 
@@ -2631,5 +2655,18 @@ mod tests {
         assert!(ensure_type_change_allowed(true, &ItemType::Todo).is_ok());
         // Non-opted-in items can be retyped freely.
         assert!(ensure_type_change_allowed(false, &ItemType::Knowhow).is_ok());
+    }
+
+    #[test]
+    fn same_state_transition_detects_idempotent_rejects_real_conflict() {
+        // 同态（快照滞后）：dismissed → dismissed —— 幂等信号。
+        assert_eq!(
+            same_state_transition("Error: 状态流转不允许: dismissed → dismissed(仅 needs_review → promoted/dismissed)"),
+            Some("dismissed".to_string())
+        );
+        // 真冲突（不同态）：不是幂等信号，仍应走硬错误路径。
+        assert_eq!(same_state_transition("状态流转不允许: open → dismissed(仅 needs_review → promoted/dismissed)"), None);
+        // 无关文案。
+        assert_eq!(same_state_transition("exit 1: something else"), None);
     }
 }
