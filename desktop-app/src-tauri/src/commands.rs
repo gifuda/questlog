@@ -1405,29 +1405,38 @@ fn same_state_transition(err: &str) -> Option<String> {
 
 /// 后台执行自动修订桥（fire-and-forget）：node <dist>/revision-reseal-cli.js
 /// <execution_id>。node 与 CLI 路径取自 todo_schedule（node_bin 与 producer_cli
-/// 的同目录 sibling）；schedule 未配置则记日志跳过（fail-open）。
-fn spawn_auto_revise(execution_id: &str) {
+/// 的同目录 sibling）。返回桥是否真的启动——schedule 未配置或线程创建
+/// 失败都算未启动，调用方必须把事实写进审计记录（W2：记录不得比现实乐观）。
+fn spawn_auto_revise(execution_id: &str) -> bool {
     let Some(ts) = crate::runner_config::get_todo_schedule() else {
         log::info!("[auto-revise] todo_schedule 未配置，跳过自动修订（人工重封即可）");
-        return;
+        return false;
     };
     let cli = std::path::PathBuf::from(&ts.producer_cli)
         .with_file_name("revision-reseal-cli.js");
     let node = ts.node_bin.clone();
     let exec = execution_id.to_string();
-    std::thread::spawn(move || {
-        match std::process::Command::new(&node).arg(&cli).arg(&exec).output() {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if out.status.success() {
-                    log::info!("[auto-revise] {stdout}");
-                } else {
-                    log::warn!("[auto-revise] 失败（包保持 blocked 等人工）: {stdout}");
+    // Builder::spawn 不阻塞（不 join）：桥在后台跑完自行写日志。
+    std::thread::Builder::new()
+        .name("auto-revise".into())
+        .spawn(move || {
+            match std::process::Command::new(&node).arg(&cli).arg(&exec).output() {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if out.status.success() {
+                        log::info!("[auto-revise] {stdout}");
+                    } else {
+                        log::warn!("[auto-revise] 失败（包保持 blocked 等人工）: {stdout}");
+                    }
                 }
+                Err(e) => log::warn!("[auto-revise] spawn 失败（包保持 blocked）: {e}"),
             }
-            Err(e) => log::warn!("[auto-revise] spawn 失败（包保持 blocked）: {e}"),
-        }
-    });
+        })
+        .map(|_| true)
+        .unwrap_or_else(|e| {
+            log::warn!("[auto-revise] 线程创建失败（包保持 blocked）: {e}");
+            false
+        })
 }
 
 /// 引号感知的 shell 拼接符检查：只查引号外的 `; | & \` 换行 $( ——引号内
@@ -1909,13 +1918,16 @@ fn executor_models_from_provider(
 /// Authority reachability probe for the offline indicator. Returns Ok in
 /// both states — "authority down" is a health fact, not a command error —
 /// so the frontend can distinguish harness failure from offline.
-#[tauri::command]
+/// W1: async so the probe never blocks the UI main thread; a black-holed
+/// tunnel can take up to the probe's read cap to fail, and the sync-command
+/// path would freeze the app exactly when the bar is needed.
+#[tauri::command(async)]
 pub fn get_api_health() -> Result<serde_json::Value, String> {
     if !crate::remote_client::enabled() {
         return Ok(serde_json::json!({"ok": true, "mode": "local"}));
     }
     let start = std::time::Instant::now();
-    match crate::remote_client::get_json("/health") {
+    match crate::remote_client::get_json_timeout("/health", std::time::Duration::from_secs(4)) {
         Ok(_) => Ok(serde_json::json!({
             "ok": true,
             "mode": "remote",
@@ -2450,16 +2462,35 @@ pub fn resolve_decision_request(
             // 2026-10-14 用户裁决（点击即授权，机器补机械段）：后台桥到
             // mcp-server 的 revision-reseal-cli，用现场分类并集范围自动
             // 重封修订包；失败 fail-open（包保持 blocked 等人工）。
-            spawn_auto_revise(&request.execution_id);
+            // W3: 先收口（cancel+blocked）再 spawn——cancel 失败走决议
+            // 回滚时不会留下一条已经在跑的桥；避免回滚重试造成双桥。
             cancel_execution_for_decision(
                 &request.execution_id,
-                "resolved as revise_scope — auto-revision bridge spawned",
+                "resolved as revise_scope — execution closed, package blocked",
             )?;
             let package_id = crate::execution_store::get_execution(&request.execution_id)
                 .map(|exec| exec.package_id)
                 .map_err(|e| format!("cannot resolve package for the blocked execution: {e}"))?;
             crate::execution_store::mark_package_status(&package_id, "blocked")
-                .map_err(|e| format!("failed to keep package blocked: {e}"))
+                .map_err(|e| format!("failed to keep package blocked: {e}"))?;
+            // W2: 审计记录反映真实分支——桥没启动时不得写 spawned。
+            let (event_type, message) = if spawn_auto_revise(&request.execution_id) {
+                ("auto_revise_spawned", "auto-revision bridge running (revision-reseal-cli)")
+            } else {
+                ("auto_revise_declined", "auto-revision not started (schedule unconfigured or thread failure) — re-seal manually")
+            };
+            crate::execution_store::log_event(&crate::execution_store::ExecutionEvent {
+                execution_id: request.execution_id.clone(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                event_type: event_type.to_string(),
+                message: message.to_string(),
+                data: None,
+            })
+            .ok();
+            Ok(())
         }
         _ => {
             // Custom resolution text — no automatic action.
@@ -2728,7 +2759,7 @@ mod tests {
         assert!(exec
             .last_error
             .as_deref()
-            .is_some_and(|e| e.contains("auto-revision bridge spawned")));
+            .is_some_and(|e| e.contains("execution closed, package blocked")));
 
         // The package must stay blocked so the Runner cannot re-claim the
         // old scope while a revision is being prepared. (read_ready_packages

@@ -57,6 +57,10 @@ pub fn urlencode(s: &str) -> String {
 }
 
 fn request(method: &str, path_and_query: &str, body: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+    request_with_read_cap(method, path_and_query, body, TIMEOUT)
+}
+
+fn request_with_read_cap(method: &str, path_and_query: &str, body: Option<&serde_json::Value>, io_timeout: Duration) -> Result<serde_json::Value, String> {
     let base = base()?;
     let url = base.trim_end_matches('/');
     let (host_port, _scheme) = match url.strip_prefix("http://") {
@@ -65,8 +69,8 @@ fn request(method: &str, path_and_query: &str, body: Option<&serde_json::Value>)
     };
     let payload = body.map(serde_json::to_vec).transpose().map_err(|e| format!("serialize: {e}"))?;
     let mut stream = connect_bounded(host_port)?;
-    stream.set_read_timeout(Some(TIMEOUT)).ok();
-    stream.set_write_timeout(Some(TIMEOUT)).ok();
+    stream.set_read_timeout(Some(io_timeout)).ok();
+    stream.set_write_timeout(Some(io_timeout)).ok();
     let mut req = format!(
         "{method} {path_and_query} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\nAccept-Encoding: gzip\r\n"
     );
@@ -115,6 +119,12 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// GET a JSON resource from the authority API.
 pub fn get_json(path_and_query: &str) -> Result<serde_json::Value, String> {
     request("GET", path_and_query, None)
+}
+
+/// GET with a shorter read/write cap — for the health probe, which must
+/// report "offline" faster than the data plane's 8s.
+pub fn get_json_timeout(path_and_query: &str, cap: Duration) -> Result<serde_json::Value, String> {
+    request_with_read_cap("GET", path_and_query, None, cap)
 }
 
 /// POST a JSON body to the authority API and return its response.
