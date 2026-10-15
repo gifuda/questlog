@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useProjects } from "./hooks/useStore";
 import { useTheme } from "./hooks/useTheme";
 import { useUndo } from "./hooks/useUndo";
+import { useApiHealth } from "./hooks/useApiHealth";
 import KanbanBoard from "./components/KanbanBoard";
 import EpicBoard from "./components/EpicBoard";
 import ArbBoard from "./components/ArbBoard";
@@ -21,6 +22,7 @@ function App() {
   const { t } = useTranslation();
   const { projects, selected, setSelected, removeProject, reorderProjects, refresh } = useProjects();
   const { theme, setTheme } = useTheme();
+  const apiHealth = useApiHealth();
   const [activeTab, setActiveTab] = useState<ModuleTab>("morning");
   const activeProject = projects.find((p) => p.name === selected);
 
@@ -109,6 +111,18 @@ function App() {
 
   return (
     <div className="h-screen flex flex-col bg-page text-heading select-none" onClick={() => setCtxMenu(null)}>
+      {/* 离线指示条：远端模式下权威端不可达时置顶常显，恢复即自动消隐 */}
+      {apiHealth.mode === "remote" && !apiHealth.ok && (
+        <div className="flex items-center justify-center gap-2 px-4 py-1.5 bg-amber-bg text-amber text-[13px] border-b border-amber/30">
+          <span className="inline-block w-2 h-2 rounded-full bg-amber" />
+          <span>
+            与主机（m5p）连接已断开，正在重试…
+            {apiHealth.lastSuccessAt
+              ? `（上次成功 ${apiHealth.lastSuccessAt.toLocaleTimeString("zh-CN", { hour12: false })}）`
+              : ""}
+          </span>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-line">
         <div className="flex items-center gap-2.5">

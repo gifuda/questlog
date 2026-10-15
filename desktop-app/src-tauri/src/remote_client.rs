@@ -68,7 +68,7 @@ fn request(method: &str, path_and_query: &str, body: Option<&serde_json::Value>)
     stream.set_read_timeout(Some(TIMEOUT)).ok();
     stream.set_write_timeout(Some(TIMEOUT)).ok();
     let mut req = format!(
-        "{method} {path_and_query} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n"
+        "{method} {path_and_query} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\nAccept-Encoding: gzip\r\n"
     );
     if let Some(p) = &payload {
         req.push_str("Content-Type: application/json\r\n");
@@ -81,16 +81,35 @@ fn request(method: &str, path_and_query: &str, body: Option<&serde_json::Value>)
     }
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).map_err(|e| format!("api read: {e}"))?;
-    let text = String::from_utf8_lossy(&raw);
-    let body_start = text.find("\r\n\r\n").ok_or("api response: no header end")?;
-    let status_line = text.lines().next().unwrap_or_default();
+    // Byte-level split: a gzip body is binary and from_utf8_lossy would
+    // mangle it before we ever see the Content-Encoding header.
+    let header_end = find_subslice(&raw, b"\r\n\r\n").ok_or("api response: no header end")?;
+    let headers = String::from_utf8_lossy(&raw[..header_end]);
+    let status_line = headers.lines().next().unwrap_or_default();
     let status: u16 = status_line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let resp_body = &text[body_start + 4..];
-    let value: serde_json::Value = serde_json::from_str(resp_body.trim_start()).map_err(|e| format!("api parse: {e}"))?;
+    let gzipped = headers.lines().any(|l| {
+        l.split_once(':')
+            .map(|(n, v)| n.trim().eq_ignore_ascii_case("content-encoding") && v.trim().eq_ignore_ascii_case("gzip"))
+            .unwrap_or(false)
+    });
+    let body_bytes: Vec<u8> = if gzipped {
+        let mut dec = flate2::read::GzDecoder::new(&raw[header_end + 4..]);
+        let mut out = Vec::new();
+        dec.read_to_end(&mut out).map_err(|e| format!("api gunzip: {e}"))?;
+        out
+    } else {
+        raw[header_end + 4..].to_vec()
+    };
+    let text = String::from_utf8_lossy(&body_bytes);
+    let value: serde_json::Value = serde_json::from_str(text.trim_start()).map_err(|e| format!("api parse: {e}"))?;
     if status >= 400 {
         return Err(format!("api {status}: {}", value.get("error").and_then(|x| x.as_str()).unwrap_or("?")));
     }
     Ok(value)
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// GET a JSON resource from the authority API.

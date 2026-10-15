@@ -1906,6 +1906,25 @@ fn executor_models_from_provider(
 /// migrated to the same-named model in the current list and persisted, so the
 /// selector (and its thinking levels) resolve the current model.
 ///
+/// Authority reachability probe for the offline indicator. Returns Ok in
+/// both states — "authority down" is a health fact, not a command error —
+/// so the frontend can distinguish harness failure from offline.
+#[tauri::command]
+pub fn get_api_health() -> Result<serde_json::Value, String> {
+    if !crate::remote_client::enabled() {
+        return Ok(serde_json::json!({"ok": true, "mode": "local"}));
+    }
+    let start = std::time::Instant::now();
+    match crate::remote_client::get_json("/health") {
+        Ok(_) => Ok(serde_json::json!({
+            "ok": true,
+            "mode": "remote",
+            "latency_ms": start.elapsed().as_millis() as u64,
+        })),
+        Err(e) => Ok(serde_json::json!({"ok": false, "mode": "remote", "error": e})),
+    }
+}
+
 /// Read failures degrade to empty options — the UI shows "no models
 /// configured".
 #[tauri::command]

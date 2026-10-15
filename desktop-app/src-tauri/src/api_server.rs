@@ -66,6 +66,9 @@ struct Request {
     query: Vec<(String, String)>,
     content_type: Option<String>,
     body: Vec<u8>,
+    /// Client sent Accept-Encoding containing gzip — response body may be
+    /// gzip-encoded (only when it actually pays: see GZIP_MIN_BYTES).
+    accept_gzip: bool,
 }
 
 fn handle(mut stream: TcpStream) {
@@ -97,12 +100,38 @@ fn handle(mut stream: TcpStream) {
         415 => "415 Unsupported Media Type",
         _ => "500 Internal Server Error",
     };
+    // Compress only when the client asked and it actually pays: small
+    // payloads gzip to roughly the same size with header overhead.
+    let (payload, encoding) = if req.accept_gzip && payload.len() > GZIP_MIN_BYTES {
+        match gzip_bytes(&payload) {
+            Ok(z) => (z, "gzip"),
+            // Compression failure must not fail the response — send identity.
+            Err(_) => (payload, ""),
+        }
+    } else {
+        (payload, "")
+    };
+    let encoding_hdr = if encoding.is_empty() {
+        String::new()
+    } else {
+        format!("Content-Encoding: {encoding}\r\n")
+    };
     let _ = write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{encoding_hdr}Content-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     );
     let _ = stream.write_all(&payload);
+}
+
+/// Below this size a gzipped JSON body is not meaningfully smaller.
+const GZIP_MIN_BYTES: usize = 512;
+
+fn gzip_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Write as _;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(data).map_err(|e| format!("gzip write: {e}"))?;
+    enc.finish().map_err(|e| format!("gzip finish: {e}"))
 }
 
 /// Read one request (headers + Content-Length body). Returns None on
@@ -133,12 +162,17 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
 
     let mut content_length = 0usize;
     let mut content_type: Option<String> = None;
+    let mut accept_gzip = false;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             if name.trim().eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse().unwrap_or(0);
             } else if name.trim().eq_ignore_ascii_case("content-type") {
                 content_type = Some(value.trim().to_string());
+            } else if name.trim().eq_ignore_ascii_case("accept-encoding")
+                && value.to_ascii_lowercase().contains("gzip")
+            {
+                accept_gzip = true;
             }
         }
     }
@@ -173,6 +207,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         query,
         content_type,
         body,
+        accept_gzip,
     })
 }
 
@@ -572,11 +607,11 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             }
             Err(e) => e,
         },
-        // 一键启动步骤执行（app ▶ 按钮）——直接写 packages.json，不走 CLI 桥
+        // 一键启动步骤执行（app ▶ 按钮）——CLI 桥（走 prepare→validate→seal 管线，
+        // 保证字段完整含 repo_root/base_sha；epic_id 从板读，不猜）
         ("POST", "/api/steps/seal") => match parse_body(req) {
             Ok(v) => match (need(&v, "step_id"), need(&v, "project_path")) {
                 (Ok(sid), Ok(pp)) => {
-                    // 1) 读板拿步骤+方案上下文
                     let data = match crate::epic_store::read_epics(std::path::Path::new(pp)) {
                         Ok(d) => d,
                         Err(e) => return err(500, format!("read epics: {e}")),
@@ -585,73 +620,58 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
                         Some(s) => s,
                         None => return err(404, format!("step '{}' not found", sid)),
                     };
-                    let epic = data.epics.iter().find(|e| e.id == step.epic_id);
+                    let epic_id = &step.epic_id;
                     let mut obj = step.title.clone();
                     if !step.description.trim().is_empty() {
                         obj = format!("{}\n\n{}", step.title, step.description.trim());
                     }
-                    if let Some(e) = epic {
+                    if let Some(e) = data.epics.iter().find(|e| e.id == *epic_id) {
                         if !e.title.trim().is_empty() {
                             obj = format!("[{}]\n\n{}", e.title.trim(), obj);
                         }
                     }
-
-                    // 2) 直接构造 sealed 包写入 packages.json
-                    let pkg_id = format!("pkg_{}", uuid::Uuid::new_v4());
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let pkg = serde_json::json!({
-                        "package_id": pkg_id,
-                        "display_no": 0,
-                        "plan_revision": 1,
-                        "epic_id": step.epic_id,
-                        "step_id": sid,
-                        "objective": obj,
-                        "context_refs": [],
-                        "scope": {
-                            "allowed_paths": ["*"],
-                            "create_paths": ["*"],
-                            "forbidden_paths": [],
-                            "max_changed_files": 30,
-                        },
-                        "acceptance": [{"type": "command", "command_id": "verify:candidate"}],
-                        "authority": {"auto_edit_worktree": true, "auto_commit_candidate": true},
-                        "stop_conditions": [],
-                        "rollback": {"strategy": "preserve_worktree_and_stop"},
-                        "status": "sealed",
-                        "sealed_at": now,
-                        "project_path": pp,
-                        "base_sha": null,
-                        "executor": {
-                            "preferred": "zcode",
-                            "fallbacks": [],
-                            "sandbox": "workspace-write",
-                            "timeout_seconds": 3600,
-                            "max_attempts": 2,
-                        },
-                        "created_at": now,
-                    });
-
-                    // 3) 写入 packages.json（锁内追加）
-                    let pkgs_path = crate::execution_store::runtime_dir().join("packages.json");
-                    let write_result = crate::file_lock::with_file_lock(&pkgs_path, || {
-                        let raw = std::fs::read_to_string(&pkgs_path)
-                            .unwrap_or_else(|_| r#"{"packages":[]}"#.to_string());
-                        let mut d: serde_json::Value = serde_json::from_str(&raw)
-                            .unwrap_or(serde_json::json!({"packages": []}));
-                        d["packages"].as_array_mut().unwrap().push(pkg.clone());
-                        let tmp = pkgs_path.with_extension("tmp-seal");
-                        std::fs::write(&tmp, serde_json::to_string_pretty(&d).unwrap_or_default())
-                            .map_err(|e| format!("write: {e}"))?;
-                        std::fs::rename(&tmp, &pkgs_path)
-                            .map_err(|e| format!("rename: {e}"))?;
-                        Ok::<(), String>(())
-                    });
-                    match write_result {
-                        Ok(()) => {
-                            log::info!("[steps/seal] sealed {} for step {}", &pkg_id[..14.min(pkg_id.len())], &sid[..10.min(sid.len())]);
-                            ok(serde_json::json!({"ok": true, "package_id": pkg_id}))
+                    let ts = crate::runner_config::get_todo_schedule();
+                    match ts {
+                        Some(t) => {
+                            let cli = std::path::PathBuf::from(&t.producer_cli)
+                                .with_file_name("step-seal-cli.js");
+                            let input = serde_json::json!({
+                                "step_id": sid,
+                                "epic_id": epic_id,
+                                "objective": obj,
+                                "allowed_paths": ["*"],
+                                "create_paths": ["*"],
+                                "max_changed_files": 30,
+                                "executor_preferred": "zcode",
+                                "executor_timeout_seconds": 3600,
+                                "executor_max_attempts": 2,
+                                "executor_sandbox": "workspace-write",
+                                "acceptance_command_ids": ["verify:candidate"],
+                                "project_dir": pp,
+                            });
+                            let out = std::process::Command::new(&t.node_bin)
+                                .arg(&cli).arg("--stdin")
+                                .stdin(std::process::Stdio::piped())
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::piped())
+                                .spawn()
+                                .and_then(|mut ch| {
+                                    use std::io::Write;
+                                    ch.stdin.as_mut().unwrap()
+                                        .write_all(input.to_string().as_bytes())?;
+                                    ch.wait_with_output()
+                                });
+                            match out {
+                                Ok(o) if o.status.success() => {
+                                    let r: serde_json::Value = serde_json::from_slice(&o.stdout)
+                                        .unwrap_or(serde_json::json!({"raw": String::from_utf8_lossy(&o.stdout)}));
+                                    ok(r)
+                                }
+                                Ok(o) => err(409, format!("{}", String::from_utf8_lossy(&o.stdout).trim())),
+                                Err(e) => err(500, format!("spawn: {e}")),
+                            }
                         }
-                        Err(e) => err(500, format!("write packages: {e}")),
+                        None => err(409, "todo_schedule 未配置"),
                     }
                 }
                 (Err(e), _) | (_, Err(e)) => e,
@@ -860,6 +880,7 @@ mod tests {
             query: vec![],
             content_type: None,
             body: vec![],
+            accept_gzip: false,
         };
         let (code, _) = route(&req);
         assert_eq!(code, 405);
@@ -873,6 +894,7 @@ mod tests {
             query: vec![],
             content_type: None,
             body: vec![],
+            accept_gzip: false,
         };
         let (code, body) = route(&req);
         assert_eq!(code, 404);
@@ -887,6 +909,7 @@ mod tests {
             query: vec![],
             content_type: None,
             body: vec![],
+            accept_gzip: false,
         };
         let (code, _) = route(&req);
         assert_eq!(code, 400);
@@ -900,9 +923,28 @@ mod tests {
             query: vec![("project".into(), "/definitely/not/registered".into())],
             content_type: None,
             body: vec![],
+            accept_gzip: false,
         };
         let (code, body) = route(&req);
         assert_eq!(code, 404);
         assert!(body.get("error").is_some());
+    }
+
+    #[test]
+    fn gzip_roundtrip_with_client_decoder() {
+        // The exact pair the wire uses: server gzip_bytes ↔ client GzDecoder.
+        let board = format!("{{\"projects\":[{}]}}", "\"x\",".repeat(200));
+        let raw = board.as_bytes();
+        let z = gzip_bytes(raw).expect("encode");
+        assert!(
+            z.len() < raw.len() / 4,
+            "board JSON must compress hard: {} -> {}",
+            raw.len(),
+            z.len()
+        );
+        let mut dec = flate2::read::GzDecoder::new(&z[..]);
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut dec, &mut out).expect("decode");
+        assert_eq!(out, raw);
     }
 }
