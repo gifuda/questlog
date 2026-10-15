@@ -572,75 +572,86 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             }
             Err(e) => e,
         },
-        // 一键启动步骤执行（app ▶ 按钮）
+        // 一键启动步骤执行（app ▶ 按钮）——直接写 packages.json，不走 CLI 桥
         ("POST", "/api/steps/seal") => match parse_body(req) {
             Ok(v) => match (need(&v, "step_id"), need(&v, "project_path")) {
                 (Ok(sid), Ok(pp)) => {
-                    let ts = crate::runner_config::get_todo_schedule();
-                    match ts {
-                        Some(t) => {
-                            let cli = std::path::PathBuf::from(&t.producer_cli)
-                                .with_file_name("step-seal-cli.js");
-                            // 从板读步骤标题+描述拼 objective
-                            let data = crate::epic_store::read_epics(std::path::Path::new(pp))
-                                .map_err(|e| format!("read epics: {e}"));
-                            let obj = match data {
-                                Ok(d) => {
-                                    let step = d.steps.iter().find(|s| s.id == sid);
-                                    let epic = d.epics.iter().find(|e| Some(e.id.clone()) == step.map(|s| s.epic_id.clone()));
-                                    match (epic, step) {
-                                        (Some(e), Some(s)) => {
-                                            let mut o = s.title.clone();
-                                            if !s.description.trim().is_empty() {
-                                                o = format!("{}\n\n{}", s.title, s.description.trim());
-                                            }
-                                            if !e.title.trim().is_empty() {
-                                                o = format!("[{}]\n\n{}", e.title.trim(), o);
-                                            }
-                                            o
-                                        }
-                                        _ => sid.to_string(),
-                                    }
-                                }
-                                Err(e) => return err(500, e),
-                            };
-                            let input = serde_json::json!({
-                                "step_id": sid,
-                                "epic_id": "auto",
-                                "objective": obj,
-                                "allowed_paths": ["*"],
-                                "create_paths": ["*"],
-                                "max_changed_files": 30,
-                                "executor_preferred": "zcode",
-                                "executor_timeout_seconds": 3600,
-                                "executor_max_attempts": 2,
-                                "executor_sandbox": "workspace-write",
-                                "acceptance_command_ids": ["verify:candidate"],
-                                "project_dir": pp,
-                            });
-                            let out = std::process::Command::new(&t.node_bin)
-                                .arg(&cli).arg("--stdin")
-                                .stdin(std::process::Stdio::piped())
-                                .stdout(std::process::Stdio::piped())
-                                .stderr(std::process::Stdio::piped())
-                                .spawn()
-                                .and_then(|mut ch| {
-                                    use std::io::Write;
-                                    ch.stdin.as_mut().unwrap()
-                                        .write_all(input.to_string().as_bytes())?;
-                                    ch.wait_with_output()
-                                });
-                            match out {
-                                Ok(o) if o.status.success() => {
-                                    let r: serde_json::Value = serde_json::from_slice(&o.stdout)
-                                        .unwrap_or(serde_json::json!({"raw": String::from_utf8_lossy(&o.stdout)}));
-                                    ok(r)
-                                }
-                                Ok(o) => err(409, format!("seal: {}", String::from_utf8_lossy(&o.stdout).trim())),
-                                Err(e) => err(500, format!("spawn: {e}")),
-                            }
+                    // 1) 读板拿步骤+方案上下文
+                    let data = match crate::epic_store::read_epics(std::path::Path::new(pp)) {
+                        Ok(d) => d,
+                        Err(e) => return err(500, format!("read epics: {e}")),
+                    };
+                    let step = match data.steps.iter().find(|s| s.id == sid) {
+                        Some(s) => s,
+                        None => return err(404, format!("step '{}' not found", sid)),
+                    };
+                    let epic = data.epics.iter().find(|e| e.id == step.epic_id);
+                    let mut obj = step.title.clone();
+                    if !step.description.trim().is_empty() {
+                        obj = format!("{}\n\n{}", step.title, step.description.trim());
+                    }
+                    if let Some(e) = epic {
+                        if !e.title.trim().is_empty() {
+                            obj = format!("[{}]\n\n{}", e.title.trim(), obj);
                         }
-                        None => err(409, "todo_schedule 未配置"),
+                    }
+
+                    // 2) 直接构造 sealed 包写入 packages.json
+                    let pkg_id = format!("pkg_{}", uuid::Uuid::new_v4());
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let pkg = serde_json::json!({
+                        "package_id": pkg_id,
+                        "display_no": 0,
+                        "plan_revision": 1,
+                        "epic_id": step.epic_id,
+                        "step_id": sid,
+                        "objective": obj,
+                        "context_refs": [],
+                        "scope": {
+                            "allowed_paths": ["*"],
+                            "create_paths": ["*"],
+                            "forbidden_paths": [],
+                            "max_changed_files": 30,
+                        },
+                        "acceptance": [{"type": "command", "command_id": "verify:candidate"}],
+                        "authority": {"auto_edit_worktree": true, "auto_commit_candidate": true},
+                        "stop_conditions": [],
+                        "rollback": {"strategy": "preserve_worktree_and_stop"},
+                        "status": "sealed",
+                        "sealed_at": now,
+                        "project_path": pp,
+                        "base_sha": null,
+                        "executor": {
+                            "preferred": "zcode",
+                            "fallbacks": [],
+                            "sandbox": "workspace-write",
+                            "timeout_seconds": 3600,
+                            "max_attempts": 2,
+                        },
+                        "created_at": now,
+                    });
+
+                    // 3) 写入 packages.json（锁内追加）
+                    let pkgs_path = crate::execution_store::runtime_dir().join("packages.json");
+                    let write_result = crate::file_lock::with_file_lock(&pkgs_path, || {
+                        let raw = std::fs::read_to_string(&pkgs_path)
+                            .unwrap_or_else(|_| r#"{"packages":[]}"#.to_string());
+                        let mut d: serde_json::Value = serde_json::from_str(&raw)
+                            .unwrap_or(serde_json::json!({"packages": []}));
+                        d["packages"].as_array_mut().unwrap().push(pkg.clone());
+                        let tmp = pkgs_path.with_extension("tmp-seal");
+                        std::fs::write(&tmp, serde_json::to_string_pretty(&d).unwrap_or_default())
+                            .map_err(|e| format!("write: {e}"))?;
+                        std::fs::rename(&tmp, &pkgs_path)
+                            .map_err(|e| format!("rename: {e}"))?;
+                        Ok::<(), String>(())
+                    });
+                    match write_result {
+                        Ok(()) => {
+                            log::info!("[steps/seal] sealed {} for step {}", &pkg_id[..14.min(pkg_id.len())], &sid[..10.min(sid.len())]);
+                            ok(serde_json::json!({"ok": true, "package_id": pkg_id}))
+                        }
+                        Err(e) => err(500, format!("write packages: {e}")),
                     }
                 }
                 (Err(e), _) | (_, Err(e)) => e,
