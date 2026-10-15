@@ -55,14 +55,14 @@ pub fn diag_report_error(msg: String) {
 }
 
 #[tauri::command]
-pub fn get_projects(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_projects(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
     if crate::remote_client::enabled() {
         // A1: counts/active_epics/last_active_at are assembled SERVER-side
         // (/api/projects-full runs get_projects_impl on authority data) —
         // no local mirror-file join for counts anymore.
         return crate::remote_client::get_into("/api/projects-full");
     }
-    let projects = state.projects.lock().map_err(|e| e.to_string())?;
+    let projects = state.projects.lock().map_err(|e| e.to_string())?.clone();
     get_projects_impl(&projects)
 }
 
@@ -122,7 +122,7 @@ pub fn get_projects_impl(
 }
 
 #[tauri::command]
-pub fn get_todos(project_path: String, state: State<AppState>) -> Result<TodosFile, String> {
+pub async fn get_todos(project_path: String, state: State<'_, AppState>) -> Result<TodosFile, String> {
     if crate::remote_client::enabled() {
         return crate::remote_client::get_into(&format!(
             "/api/todos?project={}",
@@ -569,11 +569,11 @@ pub fn get_project_items_impl(
 /// Get all active items across all projects, sorted by updated_at desc.
 /// Used by the floating panel timeline view.
 #[tauri::command]
-pub fn get_all_active(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_all_active(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
     if crate::remote_client::enabled() {
         return crate::remote_client::get_into("/api/all-active");
     }
-    let projects = state.projects.lock().map_err(|e| e.to_string())?;
+    let projects = state.projects.lock().map_err(|e| e.to_string())?.clone();
     get_all_active_impl(&projects)
 }
 
@@ -635,9 +635,9 @@ pub fn quit_app(app: tauri::AppHandle) {
 /// Get epics + steps + derived progress for a project.
 /// Returns a JSON structure that the frontend can render directly.
 #[tauri::command]
-pub fn get_epics(
+pub async fn get_epics(
     project_path: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     if crate::remote_client::enabled() {
         // /api/epics returns the RAW EpicsFile; the frontend shape is built
@@ -658,11 +658,11 @@ pub fn get_epics(
 
 /// Global summary across ALL registered projects (aggregate dashboard).
 #[tauri::command]
-pub fn get_epics_global(state: State<AppState>) -> Result<serde_json::Value, String> {
+pub async fn get_epics_global(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     if crate::remote_client::enabled() {
         return crate::remote_client::get_into("/api/epics-global");
     }
-    let projects = state.projects.lock().map_err(|e| e.to_string())?;
+    let projects = state.projects.lock().map_err(|e| e.to_string())?.clone();
     get_epics_global_impl(&projects)
 }
 
@@ -1194,7 +1194,7 @@ pub fn delete_step_impl(
 /// without guessing — an absent or broken file must degrade to a friendly
 /// empty state, never break the panel.
 #[tauri::command]
-pub fn get_arb_board() -> Result<serde_json::Value, String> {
+pub async fn get_arb_board() -> Result<serde_json::Value, String> {
     // Off 时也带上已保存的路径，Settings 面板要显示当前配置。
     // A6: api 模式下配置来自权威 API（注册表在 m5p 侧，不再读本地镜像
     // 注册表）；board.json 本体仍读 M4 本地（设计内——M4 有本地 GROS 导出）。
@@ -1667,7 +1667,7 @@ fn arr_len(v: &serde_json::Value) -> u64 {
 // ════════════════════════════════════════════════════════════════
 
 #[tauri::command]
-pub fn get_executions() -> Result<Vec<crate::execution_store::Execution>, String> {
+pub async fn get_executions() -> Result<Vec<crate::execution_store::Execution>, String> {
     if crate::remote_client::enabled() {
         // A2: the API already returns view fields filled from authority-side
         // runtime data — no local mirror join here.
@@ -1697,8 +1697,7 @@ pub fn fill_execution_view_fields(executions: &mut [crate::execution_store::Exec
 /// What is the Runner working on right now — the freshest in-flight
 /// execution joined with its human-readable package number and step/epic
 /// titles, for the App's "currently running" banner.
-#[tauri::command]
-pub fn get_current_execution() -> Result<Option<serde_json::Value>, String> {
+pub fn get_current_execution_impl() -> Result<Option<serde_json::Value>, String> {
     if crate::remote_client::enabled() {
         // A3: banner payload (incl. step/epic title lookup against the
         // authority's board paths) is assembled SERVER-side.
@@ -1706,6 +1705,13 @@ pub fn get_current_execution() -> Result<Option<serde_json::Value>, String> {
     }
     let all = crate::execution_store::list_executions()?;
     current_execution_payload(freshest_inflight(all))
+}
+
+/// Async wrapper: this is on a 5s UI polling path — a sync command would
+/// freeze the main thread for the full remote read cap during an outage.
+#[tauri::command]
+pub async fn get_current_execution() -> Result<Option<serde_json::Value>, String> {
+    get_current_execution_impl()
 }
 
 /// Freshest queued/running/candidate/verifying execution, newest updated_at
@@ -1811,7 +1817,7 @@ pub fn pause_execution(id: String) -> Result<(), String> {
 /// poll count, and last processed count. Lets the UI show "running & polling"
 /// vs "switched on but not running" vs "stale (no poll in a while)".
 #[tauri::command]
-pub fn get_runner_runtime_status() -> Result<crate::runner::RunnerRuntimeStatus, String> {
+pub async fn get_runner_runtime_status() -> Result<crate::runner::RunnerRuntimeStatus, String> {
     if crate::remote_client::enabled() {
         return crate::remote_client::get_into("/api/runner/status");
     }
@@ -1921,8 +1927,8 @@ fn executor_models_from_provider(
 /// W1: async so the probe never blocks the UI main thread; a black-holed
 /// tunnel can take up to the probe's read cap to fail, and the sync-command
 /// path would freeze the app exactly when the bar is needed.
-#[tauri::command(async)]
-pub fn get_api_health() -> Result<serde_json::Value, String> {
+#[tauri::command]
+pub async fn get_api_health() -> Result<serde_json::Value, String> {
     if !crate::remote_client::enabled() {
         return Ok(serde_json::json!({"ok": true, "mode": "local"}));
     }
@@ -1939,8 +1945,7 @@ pub fn get_api_health() -> Result<serde_json::Value, String> {
 
 /// Read failures degrade to empty options — the UI shows "no models
 /// configured".
-#[tauri::command]
-pub fn get_executor_options() -> Result<ExecutorOptions, String> {
+pub fn get_executor_options_impl() -> Result<ExecutorOptions, String> {
     if crate::remote_client::enabled() {
         return crate::remote_client::get_into("/api/executor-options");
     }
@@ -2045,6 +2050,14 @@ pub fn get_executor_options() -> Result<ExecutorOptions, String> {
         current_model,
         current_thinking: crate::runner_config::get_executor_thinking(),
     })
+}
+
+/// Async command wrapper: polling-path reads must run off the UI main
+/// thread (Tauri v2 runs sync commands on main). The api_server calls the
+/// _impl directly — it is thread-per-connection and never blocked on UI.
+#[tauri::command]
+pub async fn get_executor_options() -> Result<ExecutorOptions, String> {
+    get_executor_options_impl()
 }
 
 /// Set which thinking level the Runner's executor uses (e.g. "high", "max",
@@ -2178,9 +2191,9 @@ pub fn set_executor_model(model: Option<String>) -> Result<(), String> {
 /// 带 project_path 时额外返回 nightly_scheduled：该项目是否在夜间调度的
 /// projects 名单里——不在名单的项目上开"自动"永远不会被处理。
 #[tauri::command]
-pub fn get_todo_status(
+pub async fn get_todo_status(
     project_path: Option<String>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     if crate::remote_client::enabled() {
         let query = project_path
@@ -2272,7 +2285,7 @@ pub fn get_todo_status_impl(
 /// 最近一夜的结果分布、待确认计数。全部从 runtime/项目目录既有文件读时聚合，
 /// 无新写路径。
 #[tauri::command]
-pub fn get_fleet_health(state: State<AppState>) -> Result<serde_json::Value, String> {
+pub async fn get_fleet_health(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     if crate::remote_client::enabled() {
         return crate::remote_client::get_into("/api/fleet-health");
     }

@@ -364,7 +364,7 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
         // A3: "currently running" banner payload — title lookup runs here
         // against the authority's own board paths.
         ("GET", "/api/current-execution") => {
-            map_store(crate::commands::get_current_execution())
+            map_store(crate::commands::get_current_execution_impl())
         }
         // A6/A7: arb panel config — the registry lives on the authority
         // machine; the board.json FILE itself stays local on M4 (by design).
@@ -497,7 +497,7 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             Some(p) => map_store(crate::commands::get_runner_project_status(p)),
             None => err(400, "missing query param: project"),
         },
-        ("GET", "/api/executor-options") => map_store(crate::commands::get_executor_options()),
+        ("GET", "/api/executor-options") => map_store(crate::commands::get_executor_options_impl()),
         // ── 注册表管理（S5 后置：GUI 远程模式的项目生命周期与排序）──
         ("POST", "/api/registry/reorder") => match parse_body(req) {
             Ok(v) => match v.get("names").and_then(|x| x.as_array()) {
