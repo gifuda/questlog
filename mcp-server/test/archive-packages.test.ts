@@ -88,6 +88,16 @@ describe("partitionForArchive criteria", () => {
     const { archive } = partitionForArchive([p, p2], empty, NOW, 30);
     expect(archive.map((x) => x.package_id)).toEqual([]);
   });
+  it("keeps rows carrying origin.task_key (todo-producer dedup backstop)", () => {
+    const withOrigin = pkg({
+      package_id: "a",
+      plan_revision: 1,
+      origin: { task_key: "k1" },
+    } as Partial<TaskPackage> & { package_id: string });
+    const sibling = pkg({ package_id: "b", plan_revision: 2, status: "sealed", sealed_at: "2026-10-14T00:00:00Z" });
+    const { archive } = partitionForArchive([withOrigin, sibling], empty, NOW, 30);
+    expect(archive).toHaveLength(0);
+  });
 });
 
 describe("archivePackages end-to-end (isolated runtime)", () => {
@@ -146,5 +156,43 @@ describe("archivePackages end-to-end (isolated runtime)", () => {
     await expect(archivePackages({ minAgeDays: 30 })).rejects.toThrow(/executions.json unreadable/);
     const live = JSON.parse(await fs.readFile(path.join(runtimeDir, "packages.json"), "utf-8"));
     expect(live.packages).toHaveLength(2);
+  });
+
+  it("BLOCK-1: corrupt archive fails loud and preserves both files", async () => {
+    await seed();
+    const arcDir = path.join(runtimeDir, "archive");
+    await fs.mkdir(arcDir, { recursive: true });
+    await fs.writeFile(path.join(arcDir, "packages-archive.json"), "{corrupt");
+    await expect(archivePackages({ minAgeDays: 30 })).rejects.toThrow(/packages-archive.json corrupt/);
+    // neither the archive nor the live file was touched
+    expect(await fs.readFile(path.join(arcDir, "packages-archive.json"), "utf-8")).toBe("{corrupt");
+    const live = JSON.parse(await fs.readFile(path.join(runtimeDir, "packages.json"), "utf-8"));
+    expect(live.packages).toHaveLength(2);
+    expect(live.revision).toBe(7);
+  });
+
+  it("BLOCK-1: wrong-shape archive (packages not an array) fails loud", async () => {
+    await seed();
+    const arcDir = path.join(runtimeDir, "archive");
+    await fs.mkdir(arcDir, { recursive: true });
+    await fs.writeFile(path.join(arcDir, "packages-archive.json"), "[]");
+    await expect(archivePackages({ minAgeDays: 30 })).rejects.toThrow(/wrong shape/);
+  });
+
+  it("crash window: archive written but main untrimmed → rerun merges idempotently", async () => {
+    // simulate the crash-between-steps state: archive already has old-1,
+    // main file still contains it too
+    await seed();
+    const arcDir = path.join(runtimeDir, "archive");
+    await fs.mkdir(arcDir, { recursive: true });
+    await fs.writeFile(
+      path.join(arcDir, "packages-archive.json"),
+      JSON.stringify({ version: 1, packages: [pkg({ package_id: "old-1", plan_revision: 1 })], revision: 1 }),
+    );
+    const res = await archivePackages({ minAgeDays: 30 });
+    expect(res).toMatchObject({ archived: 1, kept: 1 });
+    const arc = JSON.parse(await fs.readFile(path.join(arcDir, "packages-archive.json"), "utf-8"));
+    const ids = arc.packages.map((p: { package_id: string }) => p.package_id).sort();
+    expect(ids).toEqual(["old-1"]); // deduped, not duplicated
   });
 });

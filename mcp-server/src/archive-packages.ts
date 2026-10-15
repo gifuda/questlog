@@ -63,7 +63,10 @@ export function partitionForArchive(
       TERMINAL_STATUSES.has(p.status) &&
       !referencedIds.has(p.package_id) &&
       !isLatest &&
-      sealed < cutoff
+      sealed < cutoff &&
+      // WARN-1: rows carrying origin.task_key are the todo-producer's
+      // dedup backstop when the ledger is lost — they stay in the live file.
+      !((p as { origin?: { task_key?: string } }).origin?.task_key)
     ) {
       archive.push(p);
     } else {
@@ -131,12 +134,13 @@ export async function archivePackages(opts: ArchiveOptions = {}): Promise<Archiv
       }
 
       // 1) archive first (crash between steps only duplicates; next run merges)
+      //    BLOCK-1 hardening: only ENOENT may initialize an empty archive —
+      //    any read error, parse error, or wrong shape fails LOUD so an
+      //    unreadable archive is never overwritten (its rename would destroy
+      //    the only copy of already-archived packages).
       const aPath = archivePath();
       await fs.mkdir(path.dirname(aPath), { recursive: true });
-      const existing: PackagesFile = await fs
-        .readFile(aPath, "utf-8")
-        .then((raw) => JSON.parse(raw) as PackagesFile)
-        .catch(() => ({ version: 1, packages: [] }));
+      const existing: PackagesFile = await readArchiveStrict(aPath);
       const merged = new Map<string, TaskPackage>();
       for (const p of existing.packages ?? []) merged.set(p.package_id, p);
       for (const p of archive) {
@@ -149,7 +153,15 @@ export async function archivePackages(opts: ArchiveOptions = {}): Promise<Archiv
         revision: (existing.revision ?? 0) + 1,
       };
       const tmpA = `${aPath}.tmp-${process.pid}`;
-      await fs.writeFile(tmpA, JSON.stringify(archiveFile, null, 2), "utf-8");
+      // fsync before rename: the archive is (post-trim) the only live copy —
+      // a rename that outlives its data on power loss must not be possible.
+      const fh = await fs.open(tmpA, "w");
+      try {
+        await fh.writeFile(JSON.stringify(archiveFile, null, 2), "utf-8");
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
       await fs.rename(tmpA, aPath);
 
       // 2) then trim the live file (writePackages bumps revision, tmp+rename)
@@ -163,13 +175,36 @@ export async function archivePackages(opts: ArchiveOptions = {}): Promise<Archiv
 }
 
 async function countArchive(): Promise<number> {
-  const raw = await fs.readFile(archivePath(), "utf-8").catch(() => null);
-  if (!raw) return 0;
   try {
-    return (JSON.parse(raw).packages ?? []).length;
-  } catch {
-    return -1;
+    return (await readArchiveStrict(archivePath())).packages?.length ?? 0;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    return -1; // surfaced as -1 in dry-run output; the real run throws
   }
+}
+
+/** Archive read with BLOCK-1 semantics: ENOENT → empty; anything else → throw. */
+async function readArchiveStrict(aPath: string): Promise<PackagesFile> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(aPath, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { version: 1, packages: [] };
+    }
+    throw new Error(`packages-archive.json unreadable — refusing to archive: ${(err as Error).message}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`packages-archive.json corrupt — refusing to archive: ${(err as Error).message}`);
+  }
+  const shape = parsed as { packages?: unknown };
+  if (!shape || typeof shape !== "object" || !Array.isArray(shape.packages)) {
+    throw new Error("packages-archive.json wrong shape (packages[] missing) — refusing to archive");
+  }
+  return parsed as PackagesFile;
 }
 
 // ─── CLI ───
