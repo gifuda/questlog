@@ -663,15 +663,11 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
                       onDelete={() => onDeleteStep(step.id)}
                       projectPath={projectPath}
                       onExecute={async () => {
-                        try {
-                          const { invoke } = await import("@tauri-apps/api/core");
-                          await invoke("seal_step_for_execution", {
-                            stepId: step.id,
-                            projectPath: projectPath,
-                          });
-                        } catch (e) {
-                          console.error("seal:", e);
-                        }
+                        const { invoke } = await import("@tauri-apps/api/core");
+                        await invoke("seal_step_for_execution", {
+                          stepId: step.id,
+                          projectPath: projectPath ?? "",
+                        });
                       }}
                     />
                   ))}
@@ -758,6 +754,7 @@ function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
   const [hover, setHover] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [sealing, setSealing] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
 
   const hasPackage = !!step.package;
   const stageIdx = stageOrder.indexOf(step.stage);
@@ -808,11 +805,24 @@ function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
             onClick={async (e) => {
               e.stopPropagation();
               setSealing(true);
-              try { await onExecute(); } finally { setSealing(false); }
+              setFeedback(null);
+              try {
+                await onExecute();
+                setFeedback("✅ 已封包，Runner 正在执行");
+                setTimeout(() => setFeedback(null), 5000);
+              } catch (err) {
+                setFeedback(`❌ ${err instanceof Error ? err.message : String(err)}`);
+                setTimeout(() => setFeedback(null), 8000);
+              } finally { setSealing(false); }
             }}
           >
-            {sealing ? "⏳" : "▶"}
+            {sealing ? "⏳" : feedback ? feedback.split("，")[0] : "▶"}
           </button>
+        )}
+        {feedback && feedback.startsWith("❌") && (
+          <span className="text-[10px] text-danger truncate max-w-[200px]" title={feedback}>
+            {feedback.slice(2)}
+          </span>
         )}
         {step.actionable && (
           <span className="text-[11px] text-accent bg-accent-bg px-1.5 py-px rounded shrink-0">{t("epic.actionable")}</span>
