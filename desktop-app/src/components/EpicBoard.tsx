@@ -787,6 +787,19 @@ function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
           {cfg.icon}
         </span>
 
+        {/* 步骤进度条（5 阶段 → 百分比） */}
+        <span className="shrink-0 flex items-center gap-1" title={cfg.label}>
+          <div className="w-12 h-1 bg-line rounded-sm overflow-hidden">
+            <div
+              className={`h-full rounded-sm transition-all ${
+                isDone ? "bg-success" : visual === "running" ? "bg-accent animate-pulse" : "bg-accent/60"
+              }`}
+              style={{ width: `${step.stage_pct}%` }}
+            />
+          </div>
+          <span className="font-mono text-[10px] text-faint tabular-nums w-8">{step.stage_pct}%</span>
+        </span>
+
         {/* 标题 */}
         <span className={`text-[13px] flex-1 truncate ${isDone ? "text-faint" : "text-body"}`}>
           {step.title}
