@@ -36,11 +36,11 @@ function runtimeDir(): string {
   return path.join(home, RUNTIME_DIRNAME);
 }
 
-function packagesPath(): string {
+export function packagesPath(): string {
   return path.join(runtimeDir(), PACKAGES_FILENAME);
 }
 
-interface PackagesFile {
+export interface PackagesFile {
   version: number;
   packages: TaskPackage[];
   revision?: number;
@@ -54,7 +54,7 @@ async function ensureRuntimeDir(): Promise<void> {
  * Read all packages from the Runtime Store.
  * Fail-closed: corrupt JSON returns error, not empty.
  */
-async function readPackagesSafe(): Promise<
+export async function readPackagesSafe(): Promise<
   { ok: true; data: PackagesFile } | { notFound: true } | { error: string }
 > {
   const filePath = packagesPath();
@@ -76,7 +76,7 @@ async function readPackagesSafe(): Promise<
   }
 }
 
-async function writePackages(data: PackagesFile): Promise<void> {
+export async function writePackages(data: PackagesFile): Promise<void> {
   await ensureRuntimeDir();
   const filePath = packagesPath();
   data.revision = (data.revision ?? 0) + 1;
