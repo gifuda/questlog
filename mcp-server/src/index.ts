@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import path from "node:path";
-import { pushTodo, addAndSave, listTodos, updateAndSave, resolveProjectDir, findSubProjects, searchTodos, suggestSimilarProject, readFeedback, canonicalizeProjectDir, resolveRegisteredProject } from "./store.js";
+import { pushTodo, addAndSave, listTodos, updateAndSave, resolveProjectDir, findSubProjects, searchTodos, suggestSimilarProject, readFeedback, canonicalizeProjectDir, resolveRegisteredProject, effectiveCwd } from "./store.js";
 import { pushEpic, updateEpic, pushStep, updateStep, listEpics, epicProgress, actionableSteps } from "./epic-store.js";
 import {
   prepareTaskPackage, validateTaskPackage, sealTaskPackage, enqueueStep,
@@ -33,7 +33,7 @@ async function resolveCwd(
   if (!input.project_dir) {
     return { cwd: await fallback() };
   }
-  const canonical = await canonicalizeProjectDir(input.project_dir, process.cwd());
+  const canonical = await canonicalizeProjectDir(input.project_dir, effectiveCwd());
   if (!canonical) {
     return { error: `project_dir 非法或被拒绝（需为当前工作区子目录或已注册项目）: ${input.project_dir}` };
   }
@@ -59,11 +59,11 @@ export async function epicCwd(
       ? (input as { project_dir?: string }).project_dir
       : undefined;
   if (projectDir) {
-    const resolved = await resolveCwd({ project_dir: projectDir }, () => process.cwd());
+    const resolved = await resolveCwd({ project_dir: projectDir }, () => effectiveCwd());
     if ("error" in resolved) return resolved;
     return { cwd: resolved.cwd };
   }
-  const routed = await resolveRegisteredProject(process.cwd());
+  const routed = await resolveRegisteredProject(effectiveCwd());
   const cwd = routed ?? (await fallback());
   return { cwd };
 }
@@ -127,7 +127,7 @@ server.tool(
     project_dir: z.string().optional().describe("Override auto-detection: absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await resolveCwd(input, () => resolveProjectDir(process.cwd(), input.title, input.tags ?? []));
+    const resolved = await resolveCwd(input, () => resolveProjectDir(effectiveCwd(), input.title, input.tags ?? []));
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const result = pushTodo(cwd, input);
@@ -201,7 +201,7 @@ server.tool(
     project_dir: z.string().optional().describe("Override auto-detection: absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await resolveCwd(input, () => process.cwd());
+    const resolved = await resolveCwd(input, () => effectiveCwd());
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const result = await listTodos(cwd);
@@ -291,7 +291,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory. Defaults to process.cwd()"),
   },
   async (input) => {
-    const resolved = await resolveCwd(input, () => process.cwd());
+    const resolved = await resolveCwd(input, () => effectiveCwd());
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const result = await updateAndSave(cwd, input.id, input);
@@ -345,7 +345,7 @@ server.tool(
     project_dir: z.string().optional().describe("Override auto-detection: absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => resolveProjectDir(process.cwd(), input.title, []), input);
+    const resolved = await epicCwd(() => resolveProjectDir(effectiveCwd(), input.title, []), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const result = await pushEpic(cwd, input);
@@ -404,7 +404,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd(), input);
+    const resolved = await epicCwd(() => effectiveCwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const { id, ...patch } = input;
@@ -436,7 +436,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd(), input);
+    const resolved = await epicCwd(() => effectiveCwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const result = await pushStep(cwd, input);
@@ -486,7 +486,7 @@ server.tool(
     project_dir: z.string().optional().describe("Override project directory (server validates)"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd(), input);
+    const resolved = await epicCwd(() => effectiveCwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const { pushStepWithPackage } = await import("./task-package-ops.js");
     const result = await pushStepWithPackage(resolved.cwd, input);
@@ -548,7 +548,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd(), input);
+    const resolved = await epicCwd(() => effectiveCwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const { id, ...patch } = input;
@@ -600,7 +600,7 @@ server.tool(
     project_dir: z.string().optional().describe("Absolute path of the target project directory"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd(), input);
+    const resolved = await epicCwd(() => effectiveCwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const cwd = resolved.cwd;
     const data = await listEpics(cwd);
@@ -709,7 +709,7 @@ server.tool(
     project_dir: z.string().optional().describe("Override project directory (server validates)"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd(), input);
+    const resolved = await epicCwd(() => effectiveCwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const result = await prepareTaskPackage(resolved.cwd, input);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
@@ -741,7 +741,7 @@ server.tool(
     package_id: z.string().describe("The package ID from prepare_task_package"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd(), input);
+    const resolved = await epicCwd(() => effectiveCwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const result = await validateTaskPackage(resolved.cwd, input.package_id);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
@@ -778,7 +778,7 @@ server.tool(
     package_id: z.string().describe("The package ID to seal"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd(), input);
+    const resolved = await epicCwd(() => effectiveCwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const result = await sealTaskPackage(resolved.cwd, input.package_id);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
@@ -806,7 +806,7 @@ server.tool(
     step_id: z.string().describe("The step whose sealed package should be enqueued"),
   },
   async (input) => {
-    const resolved = await epicCwd(() => process.cwd(), input);
+    const resolved = await epicCwd(() => effectiveCwd(), input);
     if ("error" in resolved) return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     const result = await enqueueStep(resolved.cwd, input.step_id);
     if ("error" in result) return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
@@ -967,7 +967,7 @@ server.tool(
     ttl_days: z.number().optional().describe(`Days of inactivity before a target is reclaimable (default ${DEFAULT_TTL_DAYS}); BOTH the directory mtime and the branch tip date must be past it.`),
   },
   async (input: { project_dir?: string; apply?: boolean; ttl_days?: number }) => {
-    const resolved = await resolveCwd({ project_dir: input.project_dir }, () => process.cwd());
+    const resolved = await resolveCwd({ project_dir: input.project_dir }, () => effectiveCwd());
     if ("error" in resolved) {
       return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
     }

@@ -20,6 +20,35 @@ function registryPath(): string {
   if (process.env.QUESTLOG_REGISTRY) return process.env.QUESTLOG_REGISTRY;
   return path.join(os.homedir(), ".todo-board.json");
 }
+
+/**
+ * Client cwd forwarded by the ssh wrapper (deploy/m4/todo-board-mcp-ssh.sh).
+ * The authority-host MCP lands in HOME over ssh, so a remote session's
+ * project dir is unknowable and auto-detection silently reads an empty
+ * board. Mapping re-homes the client's path onto this host's home prefix.
+ * Mapped paths still pass the unchanged registry/workspace allowlist below —
+ * this adds a retry path, never a bypass.
+ */
+function clientHomePrefix(): string | null {
+  const cwd = process.env.MCP_CLIENT_CWD;
+  if (!cwd || !cwd.startsWith("/")) return null;
+  const segs = cwd.split("/").filter(Boolean);
+  if (segs.length < 2) return null;
+  return `/${segs.slice(0, 2).join("/")}`;
+}
+
+/** Map a client-home-prefixed path onto this host's home; null when not under it. */
+export function mapClientPath(p: string): string | null {
+  const clientHome = clientHomePrefix();
+  if (clientHome === null) return null;
+  if (p !== clientHome && !p.startsWith(clientHome + "/")) return null;
+  return path.join(os.homedir(), p.slice(clientHome.length));
+}
+
+/** Effective cwd for project resolution: mapped client cwd when present, else process.cwd(). */
+export function effectiveCwd(): string {
+  return mapClientPath(process.env.MCP_CLIENT_CWD || "") ?? process.cwd();
+}
 const SKIP_DIRS = new Set(["node_modules", ".git", ".vscode", ".idea", ".Trash", "__pycache__", "dist", "target", "build"]);
 
 /** Weak/vague suggestion phrases that add no value. */
@@ -351,7 +380,15 @@ export async function canonicalizeProjectDir(dir: string, cwd: string): Promise<
   try {
     canonical = await fs.realpath(dir);
   } catch {
-    return null; // nonexistent or unreadable
+    // Remote client path (doesn't exist on this host): re-home it onto this
+    // host's prefix and retry; every check below applies unchanged.
+    const mapped = mapClientPath(dir);
+    if (mapped === null) return null; // nonexistent or unreadable
+    try {
+      canonical = await fs.realpath(mapped);
+    } catch {
+      return null;
+    }
   }
   const stat = await fs.stat(canonical).catch(() => null);
   if (!stat || !stat.isDirectory()) return null;

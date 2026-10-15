@@ -20,7 +20,7 @@ async function main(): Promise<number> {
   try {
     body = JSON.parse(raw);
   } catch (e) {
-    process.stdout.write(JSON.stringify({ error: `bad JSON: ${e.message}` }));
+    process.stdout.write(JSON.stringify({ error: `bad JSON: ${e instanceof Error ? e.message : String(e)}` }));
     return 1;
   }
   const { project_dir, ...input } = body;
@@ -52,7 +52,7 @@ async function main(): Promise<number> {
     process.stdout.write(JSON.stringify({ ok: true, package_id: sealed.package_id, plan_revision: sealed.plan_revision ?? 0 }));
     return 0;
   } catch (e) {
-    process.stdout.write(JSON.stringify({ error: `pipeline: ${e.message}` }));
+    process.stdout.write(JSON.stringify({ error: `pipeline: ${e instanceof Error ? e.message : String(e)}` }));
     return 1;
   }
 }
