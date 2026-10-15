@@ -798,8 +798,12 @@ function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
         )}
         {onExecute && !isObserved && (
           <button
-            className="text-[11px] text-accent bg-accent-bg px-1.5 py-px rounded shrink-0 hover:bg-accent hover:text-white transition-colors disabled:opacity-40"
-            title={t("epic.executeHint")}
+            className={`text-[11px] px-1.5 py-px rounded shrink-0 transition-colors disabled:opacity-40 ${
+              hasPackage
+                ? "text-faint hover:text-accent"
+                : "text-accent bg-accent-bg hover:bg-accent hover:text-white"
+            }`}
+            title={hasPackage ? t("epic.reExecuteHint") : t("epic.executeHint")}
             disabled={sealing}
             onClick={async (e) => {
               e.stopPropagation();
