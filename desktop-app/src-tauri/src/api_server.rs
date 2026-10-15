@@ -572,6 +572,81 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             }
             Err(e) => e,
         },
+        // 一键启动步骤执行（app ▶ 按钮）
+        ("POST", "/api/steps/seal") => match parse_body(req) {
+            Ok(v) => match (need(&v, "step_id"), need(&v, "project_path")) {
+                (Ok(sid), Ok(pp)) => {
+                    let ts = crate::runner_config::get_todo_schedule();
+                    match ts {
+                        Some(t) => {
+                            let cli = std::path::PathBuf::from(&t.producer_cli)
+                                .with_file_name("step-seal-cli.js");
+                            // 从板读步骤标题+描述拼 objective
+                            let data = crate::epic_store::read_epics(std::path::Path::new(pp))
+                                .map_err(|e| format!("read epics: {e}"));
+                            let obj = match data {
+                                Ok(d) => {
+                                    let step = d.steps.iter().find(|s| s.id == sid);
+                                    let epic = d.epics.iter().find(|e| Some(e.id.clone()) == step.map(|s| s.epic_id.clone()));
+                                    match (epic, step) {
+                                        (Some(e), Some(s)) => {
+                                            let mut o = s.title.clone();
+                                            if !s.description.trim().is_empty() {
+                                                o = format!("{}\n\n{}", s.title, s.description.trim());
+                                            }
+                                            if !e.title.trim().is_empty() {
+                                                o = format!("[{}]\n\n{}", e.title.trim(), o);
+                                            }
+                                            o
+                                        }
+                                        _ => sid.to_string(),
+                                    }
+                                }
+                                Err(e) => return err(500, e),
+                            };
+                            let input = serde_json::json!({
+                                "step_id": sid,
+                                "epic_id": "auto",
+                                "objective": obj,
+                                "allowed_paths": ["*"],
+                                "create_paths": ["*"],
+                                "max_changed_files": 30,
+                                "executor_preferred": "zcode",
+                                "executor_timeout_seconds": 3600,
+                                "executor_max_attempts": 2,
+                                "executor_sandbox": "workspace-write",
+                                "acceptance_command_ids": ["verify:candidate"],
+                                "project_dir": pp,
+                            });
+                            let out = std::process::Command::new(&t.node_bin)
+                                .arg(&cli).arg("--stdin")
+                                .stdin(std::process::Stdio::piped())
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::piped())
+                                .spawn()
+                                .and_then(|mut ch| {
+                                    use std::io::Write;
+                                    ch.stdin.as_mut().unwrap()
+                                        .write_all(input.to_string().as_bytes())?;
+                                    ch.wait_with_output()
+                                });
+                            match out {
+                                Ok(o) if o.status.success() => {
+                                    let r: serde_json::Value = serde_json::from_slice(&o.stdout)
+                                        .unwrap_or(serde_json::json!({"raw": String::from_utf8_lossy(&o.stdout)}));
+                                    ok(r)
+                                }
+                                Ok(o) => err(409, format!("seal: {}", String::from_utf8_lossy(&o.stdout).trim())),
+                                Err(e) => err(500, format!("spawn: {e}")),
+                            }
+                        }
+                        None => err(409, "todo_schedule 未配置"),
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => e,
+            },
+            Err(e) => e,
+        },
         ("POST", "/api/registry/arb-config") => match parse_body(req) {
             Ok(v) => match v.get("enabled").and_then(|x| x.as_bool()) {
                 Some(enabled) => map_store(crate::discovery::set_arb_board_config(

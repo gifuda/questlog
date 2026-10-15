@@ -1403,6 +1403,33 @@ fn same_state_transition(err: &str) -> Option<String> {
     }
 }
 
+/// 后台执行自动修订桥（fire-and-forget）：node <dist>/revision-reseal-cli.js
+/// <execution_id>。node 与 CLI 路径取自 todo_schedule（node_bin 与 producer_cli
+/// 的同目录 sibling）；schedule 未配置则记日志跳过（fail-open）。
+fn spawn_auto_revise(execution_id: &str) {
+    let Some(ts) = crate::runner_config::get_todo_schedule() else {
+        log::info!("[auto-revise] todo_schedule 未配置，跳过自动修订（人工重封即可）");
+        return;
+    };
+    let cli = std::path::PathBuf::from(&ts.producer_cli)
+        .with_file_name("revision-reseal-cli.js");
+    let node = ts.node_bin.clone();
+    let exec = execution_id.to_string();
+    std::thread::spawn(move || {
+        match std::process::Command::new(&node).arg(&cli).arg(&exec).output() {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if out.status.success() {
+                    log::info!("[auto-revise] {stdout}");
+                } else {
+                    log::warn!("[auto-revise] 失败（包保持 blocked 等人工）: {stdout}");
+                }
+            }
+            Err(e) => log::warn!("[auto-revise] spawn 失败（包保持 blocked）: {e}"),
+        }
+    });
+}
+
 /// 引号感知的 shell 拼接符检查：只查引号外的 `; | & \` 换行 $( ——引号内
 /// 是数据载荷（裁决文本里含 "|" 是合法的）。未闭合引号视为不安全，fail-closed。
 fn shell_meta_outside_quotes(cmd: &str) -> bool {
@@ -2004,7 +2031,92 @@ pub fn set_executor_thinking(thinking: Option<String>) -> Result<(), String> {
 }
 
 /// Set which model the Runner's executor uses ("provider/model", or None to
-/// S5 后置（全局设置入口）：夜间研究链模型/思考档——与施工执行器
+/// 一键启动步骤执行：用步骤标题+描述自动封包（app 内闭环，无需对话
+/// 中介）。范围默认宽（项目根 workspace-write），seatbelt+scope gate
+/// +auto-revise 三层兜底。Runner 在 auto 开关下 10s 内领取。
+#[tauri::command]
+pub fn seal_step_for_execution(
+    step_id: String,
+    project_path: String,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    if crate::remote_client::enabled() {
+        return crate::remote_client::post_json("/api/steps/seal", &serde_json::json!({
+            "step_id": step_id,
+            "project_path": project_path,
+        }))
+        .map_err(|e| format!("seal: {e}"));
+    }
+    seal_step_impl(&step_id, &project_path, &state)
+}
+
+/// 本地模式核心（API 路由复用）。
+pub fn seal_step_impl(
+    step_id: &str,
+    project_path: &str,
+    state: &State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let path = validate_project_path_list(project_path, &state.projects.lock().map_err(|e| e.to_string())?)?;
+    let data = epic_store::read_epics(&path)?;
+    let step = data.steps.iter().find(|s| s.id == step_id)
+        .ok_or_else(|| format!("step '{}' not found", step_id))?;
+    let epic = data.epics.iter().find(|e| e.id == step.epic_id)
+        .ok_or_else(|| format!("epic '{}' not found", step.epic_id))?;
+
+    // objective = 步骤标题 + 描述（+方案上下文一行）
+    let mut objective = format!("{}", step.title);
+    if !step.description.trim().is_empty() {
+        objective = format!("{}\n\n{}", step.title, step.description.trim());
+    }
+    if !epic.title.trim().is_empty() {
+        objective = format!("[{}]\n\n{}", epic.title.trim(), objective);
+    }
+
+    // 封包：宽范围（项目根 workspace-write）——seatbelt 沙箱限 worktree、
+    // scope gate 拦真实越界、auto-revise 补路径错。验收 verify:candidate。
+    let input = serde_json::json!({
+        "epic_id": step.epic_id,
+        "step_id": step.id,
+        "objective": objective,
+        "allowed_paths": ["*"],
+        "create_paths": ["*"],
+        "max_changed_files": 30,
+        "executor_preferred": "zcode",
+        "executor_timeout_seconds": 3600,
+        "executor_max_attempts": 2,
+        "executor_sandbox": "workspace-write",
+        "acceptance_command_ids": ["verify:candidate"],
+        "project_dir": project_path,
+    });
+    // 写入 packages.json（经 node CLI 或直接构造——最小可行：直接写入
+    // runtime 的 packages 结构，走 TS CLI 桥）
+    let ts = crate::runner_config::get_todo_schedule();
+    let (node, cli) = match ts {
+        Some(t) => (t.node_bin.clone(), std::path::PathBuf::from(&t.producer_cli)
+            .with_file_name("step-seal-cli.js").to_string_lossy().to_string()),
+        None => return Err("todo_schedule 未配置（需 node 路径）".into()),
+    };
+    let out = std::process::Command::new(&node)
+        .arg(&cli)
+        .arg("--stdin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut ch| {
+            use std::io::Write;
+            ch.stdin.as_mut().unwrap().write_all(input.to_string().as_bytes())?;
+            ch.wait_with_output()
+        })
+        .map_err(|e| format!("spawn seal CLI: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() {
+        return Err(format!("seal CLI: {}", stdout));
+    }
+    Ok(serde_json::from_str(&stdout).unwrap_or(serde_json::json!({"raw": stdout})))
+}
+
+/// S5 后置（全局设置入口）：夜间研究链模型/思考档——与施工执行器/// S5 后置（全局设置入口）：夜间研究链模型/思考档——与施工执行器
 /// （set_executor_model）是两条独立选型，互不影响。
 #[tauri::command]
 pub fn set_todo_schedule_model(
@@ -2316,9 +2428,13 @@ pub fn resolve_decision_request(
             // budget is independent of the old chain). S2: the new
             // revision's first attempt automatically recovers the captured
             // scene (same base) — the work is reused, not redone.
+            // 2026-10-14 用户裁决（点击即授权，机器补机械段）：后台桥到
+            // mcp-server 的 revision-reseal-cli，用现场分类并集范围自动
+            // 重封修订包；失败 fail-open（包保持 blocked 等人工）。
+            spawn_auto_revise(&request.execution_id);
             cancel_execution_for_decision(
                 &request.execution_id,
-                "resolved as revise_scope — awaiting a new package revision",
+                "resolved as revise_scope — auto-revision bridge spawned",
             )?;
             let package_id = crate::execution_store::get_execution(&request.execution_id)
                 .map(|exec| exec.package_id)

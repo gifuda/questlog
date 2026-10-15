@@ -184,7 +184,8 @@
     "sumDone": "完成",
     "archived": "已归档方案",
     "archivedHint": "已完成方案自动归档，改回未完成状态即可恢复",
-    "autoOrigin": "来自待办的夜间自动处理"
+    "autoOrigin": "来自待办的夜间自动处理",
+    "executeHint": "一键封包并启动执行（Runner 自动领取）"
   },
   "arb": {
     "title": "套利机会",

@@ -28,6 +28,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { withFileLock } from "./file-lock.js";
 import { getPackage, updatePackageStatus } from "./runtime-store.js";
+import { autoResealRevision } from "./scope-revise.js";
 
 /** Rust ExecutionStatus serializes snake_case — keep these exact. */
 export const RETRYABLE_STATUSES = new Set([
@@ -157,10 +158,18 @@ export async function executeDecisionAction(
         const blocked = await updatePackageStatus(keepBlocked, "blocked");
         if ("error" in blocked) return { error: blocked.error };
       }
+      // 自动后半段（2026-10-14 用户裁决：点击即授权，机器补机械段）——
+      // 用现场分类做并集范围重封修订包；失败 fail-open 回退旧行为。
+      const resealed = await autoResealRevision(executionId);
+      if (resealed.ok) {
+        return {
+          ok: true as const,
+          detail: `execution cancelled; ${resealed.note} — Runner will pick it up within one poll`,
+        };
+      }
       return {
         ok: true as const,
-        detail:
-          "execution cancelled; package stays blocked — prepare → validate → seal a new package revision (its retry budget is independent; its first attempt automatically recovers the captured scene, same base only)",
+        detail: `execution cancelled; package stays blocked (auto-revise declined: ${resealed.note}) — prepare → validate → seal a new package revision manually`,
       };
     }
     default:

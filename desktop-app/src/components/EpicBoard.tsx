@@ -661,6 +661,18 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
                       step={step}
                       onUpdate={(patch) => onUpdateStep(step.id, patch)}
                       onDelete={() => onDeleteStep(step.id)}
+                      projectPath={projectPath}
+                      onExecute={async () => {
+                        try {
+                          const { invoke } = await import("@tauri-apps/api/core");
+                          await invoke("seal_step_for_execution", {
+                            stepId: step.id,
+                            projectPath: projectPath,
+                          });
+                        } catch (e) {
+                          console.error("seal:", e);
+                        }
+                      }}
                     />
                   ))}
                 </div>
@@ -735,14 +747,17 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
 // ══════════════════════════════════════════════
 // StepRow — 单个步骤，5 段胶囊轨道可点击推进阶段
 // ══════════════════════════════════════════════
-function StepRow({ step, onUpdate, onDelete }: {
+function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
   step: Epic["steps"][number];
   onUpdate: (patch: { title?: string; stage?: StepStage }) => void;
   onDelete: () => void;
+  onExecute?: () => void;
+  projectPath?: string;
 }) {
   const { t } = useTranslation();
   const [hover, setHover] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [sealing, setSealing] = useState(false);
 
   const hasPackage = !!step.package;
   const stageIdx = stageOrder.indexOf(step.stage);
@@ -780,6 +795,20 @@ function StepRow({ step, onUpdate, onDelete }: {
           <span className="text-[11px] font-mono text-success bg-success/10 px-1.5 py-px rounded shrink-0" title="Has sealed TaskPackage">
             📦
           </span>
+        )}
+        {onExecute && !isObserved && (
+          <button
+            className="text-[11px] text-accent bg-accent-bg px-1.5 py-px rounded shrink-0 hover:bg-accent hover:text-white transition-colors disabled:opacity-40"
+            title={t("epic.executeHint")}
+            disabled={sealing}
+            onClick={async (e) => {
+              e.stopPropagation();
+              setSealing(true);
+              try { await onExecute(); } finally { setSealing(false); }
+            }}
+          >
+            {sealing ? "⏳" : "▶"}
+          </button>
         )}
         {step.actionable && (
           <span className="text-[11px] text-accent bg-accent-bg px-1.5 py-px rounded shrink-0">{t("epic.actionable")}</span>
