@@ -53,7 +53,7 @@ interface EpicBoardProps {
 
 export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { t, i18n } = useTranslation();
-  const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep, loading } = useEpics(projectPath);
+  const { data, summary, epics, addEpic, updateEpic, deleteEpic, addStep, updateStep, deleteStep, loading, refresh: refreshEpics } = useEpics(projectPath);
   const { status: projectStatus, loading: projectLoading, toggle: toggleProjectRunner, toggleGlobal } = useProjectRunner(projectPath);
   const { status: runnerStatus, lastPollSecsAgo } = useRunnerStatus();
   const [showNewEpic, setShowNewEpic] = useState(false);
@@ -163,6 +163,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                   onDeleteStep={(stepId) => deleteStep(stepId)}
                   onAddChild={(id, title, opts) => addEpic(title, { ...opts, parentId: id })}
                   projectPath={projectPath}
+                  onRefresh={refreshEpics}
                   globalEnabled={projectStatus?.global_enabled}
                   projectEnabled={projectStatus?.project_enabled}
                 />
@@ -179,6 +180,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                     onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
                     onDeleteStep={(stepId) => deleteStep(stepId)}
                     projectPath={projectPath}
+                  onRefresh={refreshEpics}
                     globalEnabled={projectStatus?.global_enabled}
                     projectEnabled={projectStatus?.project_enabled}
                   />
@@ -214,6 +216,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                         onDeleteStep={(stepId) => deleteStep(stepId)}
                         onAddChild={(id, title, opts) => addEpic(title, { ...opts, parentId: id })}
                         projectPath={projectPath}
+                  onRefresh={refreshEpics}
                         globalEnabled={projectStatus?.global_enabled}
                         projectEnabled={projectStatus?.project_enabled}
                       />
@@ -230,6 +233,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                           onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
                           onDeleteStep={(stepId) => deleteStep(stepId)}
                           projectPath={projectPath}
+                  onRefresh={refreshEpics}
                           globalEnabled={projectStatus?.global_enabled}
                           projectEnabled={projectStatus?.project_enabled}
                         />
@@ -444,12 +448,14 @@ interface EpicRowProps {
   onAddChild?: (epicId: string, title: string, opts: { description?: string; priority?: string }) => void;
   /** 项目路径（用于方案级 auto_execute 控制，仅顶级方案）。 */
   projectPath?: string;
+  /** seal 成功后立即拉板——远端模式 watcher 不触发，10s 兜底太慢（S4）。 */
+  onRefresh?: () => void;
   /** S5: 上层开关状态——三态阻断原因推导（总闸急停 > 项目信任 > 方案授权）。 */
   globalEnabled?: boolean;
   projectEnabled?: boolean;
 }
 
-function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, onUpdateStep, onDeleteStep, onAddChild, projectPath, globalEnabled, projectEnabled }: EpicRowProps) {
+function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, onUpdateStep, onDeleteStep, onAddChild, projectPath, onRefresh, globalEnabled, projectEnabled }: EpicRowProps) {
   const { t } = useTranslation();
   const badge = epicStatusBadge[epic.status];
   const [expanded, setExpanded] = useState(false);
@@ -668,6 +674,10 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
                           stepId: step.id,
                           projectPath: projectPath ?? "",
                         });
+                        // 远端模式 watcher 不触发（板文件在 m5p），封包回写后
+                        // 只有 10s 兜底轮询会刷新——seal 成功即拉一次，让
+                        // "执行中"状态秒级可见（S4 延迟链的 UI 等待段）。
+                        onRefresh?.();
                       }}
                     />
                   ))}
