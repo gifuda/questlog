@@ -18,6 +18,7 @@ import {
 } from "./plan-publisher.js";
 import {
   canonicalizeProjectDir,
+  effectiveCwd,
   resolveRegisteredProject,
 } from "./store.js";
 
@@ -32,14 +33,14 @@ async function resolveToolCwd(
   input: { project_dir?: string },
 ): Promise<{ cwd: string } | { error: string }> {
   if (input.project_dir) {
-    const canonical = await canonicalizeProjectDir(input.project_dir, process.cwd());
+    const canonical = await canonicalizeProjectDir(input.project_dir, effectiveCwd());
     if (!canonical) {
       return { error: `project_dir 非法或被拒绝（需为当前工作区子目录或已注册项目）: ${input.project_dir}` };
     }
     return { cwd: canonical };
   }
-  const routed = await resolveRegisteredProject(process.cwd());
-  return { cwd: routed ?? process.cwd() };
+  const routed = await resolveRegisteredProject(effectiveCwd());
+  return { cwd: routed ?? effectiveCwd() };
 }
 
 // ─── PlanSpec structural schema ───

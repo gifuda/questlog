@@ -379,11 +379,14 @@ export async function canonicalizeProjectDir(dir: string, cwd: string): Promise<
   let canonical: string;
   try {
     canonical = await fs.realpath(dir);
-  } catch {
+  } catch (err) {
     // Remote client path (doesn't exist on this host): re-home it onto this
-    // host's prefix and retry; every check below applies unchanged.
+    // host's prefix and retry. Only "cannot exist" errors qualify — an
+    // EACCES/ELOOP on a path that DOES exist must fail, not be re-anchored.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") return null;
     const mapped = mapClientPath(dir);
-    if (mapped === null) return null; // nonexistent or unreadable
+    if (mapped === null) return null;
     try {
       canonical = await fs.realpath(mapped);
     } catch {
