@@ -3,10 +3,33 @@
 //! so an unreachable authority degrades into a visible error, never a hang.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(8);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Bound the connect phase: an unresponsive tunnel endpoint must fail in
+/// seconds, not the OS default ~75s (this path is on the synchronous
+/// command/startup path, so an unbounded connect freezes the whole UI).
+/// The cap covers connect only — DNS resolution of a hostname api_base is
+/// not bounded (std has no resolving timeout); deploy api_base as an IP.
+/// Every resolved address is tried (connect_timeout takes a single addr —
+/// taking only the first would drop the v4 fallback on AAAA-first hosts).
+fn connect_bounded(host_port: &str) -> Result<TcpStream, String> {
+    let addrs: Vec<SocketAddr> = host_port
+        .to_socket_addrs()
+        .map_err(|e| format!("api resolve {host_port}: {e}"))?
+        .collect();
+    let mut last_err = format!("api connect {host_port}: no addresses");
+    for addr in &addrs {
+        match TcpStream::connect_timeout(addr, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_err = format!("api connect {host_port} ({addr}): {e}"),
+        }
+    }
+    Err(last_err)
+}
 
 /// Remote API mode is active: mirror marker present AND it carries an api_base.
 pub fn enabled() -> bool {
@@ -41,7 +64,7 @@ fn request(method: &str, path_and_query: &str, body: Option<&serde_json::Value>)
         None => return Err(format!("unsupported api_base (need http://): {url}")),
     };
     let payload = body.map(serde_json::to_vec).transpose().map_err(|e| format!("serialize: {e}"))?;
-    let mut stream = TcpStream::connect(host_port).map_err(|e| format!("api connect {host_port}: {e}"))?;
+    let mut stream = connect_bounded(host_port)?;
     stream.set_read_timeout(Some(TIMEOUT)).ok();
     stream.set_write_timeout(Some(TIMEOUT)).ok();
     let mut req = format!(
@@ -84,4 +107,34 @@ pub fn post_json(path_and_query: &str, body: &serde_json::Value) -> Result<serde
 pub fn get_into<T: serde::de::DeserializeOwned>(path_and_query: &str) -> Result<T, String> {
     let v = get_json(path_and_query)?;
     serde_json::from_value(v).map_err(|e| format!("api shape mismatch: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_literal_resolves_to_single_addr() {
+        let addrs: Vec<SocketAddr> = "127.0.0.1:15889".to_socket_addrs().unwrap().collect();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].port(), 15889);
+    }
+
+    #[test]
+    fn refused_connect_is_bounded_error_not_hang() {
+        // Grab an unused loopback port, release it, then connect — refused
+        // (or any error) must come back promptly, never block.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let start = std::time::Instant::now();
+        let res = connect_bounded(&format!("127.0.0.1:{port}"));
+        assert!(res.is_err());
+        assert!(start.elapsed() < CONNECT_TIMEOUT + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn unresolvable_host_is_error() {
+        assert!(connect_bounded("not a host port").is_err());
+    }
 }
