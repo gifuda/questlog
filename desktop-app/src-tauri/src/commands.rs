@@ -79,7 +79,7 @@ pub fn get_projects_impl(
         let data = match store::read_todos(path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!(
+                log::warn!(
                     "[get_projects] failed to read '{name}' at {}: {e} — showing with empty data",
                     path.display()
                 );
@@ -586,7 +586,7 @@ pub fn get_all_active_impl(
         let data = match store::read_todos(path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!(
+                log::warn!(
                     "[get_all_active] failed to read '{name}' at {}: {e}",
                     path.display()
                 );
@@ -675,7 +675,7 @@ pub fn get_epics_global_impl(
         let data = match epic_store::read_epics(path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!(
+                log::warn!(
                     "[get_epics_global] failed to read '{name}' at {}: {e}",
                     path.display()
                 );
@@ -2709,7 +2709,7 @@ mod tests {
         assert!(exec
             .last_error
             .as_deref()
-            .is_some_and(|e| e.contains("awaiting a new package revision")));
+            .is_some_and(|e| e.contains("auto-revision bridge spawned")));
 
         // The package must stay blocked so the Runner cannot re-claim the
         // old scope while a revision is being prepared. (read_ready_packages

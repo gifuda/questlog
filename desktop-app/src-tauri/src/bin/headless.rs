@@ -100,6 +100,8 @@ fn main() {
 
 /// Minimal stdout logger — the GUI uses tauri-plugin-log, which the
 /// headless binary cannot host. Info level keeps the launchd log lean.
+/// Local-time prefix on every line: launchd streams carry no timestamps,
+/// and poll errors like board parse failures must be placeable in time.
 fn init_logger() {
     struct StdoutLogger;
     impl log::Log for StdoutLogger {
@@ -108,7 +110,12 @@ fn init_logger() {
         }
         fn log(&self, record: &log::Record) {
             if self.enabled(record.metadata()) {
-                println!("[{}] {}", record.level(), record.args());
+                println!(
+                    "{} [{}] {}",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                    record.level(),
+                    record.args()
+                );
             }
         }
         fn flush(&self) {}

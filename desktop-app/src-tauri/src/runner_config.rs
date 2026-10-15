@@ -411,7 +411,11 @@ mod tests {
     use crate::execution_store::TEST_LOCK;
 
     fn setup_temp_runtime() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
-        let guard = TEST_LOCK.lock().unwrap();
+        // Poison-tolerant like the commands.rs fixtures: one panicking test
+        // must not cascade into every later TEST_LOCK user.
+        let guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("QUESTLOG_RUNTIME", dir.path());
         (dir, guard)
