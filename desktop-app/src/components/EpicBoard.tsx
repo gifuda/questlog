@@ -747,8 +747,9 @@ type StepVisual = "todo" | "running" | "done" | "error";
 
 function stepVisual(step: Epic["steps"][number]): StepVisual {
   if (step.stage === "verified" || step.stage === "observed") return "done";
+  // 有封存包 = 正在系统管道中（排队/执行中/待验收）→ 一律显示 🔄
+  if (step.package?.status === "sealed") return "running";
   if (step.stage === "coded") return "running";
-  // pending/designed — 检查是否有 active execution（API 拉取的 stage 可能滞后）
   return "todo";
 }
 
