@@ -29,7 +29,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 # API 响应 gzip（服务端编码 + remote_client 解码，两端同 crate；miniz 纯 Rust 后端）
 flate2 = "1"
-dirs = "6"
+dirs = "7"
 sha2 = "0.10"
 # kill(pid, 0) liveness probes for the owner-safe file lock (file_lock.rs).
 libc = "0.2"
