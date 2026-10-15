@@ -811,7 +811,8 @@ function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
                 setFeedback("✅ 已封包，Runner 正在执行");
                 setTimeout(() => setFeedback(null), 5000);
               } catch (err) {
-                setFeedback(`❌ ${err instanceof Error ? err.message : String(err)}`);
+                const msg = err instanceof Error ? err.message : String(err);
+                setFeedback(`❌ ${msg.length > 60 ? msg.slice(0, 60) + "…" : msg}`);
                 setTimeout(() => setFeedback(null), 8000);
               } finally { setSealing(false); }
             }}
