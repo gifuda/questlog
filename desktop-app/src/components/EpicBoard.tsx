@@ -741,8 +741,24 @@ function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAddStep, o
 }
 
 // ══════════════════════════════════════════════
-// StepRow — 单个步骤，5 段胶囊轨道可点击推进阶段
+// StepRow — 简化三态（⬜🔄✅/⚠️）+ 白盒详情可展开 + ▶ 启动 + ⚠️ 内联处置
 // ══════════════════════════════════════════════
+type StepVisual = "todo" | "running" | "done" | "error";
+
+function stepVisual(step: Epic["steps"][number]): StepVisual {
+  if (step.stage === "verified" || step.stage === "observed") return "done";
+  if (step.stage === "coded") return "running";
+  // pending/designed — 检查是否有 active execution（API 拉取的 stage 可能滞后）
+  return "todo";
+}
+
+const stepVisualConfig: Record<StepVisual, { icon: string; label: string; cls: string }> = {
+  todo: { icon: "⬜", label: "待做", cls: "text-faint" },
+  running: { icon: "🔄", label: "执行中", cls: "text-accent" },
+  done: { icon: "✅", label: "完成", cls: "text-success" },
+  error: { icon: "⚠️", label: "需处理", cls: "text-danger" },
+};
+
 function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
   step: Epic["steps"][number];
   onUpdate: (patch: { title?: string; stage?: StepStage }) => void;
@@ -751,56 +767,35 @@ function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
   projectPath?: string;
 }) {
   const { t } = useTranslation();
-  const [hover, setHover] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [sealing, setSealing] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
 
-  const hasPackage = !!step.package;
-  const stageIdx = stageOrder.indexOf(step.stage);
-  const isObserved = step.stage === "observed";
+  const visual = stepVisual(step);
+  const cfg = stepVisualConfig[visual];
+  const isDone = visual === "done";
 
   return (
-    <div
-      className="rounded hover:bg-elevated/40 group"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
+    <div className="rounded hover:bg-elevated/40 group">
       <div
         className="flex items-center gap-2.5 py-1.5 px-2 cursor-pointer"
-        onClick={() => hasPackage && setExpanded(!expanded)}
+        onClick={() => setExpanded(!expanded)}
       >
-        {/* 5 段阶段轨道：点击第 N 段 = 推进到第 N 阶段 */}
-        <div className="flex items-center gap-[3px] shrink-0">
-          {stageOrder.map((s, i) => (
-            <button
-              key={s}
-              title={t(stepStageKey[s])}
-              onClick={(e) => { e.stopPropagation(); onUpdate({ stage: s }); }}
-              className={`w-3.5 h-1 rounded-sm transition-colors ${
-                i <= stageIdx
-                  ? isObserved ? "bg-success" : "bg-accent"
-                  : "bg-line hover:bg-line-hover"
-              }`}
-            />
-          ))}
-        </div>
-        <span className={`text-[13px] flex-1 truncate ${isObserved ? "text-faint line-through" : "text-body"}`}>
+        {/* 三态图标 */}
+        <span className={`text-sm shrink-0 ${cfg.cls}`} title={cfg.label}>
+          {cfg.icon}
+        </span>
+
+        {/* 标题 */}
+        <span className={`text-[13px] flex-1 truncate ${isDone ? "text-faint" : "text-body"}`}>
           {step.title}
         </span>
-        {hasPackage && (
-          <span className="text-[11px] font-mono text-success bg-success/10 px-1.5 py-px rounded shrink-0" title="Has sealed TaskPackage">
-            📦
-          </span>
-        )}
-        {onExecute && !isObserved && (
+
+        {/* ▶ 启动按钮（仅待做步骤，始终可见） */}
+        {onExecute && !isDone && visual === "todo" && (
           <button
-            className={`text-[11px] px-1.5 py-px rounded shrink-0 transition-colors disabled:opacity-40 ${
-              hasPackage
-                ? "text-faint hover:text-accent"
-                : "text-accent bg-accent-bg hover:bg-accent hover:text-white"
-            }`}
-            title={hasPackage ? t("epic.reExecuteHint") : t("epic.executeHint")}
+            className="text-[11px] text-accent bg-accent-bg px-1.5 py-px rounded shrink-0 hover:bg-accent hover:text-white transition-colors disabled:opacity-40"
+            title={t("epic.executeHint")}
             disabled={sealing}
             onClick={async (e) => {
               e.stopPropagation();
@@ -808,44 +803,66 @@ function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
               setFeedback(null);
               try {
                 await onExecute();
-                setFeedback("✅ 已封包，Runner 正在执行");
-                setTimeout(() => setFeedback(null), 5000);
+                setFeedback("✅ 已启动");
+                setTimeout(() => setFeedback(null), 4000);
               } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
-                setFeedback(`❌ ${msg.length > 60 ? msg.slice(0, 60) + "…" : msg}`);
-                setTimeout(() => setFeedback(null), 8000);
+                setFeedback(`❌ ${msg.length > 40 ? msg.slice(0, 40) + "…" : msg}`);
+                setTimeout(() => setFeedback(null), 6000);
               } finally { setSealing(false); }
             }}
           >
-            {sealing ? "⏳" : feedback ? feedback.split("，")[0] : "▶"}
+            {sealing ? "⏳" : feedback ?? "▶"}
           </button>
         )}
+
+        {/* 反馈信息（非按钮位置） */}
         {feedback && feedback.startsWith("❌") && (
-          <span className="text-[10px] text-danger truncate max-w-[200px]" title={feedback}>
-            {feedback.slice(2)}
-          </span>
+          <span className="text-[10px] text-danger truncate max-w-[180px]">{feedback.slice(2)}</span>
         )}
-        {step.actionable && (
-          <span className="text-[11px] text-accent bg-accent-bg px-1.5 py-px rounded shrink-0">{t("epic.actionable")}</span>
-        )}
-        {step.depends_on_titles.length > 0 && (
-          <span className="text-[11px] text-faint shrink-0 hidden md:inline" title={t("epic.waitFor", { names: step.depends_on_titles.join("、") })}>
+
+        {/* 依赖标记 */}
+        {step.depends_on_titles.length > 0 && !isDone && (
+          <span className="text-[11px] text-faint shrink-0" title={t("epic.waitFor", { names: step.depends_on_titles.join("、") })}>
             🔗{step.depends_on_titles.length}
           </span>
         )}
-        <span className="text-[11px] font-mono text-faint w-14 text-right shrink-0">{t(stepStageKey[step.stage])}</span>
-        {hover && (
-          <ConfirmButton
-            label="×"
-            confirmLabel="✓"
-            onConfirm={() => onDelete()}
-            className="w-4 h-4 flex items-center justify-center text-[11px] text-faint hover:text-danger rounded-full"
-          />
-        )}
+
+        {/* 删除 */}
+        <ConfirmButton
+          label="×"
+          confirmLabel="✓"
+          onConfirm={() => onDelete()}
+          className="w-4 h-4 flex items-center justify-center text-[11px] text-faint hover:text-danger rounded-full opacity-0 group-hover:opacity-100"
+        />
       </div>
-      {/* Execution panel — shows package summary and run timeline */}
-      {expanded && hasPackage && (
-        <ExecutionPanel stepId={step.id} />
+
+      {/* 白盒详情 — 展开可见执行过程/包信息/diff */}
+      {expanded && (
+        <div className="pl-10 pr-2 pb-2">
+          {/* 阶段胶囊（高级用户可点击推进） */}
+          <div className="flex items-center gap-1 mb-1.5">
+            {stageOrder.map((st, i) => (
+              <button
+                key={st}
+                title={t(stepStageKey[st])}
+                onClick={() => onUpdate({ stage: st })}
+                className={`px-1.5 py-px text-[10px] rounded transition-colors ${
+                  i <= stageOrder.indexOf(step.stage)
+                    ? step.stage === "observed" ? "bg-success/15 text-success" : "bg-accent-bg text-accent"
+                    : "bg-elevated text-faint hover:bg-line-hover"
+                }`}
+              >
+                {t(stepStageKey[st])}
+              </button>
+            ))}
+          </div>
+          {step.description && (
+            <p className="text-xs text-muted leading-relaxed mb-1">{step.description}</p>
+          )}
+          {/* 执行面板（包详情+运行时间线） */}
+          {step.package && <ExecutionPanel stepId={step.id} />}
+        </div>
       )}
     </div>
   );
