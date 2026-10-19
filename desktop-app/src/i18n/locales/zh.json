@@ -247,8 +247,8 @@
     "decisionApprove": "批准",
     "decisionReject": "驳回",
     "decisionDone": "已处置",
-    "decisionExecuted": "已执行 {{time}} · 待导出确认",
-    "decisionExecutedReset": "board.json 每日 09:00 重新导出，已处置项届时自然消失；点击可重置重新处置",
+    "decisionExecuted": "已执行 {{time}} · 明晨导出后自动消除",
+    "decisionExecutedReset": "处置已入账（采集机账房 committed）；board.json 每日 09:35 重新导出，已处置项届时自然消失；点击可重置重新处置",
     "decisionDeadline": "截止",
     "decisionPendingDays": "已挂 {{days}} 天"
   },
