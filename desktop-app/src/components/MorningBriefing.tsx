@@ -11,6 +11,14 @@ import Badge from "./Badge";
 import { epicStatusBadge } from "../epicConstants";
 import type { EpicStatus } from "../types/epics";
 
+/** 时间戳 → 距今小时数。解析失败返回 null。 */
+function hoursAgo(dateStr: string | null | undefined): number | null {
+  if (!dateStr) return null;
+  const t = Date.parse(dateStr.trim());
+  if (Number.isNaN(t)) return null;
+  return (Date.now() - t) / 3600000;
+}
+
 /** 日期 → 距今天的天数（本地时区，日历日差）。解析失败返回 null。 */
 function daysAgo(dateStr: string | null | undefined): number | null {
   if (!dateStr) return null;
@@ -45,8 +53,11 @@ function useStalenessAlerts(
       text: t("morning.alertStaleBrief", { days: briefAge, date: arb?.brief?.brief_date }),
     });
   }
-  const exportAge = daysAgo(arb?.generated_at);
-  if (exportAge !== null && exportAge >= 1) {
+  // 36h 阈值与采集机镜像脚本的 W10.10 生产者停滞判定对齐：daily-export
+  // 每天 09:35 跑，日期粒度的"≥1 天"会在每天 00:00–09:35 必然误报。
+  // 36h = 完整漏跑一天以上才告警。
+  const exportHours = hoursAgo(arb?.generated_at);
+  if (exportHours !== null && exportHours >= 36) {
     alerts.push({
       tone: "danger",
       text: t("morning.alertExportStale", { ts: arb?.generated_at?.slice(0, 10) }),
