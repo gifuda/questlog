@@ -1403,6 +1403,52 @@ fn same_state_transition(err: &str) -> Option<String> {
     }
 }
 
+// ════════════════════════════════════════════════════════════
+// 服务器监控 (Infra Board) — agent-base snapshot-local.json 的只读视图
+// App 级全局功能，不按项目区分。纯只读：快照由家庭服务器侧
+// com.agent-base.snapshot-pull launchd 作业周期落盘（约 5 分钟节奏），
+// app 不提供任何写操作。路径为契约 v1 固定绝对路径（个人单机工具，
+// ArbBoardConfig 式注册表可配置留作后续）；文件被挪走时按 missing
+// 降级，不视为错误。
+// ════════════════════════════════════════════════════════════
+
+/// Read the local infra snapshot. Read-only. Returns a status envelope
+/// (照 get_arb_board 模式) so the frontend can distinguish "missing" /
+/// "parse_error" / "ok" without guessing — an absent or broken file must
+/// degrade to a friendly not-ready banner, never break the tab. `data`
+/// carries the raw JSON text (fetched_at travels inside the body; the
+/// frontend re-parses it defensively). Read errors surface as Err(String)
+/// for the frontend to render.
+#[tauri::command]
+pub async fn get_infra_snapshot() -> Result<serde_json::Value, String> {
+    // 契约 v1 固定绝对路径。Rust 侧 std::fs 直读本机文件，不经前端 fs
+    // 插件，无需动 capabilities（避开 749698c 那类 ACL 坑）。快照由
+    // 本机 launchd 拉取落盘，与远端镜像模式无关，不走 remote_client。
+    const SNAPSHOT_PATH: &str = "/Users/abo/家庭服务器运维/agent-base/dashboard/snapshot-local.json";
+    let path = std::path::Path::new(SNAPSHOT_PATH);
+    if !path.exists() {
+        return Ok(serde_json::json!({
+            "status": "missing",
+            "snapshot_path": SNAPSHOT_PATH,
+        }));
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
+    // 先验一遍 JSON 合法性以产出 parse_error 态；data 仍以原文透传，
+    // 前端防御式再解析（两层判定，坏 body 不可能进入渲染）。
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(_) => Ok(serde_json::json!({
+            "status": "ok",
+            "snapshot_path": SNAPSHOT_PATH,
+            "data": raw,
+        })),
+        Err(e) => Ok(serde_json::json!({
+            "status": "parse_error",
+            "snapshot_path": SNAPSHOT_PATH,
+            "error": e.to_string(),
+        })),
+    }
+}
+
 /// 后台执行自动修订桥（fire-and-forget）：node <dist>/revision-reseal-cli.js
 /// <execution_id>。node 与 CLI 路径取自 todo_schedule（node_bin 与 producer_cli
 /// 的同目录 sibling）。返回桥是否真的启动——schedule 未配置或线程创建

@@ -91,6 +91,8 @@ pub fn run() {
             commands::resolve_decision_request,
             // 跨机链路健康（只读聚合）
             commands::get_fleet_health,
+            // 服务器监控 (Infra Board — snapshot-local.json 只读视图)
+            commands::get_infra_snapshot,
         ])
         .setup(|app| {
             tray::setup_tray(app);

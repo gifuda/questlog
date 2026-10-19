@@ -25,7 +25,8 @@
     "langZh": "中文",
     "langEn": "English",
     "dismiss": "关闭",
-    "morningTab": "☀ 晨报"
+    "morningTab": "☀ 晨报",
+    "infraTab": "🖥 服务器"
   },
   "kanban": {
     "tagFilter": "标签",
@@ -409,6 +410,36 @@
     "receipts": "回执待处理 {{count}}",
     "unmatched": "未匹配回执 {{count}}",
     "digest": "昨晚 {{date}} · 共{{total}}条 ✓{{accepted}} 待审{{review}} 失败{{failed}}"
+  },
+  "infra": {
+    "title": "服务器底座",
+    "readOnlyHint": "只读快照 · 数据源约 5 分钟刷新",
+    "refresh": "刷新",
+    "retry": "重试",
+    "fetchedAt": "快照时间 {{time}}",
+    "notReadyTitle": "数据源未就绪",
+    "lastAt": "上次：{{time}}",
+    "lastUnknown": "上次：—",
+    "unreachableDesc": "无法读取快照（读取命令失败或不在 Tauri 环境中）",
+    "missingDesc": "快照文件不存在：{{path}}（家庭服务器侧拉取作业可能尚未落盘）",
+    "parseErrorDesc": "快照解析失败：{{error}}",
+    "staleDesc": "快照已超过 15 分钟未更新，数据源拉取作业可能停摆",
+    "noTimestampDesc": "快照缺少 fetched_at 时间戳，无法判定新鲜度",
+    "quotaTitle": "LLM 额度",
+    "quota5h": "5h",
+    "quotaWeek": "周",
+    "quotaNoData": "暂无供应商额度数据",
+    "stateOk": "正常",
+    "stateWarn": "告警",
+    "stateFail": "故障",
+    "baseTitle": "底座状态",
+    "workerLabel": "worker",
+    "queueLabel": "队列",
+    "queueEmpty": "空",
+    "dshToday": "dsh 今日",
+    "dshUsage": "{{used}}/{{gate}} 次",
+    "healthTitle": "健康指示",
+    "healthEmpty": "暂无健康数据"
   },
   "overview": {
     "empty": "各项目暂无在办事项",

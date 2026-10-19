@@ -9,6 +9,7 @@ import { useApiHealth } from "./hooks/useApiHealth";
 import KanbanBoard from "./components/KanbanBoard";
 import EpicBoard from "./components/EpicBoard";
 import ArbBoard from "./components/ArbBoard";
+import InfraBoard from "./components/InfraBoard";
 import MorningBriefing from "./components/MorningBriefing";
 import { FleetHealthBand } from "./components/FleetHealth";
 import Logo from "./components/Logo";
@@ -16,7 +17,7 @@ import Settings from "./components/Settings";
 import ConfirmButton from "./components/ConfirmButton";
 import UndoBar from "./components/UndoBar";
 
-type ModuleTab = "morning" | "todos" | "epics" | "arb";
+type ModuleTab = "morning" | "todos" | "epics" | "arb" | "infra";
 
 function App() {
   const { t } = useTranslation();
@@ -163,6 +164,15 @@ function App() {
             >
               {t("app.arbTab")}
             </button>
+            {/* 服务器监控：app 级全局功能，常驻（数据源为家庭服务器快照，不按项目区分） */}
+            <button
+              className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
+                activeTab === "infra" ? "bg-surface text-heading" : "text-faint hover:text-body"
+              }`}
+              onClick={() => setActiveTab("infra")}
+            >
+              {t("app.infraTab")}
+            </button>
           </div>
         </div>
         {activeProject && activeTab === "todos" && (
@@ -187,6 +197,9 @@ function App() {
         ) : activeTab === "arb" ? (
           /* 套利机会栏：全局功能，不依赖选中项目 */
           <ArbBoard />
+        ) : activeTab === "infra" ? (
+          /* 服务器监控：全局功能，不依赖选中项目 */
+          <InfraBoard />
         ) : activeProject ? (
           activeTab === "todos" ? (
             <KanbanBoard projectPath={activeProject.path} onOpenEpics={() => setActiveTab("epics")} />

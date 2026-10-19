@@ -1,0 +1,365 @@
+import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
+import { useInfraSnapshot } from "../hooks/useInfraSnapshot";
+import {
+  DSH_DAILY_GATE,
+  dshPct,
+  fmtPct,
+  healthItems,
+  parseSnapshot,
+  providerList,
+  queueEntries,
+  quotaWarn,
+  stalenessState,
+  toneOf,
+} from "../infraLogic";
+import type { HealthTone } from "../infraLogic";
+import type {
+  InfraBase,
+  InfraProvider,
+  InfraQuotaWindow,
+  InfraSnapshotFile,
+} from "../types/infra";
+
+/** HealthTone → 点/文字/徽章色（配色全走 index.css 既有 token）。 */
+const dotCls: Record<HealthTone, string> = {
+  success: "bg-success",
+  amber: "bg-amber",
+  danger: "bg-danger",
+  muted: "bg-faint",
+};
+const toneTextCls: Record<HealthTone, string> = {
+  success: "text-success",
+  amber: "text-amber",
+  danger: "text-danger",
+  muted: "text-faint",
+};
+
+/** fetched_at（ISO UTC）→ 本地 MM-DD HH:mm；不可解析 → null。 */
+function fmtFetched(iso: string | null | undefined): string | null {
+  if (!iso || typeof iso !== "string") return null;
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return null;
+  return new Date(ts).toLocaleString("zh-CN", {
+    hour12: false,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * 服务器监控 — 家庭服务器 agent-base snapshot-local.json 的只读视图
+ * （app 级全局功能，不按项目区分；命名对齐 ArbBoard/FleetHealth）。
+ * P0 = F1 额度卡 / F2 底座状态卡 / F3 健康指示行 / F4 手动刷新 /
+ * F5 未就绪降级（文件缺失/JSON 损坏/fetched_at 超 15 分钟 → 横幅不白屏）。
+ */
+export default function InfraBoard() {
+  const { t } = useTranslation();
+  const { envelope, loaded, refresh } = useInfraSnapshot();
+
+  // 信封 ok 时才解析 body；解析失败（防御兜底）→ null → 未就绪
+  const file = useMemo<InfraSnapshotFile | null>(
+    () => (envelope?.status === "ok" ? parseSnapshot(envelope.data) : null),
+    [envelope],
+  );
+  const staleness = stalenessState(file?.fetched_at);
+
+  // ── F5 未就绪成因（null = 就绪）──
+  const notReadyCause: string | null =
+    envelope === null
+      ? t("infra.unreachableDesc")
+      : envelope.status === "missing"
+        ? t("infra.missingDesc", { path: envelope.snapshot_path ?? "—" })
+        : envelope.status === "parse_error"
+          ? t("infra.parseErrorDesc", { error: envelope.error ?? "—" })
+          : file === null
+            ? t("infra.parseErrorDesc", { error: "body" })
+            : staleness === "stale"
+              ? t("infra.staleDesc")
+              : staleness === "unknown"
+                ? t("infra.noTimestampDesc")
+                : null;
+
+  const lastAtText = file?.fetched_at
+    ? t("infra.lastAt", { time: fmtFetched(file.fetched_at) ?? file.fetched_at })
+    : t("infra.lastUnknown");
+
+  if (!loaded) {
+    return <div className="flex items-center justify-center h-full text-faint text-sm">…</div>;
+  }
+
+  // 页头（含 F4 手动刷新按钮，任何状态下常驻）
+  const header = (
+    <div className="px-4 py-2.5 border-b border-line bg-surface/30 flex items-center gap-3 text-[11px] flex-wrap shrink-0">
+      <span className="text-[13px] font-bold text-heading">🖥 {t("infra.title")}</span>
+      <span className="text-faint">{t("infra.readOnlyHint")}</span>
+      <span className="ml-auto text-faint tabular-nums" title={file?.fetched_at ?? ""}>
+        {file?.fetched_at
+          ? t("infra.fetchedAt", { time: fmtFetched(file.fetched_at) ?? file.fetched_at })
+          : t("infra.lastUnknown")}
+      </span>
+      <button
+        className="text-[11px] px-2.5 py-1 rounded-md bg-surface text-muted hover:text-heading transition-colors shrink-0"
+        onClick={() => refresh()}
+      >
+        ↻ {t("infra.refresh")}
+      </button>
+    </div>
+  );
+
+  // ── F5 完全无数据（invoke 失败/文件缺失/解析失败）：居中降级面板，不白屏 ──
+  if (notReadyCause && !file) {
+    return (
+      <div className="flex flex-col h-full">
+        {header}
+        <div className="flex flex-col items-center justify-center flex-1 text-faint gap-2 px-6 text-center">
+          <span className="text-3xl">🖥</span>
+          <span className="text-sm text-body">{t("infra.notReadyTitle")}</span>
+          <span className="text-[11px] leading-relaxed max-w-md break-all">{notReadyCause}</span>
+          <span className="text-[11px]">{lastAtText}</span>
+          <button className="text-[11px] text-accent hover:underline" onClick={() => refresh()}>
+            {t("infra.retry")}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // providers 元素形态守卫（对抗审查 F5 红线类）：null/非对象元素在纯函数层
+  // 剔除——下游 QuotaCard/ProviderCard 的 p.id/p.name 不可能再撞 null。
+  const providers = providerList(file?.llm_quota?.providers);
+
+  return (
+    <div className="flex flex-col h-full">
+      {header}
+
+      {/* F5 有数据但超龄：琥珀横幅（含「上次：…」）+ 数据降透明度，不白屏 */}
+      {notReadyCause && (
+        <div className="flex items-center gap-2 px-4 py-1.5 bg-amber-bg text-amber text-[11px] border-b border-amber/30 flex-wrap">
+          <span className="inline-block w-2 h-2 rounded-full bg-amber shrink-0" />
+          <span className="font-medium shrink-0">{t("infra.notReadyTitle")}</span>
+          <span className="min-w-0">{notReadyCause}</span>
+          <span className="shrink-0">{lastAtText}</span>
+          <button className="ml-auto hover:underline shrink-0" onClick={() => refresh()}>
+            {t("infra.retry")}
+          </button>
+        </div>
+      )}
+
+      <div className={`flex-1 overflow-y-auto p-3 flex flex-col gap-3 ${notReadyCause ? "opacity-60" : ""}`}>
+        {/* F1 顶部 LLM 额度卡：四家 × 5h/周双水位条 */}
+        <QuotaCard providers={providers} updatedLocal={file?.llm_quota?.updated_local} />
+
+        {/* F2 底座状态卡：worker 运行态 / queue 动态键值 / dsh 今日水位 */}
+        <BaseStatusCard base={file?.snapshot?.base} />
+
+        {/* F3 健康指示行：● 点阵，warn/fail 项 title 悬停显 _detail */}
+        <HealthStrip health={file?.snapshot?.base?.health} />
+
+        {/* P1 下半区插槽（预留，P0 不实现）：
+            F6 用量趋势（aggUsage14d 按日聚合，容忍稀疏天）
+            F7 最近任务流水（recent[].secs 可 null → fmtSecs）
+            F8 NAS 卡（nasTone：null 红 / >600 黄）
+            F9 告警联动 */}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// F1 — LLM 额度卡
+// ════════════════════════════════════════════════════════════
+
+function QuotaCard({
+  providers,
+  updatedLocal,
+}: {
+  providers: InfraProvider[];
+  updatedLocal?: string | null;
+}) {
+  const { t } = useTranslation();
+  return (
+    <section className="rounded-lg border border-line bg-surface/30 p-3">
+      <div className="flex items-center gap-2 mb-2">
+        <h2 className="text-[13px] font-medium text-heading">🔋 {t("infra.quotaTitle")}</h2>
+        {updatedLocal && (
+          <span className="text-[11px] text-faint ml-auto tabular-nums">{updatedLocal}</span>
+        )}
+      </div>
+      {providers.length === 0 ? (
+        <div className="text-[11px] text-faint py-2">{t("infra.quotaNoData")}</div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5">
+          {providers.map((p, i) => (
+            <ProviderCard key={p.id ?? `idx-${i}`} provider={p} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProviderCard({ provider: p }: { provider: InfraProvider }) {
+  const { t } = useTranslation();
+  return (
+    <div className="rounded-lg border border-line bg-surface/50 px-3 py-2 min-w-0">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="text-[13px] font-medium text-heading truncate">{p.name ?? p.id ?? "—"}</span>
+        {p.error ? (
+          <span className="text-[11px] text-amber shrink-0" title={p.error}>
+            ⚠
+          </span>
+        ) : null}
+        {p.state && (
+          <span className="ml-auto text-[11px] text-faint shrink-0" title={p.state}>
+            {p.state}
+          </span>
+        )}
+      </div>
+      <QuotaBar label={t("infra.quota5h")} window={p.five_hour} />
+      <QuotaBar label={t("infra.quotaWeek")} window={p.weekly} />
+    </div>
+  );
+}
+
+/** 双水位条之一：剩余百分比 + reset_local 11px 小字；<20% 转 amber。 */
+function QuotaBar({ label, window: w }: { label: string; window?: InfraQuotaWindow | null }) {
+  const pct = typeof w?.remaining_pct === "number" ? w.remaining_pct : null;
+  const warn = quotaWarn(pct);
+  const fill = pct === null ? 0 : Math.min(100, Math.max(0, pct));
+  return (
+    <div className="mt-1.5 min-w-0">
+      <div className="flex items-center gap-1.5 text-[11px] min-w-0">
+        <span className="w-6 shrink-0 text-faint">{label}</span>
+        <span className={`font-mono tabular-nums shrink-0 ${warn ? "text-amber" : "text-body"}`}>
+          {fmtPct(pct)}
+        </span>
+        {w?.reset_local && (
+          <span className="ml-auto text-[11px] text-faint truncate" title={w.reset_local}>
+            {w.reset_local}
+          </span>
+        )}
+      </div>
+      <div className="mt-0.5 h-1.5 rounded-full bg-elevated overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-[width] ${warn ? "bg-amber" : "bg-success"}`}
+          style={{ width: `${fill}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// F2 — 底座状态卡
+// ════════════════════════════════════════════════════════════
+
+function BaseStatusCard({ base }: { base?: InfraBase }) {
+  const { t } = useTranslation();
+  // 边界收窄（对抗审查 F5 红线类）：health 声明为 Record<string,string>，
+  // 但 schema 漂移时 worker 可能是非字符串真值（数字/布尔/对象）——
+  // 非字符串一律按缺失处理（显示 —、灰点），绝不带进渲染。
+  const workerRaw = base?.health?.worker;
+  const worker = typeof workerRaw === "string" ? workerRaw : undefined;
+  const workerTone = toneOf(worker);
+  const workerStateText: Record<string, string> = {
+    ok: t("infra.stateOk"),
+    warn: t("infra.stateWarn"),
+    fail: t("infra.stateFail"),
+  };
+  const workerText =
+    worker != null ? (workerStateText[worker] ?? worker) : "—";
+
+  const queues = queueEntries(base?.queue);
+  const dsh = typeof base?.dsh_today === "number" ? base.dsh_today : null;
+  const dshBar = dshPct(dsh);
+
+  return (
+    <section className="rounded-lg border border-line bg-surface/30 p-3">
+      <h2 className="text-[13px] font-medium text-heading mb-2">🧱 {t("infra.baseTitle")}</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {/* worker 运行态 */}
+        <div className="min-w-0">
+          <div className="text-[11px] text-faint mb-1">{t("infra.workerLabel")}</div>
+          <div className="flex items-center gap-1.5">
+            <span className={`w-2 h-2 rounded-full shrink-0 ${dotCls[workerTone]}`} />
+            <span className={`text-[13px] font-medium ${toneTextCls[workerTone]}`}>{workerText}</span>
+          </div>
+        </div>
+
+        {/* queue 动态键值（实况仅 dead_letter，键集不写死） */}
+        <div className="min-w-0">
+          <div className="text-[11px] text-faint mb-1">{t("infra.queueLabel")}</div>
+          {queues.length === 0 ? (
+            <span className="text-[13px] text-faint">{t("infra.queueEmpty")}</span>
+          ) : (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {queues.map((q) => (
+                <span
+                  key={q.key}
+                  className="text-[11px] px-1.5 py-0.5 rounded bg-elevated font-mono tabular-nums"
+                >
+                  {q.key} {q.value}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* dsh 今日用量水位（日闸 50 来自需求文档，常数在 infraLogic.ts 顶部） */}
+        <div className="min-w-0">
+          <div className="text-[11px] text-faint mb-1">{t("infra.dshToday")}</div>
+          <div className="text-[13px] font-mono tabular-nums text-body">
+            {t("infra.dshUsage", { used: dsh ?? "—", gate: DSH_DAILY_GATE })}
+          </div>
+          <div className="mt-1 h-1.5 rounded-full bg-elevated overflow-hidden">
+            <div
+              className="h-full rounded-full bg-accent"
+              style={{ width: `${dshBar ?? 0}%` }}
+            />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// F3 — 健康指示行（● 点阵）
+// ════════════════════════════════════════════════════════════
+
+function HealthStrip({ health }: { health?: Record<string, string> }) {
+  const { t } = useTranslation();
+  const items = healthItems(health);
+  return (
+    <section className="rounded-lg border border-line bg-surface/30 p-3">
+      <div className="flex items-center gap-2 mb-2">
+        <h2 className="text-[13px] font-medium text-heading">🩺 {t("infra.healthTitle")}</h2>
+        {typeof health?.checked_at === "string" && (
+          <span className="text-[11px] text-faint ml-auto tabular-nums">{health.checked_at}</span>
+        )}
+      </div>
+      {items.length === 0 ? (
+        <div className="text-[11px] text-faint">{t("infra.healthEmpty")}</div>
+      ) : (
+        <div className="flex items-center gap-x-3 gap-y-1.5 flex-wrap">
+          {items.map((it) => {
+            const tone = toneOf(it.value);
+            // title：key: value — detail（warn 项悬停显 _detail，F3/验收第 3 条）
+            const title = `${it.key}: ${it.value}${it.detail ? ` — ${it.detail}` : ""}`;
+            return (
+              <span key={it.key} title={title} className="flex items-center gap-1 text-[11px] whitespace-nowrap">
+                <span className={`w-1.5 h-1.5 rounded-full ${dotCls[tone]}`} />
+                <span className={tone === "success" ? "text-faint" : `${toneTextCls[tone]} font-medium`}>
+                  {it.key}
+                </span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
