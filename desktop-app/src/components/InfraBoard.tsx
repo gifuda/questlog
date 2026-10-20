@@ -10,6 +10,9 @@ import {
   parseSnapshot,
   providerList,
   queueChips,
+  queuedItemsOf,
+  runningItems,
+  sinceLabel,
   recentList,
   taskStatusLabelKey,
   taskStatusTone,
@@ -294,6 +297,9 @@ function BaseStatusCard({ base }: { base?: InfraBase }) {
 
   const queues = queueChips(base?.queue);
   const recents = recentList(base?.recent);
+  const running = runningItems(base?.running_items);
+  const waiting = queuedItemsOf(base?.queued_items);
+  const nowMs = Date.now();
   const dsh = typeof base?.dsh_today === "number" ? base.dsh_today : null;
   const dshBar = dshPct(dsh);
 
@@ -347,6 +353,37 @@ function BaseStatusCard({ base }: { base?: InfraBase }) {
         </div>
       </div>
 
+      {/* schema v2：在办/排队明细清单（有内容才渲染，计数 chips 常驻） */}
+      {running.length > 0 && (
+        <div className="mt-2.5 min-w-0">
+          <div className="text-[11px] text-faint mb-1">{t("infra.runningTitle")}</div>
+          <div className="flex flex-col gap-0.5">
+            {running.map((r, i) => (
+              <div key={r.id ?? `run-${i}`} className="flex items-center gap-2 text-[11px] min-w-0">
+                <span className="text-faint font-mono w-8 shrink-0">#{r.id ?? "?"}</span>
+                <span className="truncate min-w-0" title={r.title}>{r.title}</span>
+                <span className="text-[11px] px-1 rounded bg-info/10 text-info shrink-0 font-mono">{r.harness}</span>
+                <span className="ml-auto text-faint shrink-0 font-mono tabular-nums">{sinceLabel(r.at, nowMs)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {waiting.length > 0 && (
+        <div className="mt-2.5 min-w-0">
+          <div className="text-[11px] text-faint mb-1">{t("infra.queuedListTitle")}</div>
+          <div className="flex flex-col gap-0.5">
+            {waiting.map((r, i) => (
+              <div key={r.id ?? `wait-${i}`} className="flex items-center gap-2 text-[11px] min-w-0">
+                <span className="text-faint font-mono w-8 shrink-0">#{r.id ?? "?"}</span>
+                <span className="truncate min-w-0" title={r.title}>{r.title}</span>
+                <span className="text-[11px] px-1 rounded bg-elevated text-muted shrink-0 font-mono">{r.harness}</span>
+                <span className="ml-auto text-faint shrink-0 font-mono tabular-nums">{sinceLabel(r.at, nowMs)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {/* F7 提前实装：最近任务流水——「刚在办什么」的唯一契约内来源 */}
       <div className="mt-2.5 min-w-0">
         <div className="text-[11px] text-faint mb-1">{t("infra.recentTitle")}</div>

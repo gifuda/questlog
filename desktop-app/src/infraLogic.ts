@@ -284,3 +284,44 @@ export function taskStatusTone(status: string): "success" | "danger" | "accent" 
   if (status === "running") return "accent";
   return "muted";
 }
+
+// ── schema v2：在办/排队明细（全字段守卫） ────────────────────
+
+export interface QueueItem {
+  id: number | null;
+  title: string;
+  harness: string;
+  /** 入队/开始时刻（ISO）；不可解析 → null（时长显示 —）。 */
+  at: string | null;
+}
+
+function toQueueItems(raw: unknown): QueueItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((t): t is Record<string, unknown> => t !== null && typeof t === "object" && !Array.isArray(t))
+    .map((t) => ({
+      id: typeof t.id === "number" ? t.id : null,
+      title: typeof t.title === "string" && t.title ? t.title : "（无标题）",
+      harness: typeof t.harness === "string" ? t.harness : "—",
+      at: typeof (t.enqueued_at ?? t.started_at) === "string" ? ((t.enqueued_at ?? t.started_at) as string) : null,
+    }));
+}
+
+export function runningItems(raw: unknown): QueueItem[] {
+  return toQueueItems(raw);
+}
+
+export function queuedItemsOf(raw: unknown): QueueItem[] {
+  return toQueueItems(raw);
+}
+
+/** 距今时长字符串：ISO 可解析 → 「3分12秒/58秒/1时5分」；否则 —。 */
+export function sinceLabel(iso: string | null, nowMs: number): string {
+  if (!iso) return "—";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "—";
+  const s = Math.max(0, Math.floor((nowMs - t) / 1000));
+  if (s < 60) return `${s}秒`;
+  if (s < 3600) return `${Math.floor(s / 60)}分${s % 60}秒`;
+  return `${Math.floor(s / 3600)}时${Math.floor((s % 3600) / 60)}分`;
+}

@@ -47,6 +47,20 @@ export interface InfraProvider {
 export interface InfraBase {
   /** 实况仅 dead_letter；契约自注「键动态」——视图动态枚举，不写死三键 */
   queue?: Record<string, number>;
+  /** schema v2：排队明细（id/title/harness/enqueued_at，全字段可缺） */
+  queued_items?: {
+    id?: number;
+    title?: string;
+    harness?: string;
+    enqueued_at?: string;
+  }[];
+  /** schema v2：在办明细（started_at 计时） */
+  running_items?: {
+    id?: number;
+    title?: string;
+    harness?: string;
+    started_at?: string;
+  }[];
   recent?: {
     id?: number;
     /** 运行中为 null（尚未结束） */

@@ -24,6 +24,9 @@ import {
   recentList,
   taskStatusLabelKey,
   taskStatusTone,
+  queuedItemsOf,
+  runningItems,
+  sinceLabel,
 } from "./infraLogic";
 
 /** 真实 snapshot-local.json 形状的正常夹具（关键字段原样，其余从简）。 */
@@ -262,6 +265,34 @@ describe("taskStatus 标签与色（未知状态回退原样/中性色）", () =
   it("未知状态：labelKey 空串（UI 回退原样字符串）、色 muted", () => {
     expect(taskStatusLabelKey("weird_state")).toBe("");
     expect(taskStatusTone("weird_state")).toBe("muted");
+  });
+});
+
+describe("schema v2 队列明细（守卫 + 时长）", () => {
+  it("queued/running 元素守卫：null 剔除、title 缺省、enqueued_at/started_at 分别取用", () => {
+    const q = queuedItemsOf([
+      { id: 40, title: "验证任务", harness: "light", enqueued_at: "2026-10-20T11:55:38+08:00" },
+      null,
+      { id: 41 },
+    ]);
+    expect(q).toHaveLength(2);
+    expect(q[0]).toMatchObject({ id: 40, title: "验证任务", harness: "light" });
+    expect(q[1]).toMatchObject({ id: 41, title: "（无标题）", harness: "—", at: null });
+    const r = runningItems([{ id: 7, title: "x", harness: "zcode", started_at: "2026-10-20T11:00:00+08:00" }]);
+    expect(r[0]?.at).toBe("2026-10-20T11:00:00+08:00");
+  });
+  it("sinceLabel：秒/分秒/时分档位；null/坏 ISO → —；未来时刻钳 0", () => {
+    const now = Date.parse("2026-10-20T12:00:00+08:00");
+    expect(sinceLabel("2026-10-20T11:59:30+08:00", now)).toBe("30秒");
+    expect(sinceLabel("2026-10-20T11:56:48+08:00", now)).toBe("3分12秒");
+    expect(sinceLabel("2026-10-20T10:54:00+08:00", now)).toBe("1时6分");
+    expect(sinceLabel(null, now)).toBe("—");
+    expect(sinceLabel("garbage", now)).toBe("—");
+    expect(sinceLabel("2026-10-20T12:10:00+08:00", now)).toBe("0秒");
+  });
+  it("非数组输入 → 空列表", () => {
+    expect(queuedItemsOf(undefined)).toEqual([]);
+    expect(runningItems("x")).toEqual([]);
   });
 });
 

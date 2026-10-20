@@ -458,7 +458,9 @@
     "tsRunning": "执行中",
     "tsQueued": "排队中",
     "tsFailed": "失败",
-    "tsTimeout": "超时"
+    "tsTimeout": "超时",
+    "runningTitle": "在办",
+    "queuedListTitle": "排队中"
   },
   "overview": {
     "empty": "各项目暂无在办事项",
