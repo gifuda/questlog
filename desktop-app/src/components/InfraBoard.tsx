@@ -5,10 +5,14 @@ import {
   DSH_DAILY_GATE,
   dshPct,
   fmtPct,
+  fmtSecs,
   healthItems,
   parseSnapshot,
   providerList,
-  queueEntries,
+  queueChips,
+  recentList,
+  taskStatusLabelKey,
+  taskStatusTone,
   quotaHueColor,
   stalenessState,
   toneOf,
@@ -288,7 +292,8 @@ function BaseStatusCard({ base }: { base?: InfraBase }) {
   const workerText =
     worker != null ? (workerStateText[worker] ?? worker) : "—";
 
-  const queues = queueEntries(base?.queue);
+  const queues = queueChips(base?.queue);
+  const recents = recentList(base?.recent);
   const dsh = typeof base?.dsh_today === "number" ? base.dsh_today : null;
   const dshBar = dshPct(dsh);
 
@@ -305,21 +310,24 @@ function BaseStatusCard({ base }: { base?: InfraBase }) {
           </div>
         </div>
 
-        {/* queue 动态键值（实况仅 dead_letter，键集不写死） */}
+        {/* queue 计数：中文标签 + 语义色（键动态，未知键原样透出） */}
         <div className="min-w-0">
           <div className="text-[11px] text-faint mb-1">{t("infra.queueLabel")}</div>
           {queues.length === 0 ? (
             <span className="text-[13px] text-faint">{t("infra.queueEmpty")}</span>
           ) : (
             <div className="flex items-center gap-1.5 flex-wrap">
-              {queues.map((q) => (
-                <span
-                  key={q.key}
-                  className="text-[11px] px-1.5 py-0.5 rounded bg-elevated font-mono tabular-nums"
-                >
-                  {q.key} {q.value}
-                </span>
-              ))}
+              {queues.map((q) => {
+                const toneCls =
+                  q.tone === "danger" ? "text-danger bg-danger/10" :
+                  q.tone === "success" ? "text-success bg-success/10" :
+                  q.tone === "info" ? "text-info bg-info/10" : "text-faint bg-elevated";
+                return (
+                  <span key={q.key} className={`text-[11px] px-1.5 py-0.5 rounded font-mono tabular-nums ${toneCls}`}>
+                    {q.labelKey ? t(`infra.${q.labelKey}`) : q.key} {q.value}
+                  </span>
+                );
+              })}
             </div>
           )}
         </div>
@@ -337,6 +345,32 @@ function BaseStatusCard({ base }: { base?: InfraBase }) {
             />
           </div>
         </div>
+      </div>
+
+      {/* F7 提前实装：最近任务流水——「刚在办什么」的唯一契约内来源 */}
+      <div className="mt-2.5 min-w-0">
+        <div className="text-[11px] text-faint mb-1">{t("infra.recentTitle")}</div>
+        {recents.length === 0 ? (
+          <div className="text-[11px] text-faint">{t("infra.recentEmpty")}</div>
+        ) : (
+          <div className="flex flex-col gap-0.5">
+            {recents.map((r, i) => {
+              const tone = taskStatusTone(r.status);
+              const toneCls =
+                tone === "success" ? "text-success" : tone === "danger" ? "text-danger" :
+                tone === "accent" ? "text-accent" : "text-faint";
+              const labelKey = taskStatusLabelKey(r.status);
+              return (
+                <div key={r.id ?? `idx-${i}`} className="flex items-center gap-2 text-[11px] font-mono tabular-nums min-w-0">
+                  <span className="text-faint w-8 shrink-0">#{r.id ?? "?"}</span>
+                  <span className="text-body truncate shrink min-w-0" title={r.harness}>{r.harness}</span>
+                  <span className={`${toneCls} shrink-0`}>{labelKey ? t(`infra.${labelKey}`) : r.status}</span>
+                  <span className="ml-auto text-faint shrink-0">{fmtSecs(r.secs)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </section>
   );

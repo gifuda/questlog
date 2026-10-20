@@ -447,7 +447,18 @@
     "dshUsage": "{{used}}/{{gate}} 次",
     "healthTitle": "健康指示",
     "healthEmpty": "暂无健康数据",
-    "quotaLegend": "内圈 5h · 外圈 周"
+    "quotaLegend": "内圈 5h · 外圈 周",
+    "qQueued": "排队",
+    "qRunning": "执行中",
+    "qDead": "死信",
+    "recentTitle": "最近任务",
+    "recentEmpty": "暂无任务记录",
+    "tsResultReady": "已完成",
+    "tsDeadLetter": "死信",
+    "tsRunning": "执行中",
+    "tsQueued": "排队中",
+    "tsFailed": "失败",
+    "tsTimeout": "超时"
   },
   "overview": {
     "empty": "各项目暂无在办事项",

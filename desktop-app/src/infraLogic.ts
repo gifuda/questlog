@@ -132,7 +132,7 @@ export function providerList(raw: unknown): InfraProvider[] {
 /** queue 动态键值枚举：实况仅 dead_letter，契约自注「键动态」——
  *  有什么渲染什么，绝不写死 queued/running 三键假设。 */
 export function queueEntries(
-  queue: Record<string, number> | null | undefined,
+  queue: unknown,
 ): { key: string; value: number }[] {
   if (!queue || typeof queue !== "object") return [];
   const out: { key: string; value: number }[] = [];
@@ -205,4 +205,82 @@ export function fmtSecs(secs: number | null | undefined): string {
 /** 百分比显示：null/NaN → "—"。 */
 export function fmtPct(pct: number | null | undefined): string {
   return typeof pct === "number" && !Number.isNaN(pct) ? `${Math.round(pct)}%` : "—";
+}
+
+// ── 队列与任务流水（键动态/字段可缺，全守卫） ────────────────
+
+/** queue 动态键 → 中文标签（未知键原样透出，契约漂移可见）。 */
+const QUEUE_KEY_LABELS: Record<string, string> = {
+  queued: "qQueued",
+  running: "qRunning",
+  dead_letter: "qDead",
+};
+
+export interface QueueChip {
+  /** 原始键名（稳定 key）。 */
+  key: string;
+  /** i18n key（infra 命名空间内）。 */
+  labelKey: string;
+  value: number;
+  /** dead_letter>0 → danger；running>0 → success；queued>0 → info；值 0 → muted。 */
+  tone: "danger" | "success" | "info" | "muted";
+}
+
+export function queueChips(raw: unknown): QueueChip[] {
+  const entries = queueEntries(raw);
+  return entries.map((e) => {
+    let tone: QueueChip["tone"] = "muted";
+    if (e.value > 0) {
+      if (e.key === "dead_letter") tone = "danger";
+      else if (e.key === "running") tone = "success";
+      else if (e.key === "queued") tone = "info";
+    }
+    return {
+      key: e.key,
+      labelKey: QUEUE_KEY_LABELS[e.key] ?? "",
+      value: e.value,
+      tone,
+    };
+  });
+}
+
+export interface RecentTask {
+  id: number | null;
+  harness: string;
+  status: string;
+  secs: number | null;
+}
+
+/** recent[] 形态守卫（F5 红线类）：null/非对象元素剔除，字段缺失降级。 */
+export function recentList(raw: unknown): RecentTask[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((t): t is Record<string, unknown> => t !== null && typeof t === "object" && !Array.isArray(t))
+    .map((t) => ({
+      id: typeof t.id === "number" ? t.id : null,
+      harness: typeof t.harness === "string" ? t.harness : "—",
+      status: typeof t.status === "string" ? t.status : "—",
+      secs: typeof t.secs === "number" ? t.secs : null,
+    }));
+}
+
+/** 任务状态 → i18n key（infra 命名空间）；未知状态回退原样字符串（空串表示原样）。 */
+export function taskStatusLabelKey(status: string): string {
+  const map: Record<string, string> = {
+    result_ready: "tsResultReady",
+    dead_letter: "tsDeadLetter",
+    running: "tsRunning",
+    queued: "tsQueued",
+    failed: "tsFailed",
+    timeout: "tsTimeout",
+  };
+  return map[status] ?? "";
+}
+
+/** 任务状态 → 展示色。 */
+export function taskStatusTone(status: string): "success" | "danger" | "accent" | "muted" {
+  if (status === "result_ready") return "success";
+  if (status === "dead_letter" || status === "failed" || status === "timeout") return "danger";
+  if (status === "running") return "accent";
+  return "muted";
 }

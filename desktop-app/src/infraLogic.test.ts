@@ -20,6 +20,10 @@ import {
   stalenessState,
   toneOf,
   quotaHueColor,
+  queueChips,
+  recentList,
+  taskStatusLabelKey,
+  taskStatusTone,
 } from "./infraLogic";
 
 /** 真实 snapshot-local.json 形状的正常夹具（关键字段原样，其余从简）。 */
@@ -210,6 +214,54 @@ describe("quotaHueColor（环色 100 蓝 → 0 红连续过渡）", () => {
     expect(quotaHueColor(null)).toBeNull();
     expect(quotaHueColor(undefined)).toBeNull();
     expect(quotaHueColor(Number.NaN)).toBeNull();
+  });
+});
+
+describe("queueChips（标签化 + 语义色）", () => {
+  it("dead_letter>0 → danger；running>0 → success；queued>0 → info；0 值 → muted", () => {
+    const chips = queueChips({ dead_letter: 15, running: 1, queued: 0 });
+    expect(chips.find((c) => c.key === "dead_letter")).toMatchObject({ tone: "danger", labelKey: "qDead" });
+    expect(chips.find((c) => c.key === "running")).toMatchObject({ tone: "success", labelKey: "qRunning" });
+    expect(chips.find((c) => c.key === "queued")).toMatchObject({ tone: "muted", labelKey: "qQueued" });
+  });
+  it("未知键原样透出（labelKey 空串），非对象输入 → 空", () => {
+    expect(queueChips({ mystery_v2: 3 })).toEqual([
+      { key: "mystery_v2", labelKey: "", value: 3, tone: "muted" },
+    ]);
+    expect(queueChips(null)).toEqual([]);
+    expect(queueChips("x")).toEqual([]);
+  });
+});
+
+describe("recentList（F5 守卫）", () => {
+  it("null/非对象元素剔除，字段缺失降级（id→null、harness/status→—、secs→null）", () => {
+    const list = recentList([
+      { id: 38, harness: "light", status: "dead_letter", secs: null },
+      null,
+      "junk",
+      { harness: 1, status: [] },
+    ]);
+    expect(list).toHaveLength(2);
+    expect(list[0]).toMatchObject({ id: 38, harness: "light", status: "dead_letter", secs: null });
+    expect(list[1]).toMatchObject({ id: null, harness: "—", status: "—", secs: null });
+  });
+  it("非数组输入 → 空列表", () => {
+    expect(recentList(undefined)).toEqual([]);
+  });
+});
+
+describe("taskStatus 标签与色（未知状态回退原样/中性色）", () => {
+  it("result_ready→tsResultReady/success；dead_letter→tsDeadLetter/danger；running→tsRunning/accent", () => {
+    expect(taskStatusLabelKey("result_ready")).toBe("tsResultReady");
+    expect(taskStatusTone("result_ready")).toBe("success");
+    expect(taskStatusLabelKey("dead_letter")).toBe("tsDeadLetter");
+    expect(taskStatusTone("dead_letter")).toBe("danger");
+    expect(taskStatusLabelKey("running")).toBe("tsRunning");
+    expect(taskStatusTone("running")).toBe("accent");
+  });
+  it("未知状态：labelKey 空串（UI 回退原样字符串）、色 muted", () => {
+    expect(taskStatusLabelKey("weird_state")).toBe("");
+    expect(taskStatusTone("weird_state")).toBe("muted");
   });
 });
 
