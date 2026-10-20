@@ -19,6 +19,7 @@ import {
   quotaWarn,
   stalenessState,
   toneOf,
+  quotaHueColor,
 } from "./infraLogic";
 
 /** 真实 snapshot-local.json 形状的正常夹具（关键字段原样，其余从简）。 */
@@ -193,6 +194,22 @@ describe("queueEntries（① 动态键不被写死假设）", () => {
     ]);
     expect(queueEntries(undefined)).toEqual([]);
     expect(queueEntries(null)).toEqual([]);
+  });
+});
+
+describe("quotaHueColor（环色 100 蓝 → 0 红连续过渡）", () => {
+  it("100→蓝(hue220)、50→绿(hue110)、0→红(hue0)、20→橙区(hue44)", () => {
+    expect(quotaHueColor(100)).toBe("hsl(220 72% 55%)");
+    expect(quotaHueColor(50)).toBe("hsl(110 72% 55%)");
+    expect(quotaHueColor(0)).toBe("hsl(0 72% 55%)");
+    expect(quotaHueColor(20)).toBe("hsl(44 72% 55%)");
+  });
+  it("越界钳制：-5→红、120→蓝；null/undefined/NaN→null（不画环）", () => {
+    expect(quotaHueColor(-5)).toBe("hsl(0 72% 55%)");
+    expect(quotaHueColor(120)).toBe("hsl(220 72% 55%)");
+    expect(quotaHueColor(null)).toBeNull();
+    expect(quotaHueColor(undefined)).toBeNull();
+    expect(quotaHueColor(Number.NaN)).toBeNull();
   });
 });
 

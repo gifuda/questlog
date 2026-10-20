@@ -108,6 +108,14 @@ export function quotaWarn(pct: number | null | undefined): boolean {
   return typeof pct === "number" && !Number.isNaN(pct) && pct < 20;
 }
 
+/** 额度环色：剩余 100%→0% 由蓝（hue 220）连续过渡到红（hue 0），
+ * 中途自然经过绿（50%）/黄橙（~20%）。null/非数 → null（无数据不画环）。 */
+export function quotaHueColor(pct: number | null | undefined): string | null {
+  if (typeof pct !== "number" || Number.isNaN(pct)) return null;
+  const clamped = Math.min(100, Math.max(0, pct));
+  return `hsl(${Math.round(220 * (clamped / 100))} 72% 55%)`;
+}
+
 /** providers[] 元素形态守卫（F5 白屏红线类）：null/数字/字符串/数组元素
  *  剔除，仅保留形态完整的供应商对象——schema 漂移时坏元素不渲染不连坐
  *  整卡，其余有效项照常展示。非数组输入 → 空列表。 */

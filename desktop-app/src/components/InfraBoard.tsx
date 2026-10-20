@@ -9,7 +9,7 @@ import {
   parseSnapshot,
   providerList,
   queueEntries,
-  quotaWarn,
+  quotaHueColor,
   stalenessState,
   toneOf,
 } from "../infraLogic";
@@ -231,7 +231,8 @@ function ProviderCard({ provider: p }: { provider: InfraProvider }) {
 
 /**
  * 同心圆双环仪表：外环=周额度、内环=5h 额度（图例在卡头）。
- * 橙色填充；<20%（quotaWarn）转 danger 红。pct null 时整环画满轨道色。
+ * 环色随剩余额度连续过渡：100% 蓝 → 50% 绿 → 0% 红（quotaHueColor）。
+ * pct null 时只画轨道（无数据不着色）。
  */
 function RingGauge({ innerPct, outerPct }: { innerPct: number | null; outerPct: number | null }) {
   const R_OUT = 30;
@@ -241,27 +242,24 @@ function RingGauge({ innerPct, outerPct }: { innerPct: number | null; outerPct: 
   const clamp = (v: number | null) => (v === null ? null : Math.min(100, Math.max(0, v)));
   const i = clamp(innerPct);
   const o = clamp(outerPct);
-  const ring = (r: number, c: number, pct: number | null) => {
-    const warn = quotaWarn(pct);
-    return (
-      <>
-        <circle cx="36" cy="36" r={r} fill="none" strokeWidth="5.5" className="stroke-elevated" />
-        {pct !== null && (
-          <circle
-            cx="36"
-            cy="36"
-            r={r}
-            fill="none"
-            strokeWidth="5.5"
-            strokeLinecap="round"
-            className={warn ? "stroke-danger" : "stroke-orange"}
-            strokeDasharray={pct === null ? "none" : `${(pct / 100) * c} ${c}`}
-            transform="rotate(-90 36 36)"
-          />
-        )}
-      </>
-    );
-  };
+  const ring = (r: number, c: number, pct: number | null) => (
+    <>
+      <circle cx="36" cy="36" r={r} fill="none" strokeWidth="5.5" className="stroke-elevated" />
+      {pct !== null && (
+        <circle
+          cx="36"
+          cy="36"
+          r={r}
+          fill="none"
+          strokeWidth="5.5"
+          strokeLinecap="round"
+          stroke={quotaHueColor(pct) ?? undefined}
+          strokeDasharray={`${(pct / 100) * c} ${c}`}
+          transform="rotate(-90 36 36)"
+        />
+      )}
+    </>
+  );
   return (
     <svg width="72" height="72" viewBox="0 0 72 72" role="img">
       {ring(R_OUT, C_OUT, o)}
