@@ -15,6 +15,7 @@
   --color-accent-bg: var(--c-accent-bg);
   --color-amber: var(--c-amber);
   --color-amber-bg: var(--c-amber-bg);
+  --color-orange: var(--c-orange);
   --color-success: var(--c-success);
   --color-danger: var(--c-danger);
   --color-info: var(--c-info);
@@ -42,6 +43,7 @@
   --c-accent: #5ea2ff;
   --c-accent-bg: rgba(94, 162, 255, 0.12);
   /* 警示双色拉开色相：琥珀偏黄（等待/注意），红偏品红（阻塞/危险） */
+  --c-orange: #fb923c;
   --c-amber: #f5cd47;
   --c-amber-bg: rgba(245, 205, 71, 0.1);
   --c-success: #57c98a;
@@ -65,6 +67,7 @@
   --c-faint: #9ca3af;
   --c-accent: #3b82f6;
   --c-accent-bg: #eff6ff;
+  --c-orange: #ea580c;
   --c-amber: #854d0e;
   --c-amber-bg: #fef9c3;
   --c-success: #16a34a;

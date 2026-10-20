@@ -182,8 +182,9 @@ function QuotaCard({
   const { t } = useTranslation();
   return (
     <section className="rounded-lg border border-line bg-surface/30 p-3">
-      <div className="flex items-center gap-2 mb-2">
+      <div className="flex items-center gap-2 mb-1.5">
         <h2 className="text-[13px] font-medium text-heading">🔋 {t("infra.quotaTitle")}</h2>
+        <span className="text-[11px] text-faint">{t("infra.quotaLegend")}</span>
         {updatedLocal && (
           <span className="text-[11px] text-faint ml-auto tabular-nums">{updatedLocal}</span>
         )}
@@ -191,7 +192,7 @@ function QuotaCard({
       {providers.length === 0 ? (
         <div className="text-[11px] text-faint py-2">{t("infra.quotaNoData")}</div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5">
+        <div className="grid grid-cols-4 gap-2">
           {providers.map((p, i) => (
             <ProviderCard key={p.id ?? `idx-${i}`} provider={p} />
           ))}
@@ -203,52 +204,69 @@ function QuotaCard({
 
 function ProviderCard({ provider: p }: { provider: InfraProvider }) {
   const { t } = useTranslation();
+  const five = typeof p.five_hour?.remaining_pct === "number" ? p.five_hour.remaining_pct : null;
+  const week = typeof p.weekly?.remaining_pct === "number" ? p.weekly.remaining_pct : null;
+  const tip =
+    `${t("infra.quota5h")} ${fmtPct(five)}` +
+    (p.five_hour?.reset_local ? `（重置于 ${p.five_hour.reset_local}）` : "") +
+    ` · ${t("infra.quotaWeek")} ${fmtPct(week)}` +
+    (p.weekly?.reset_local ? `（重置于 ${p.weekly.reset_local}）` : "") +
+    (p.error ? ` · ${p.error}` : "") +
+    (p.state ? ` · ${p.state}` : "");
   return (
-    <div className="rounded-lg border border-line bg-surface/50 px-3 py-2 min-w-0">
-      <div className="flex items-center gap-1.5 min-w-0">
-        <span className="text-[13px] font-medium text-heading truncate">{p.name ?? p.id ?? "—"}</span>
-        {p.error ? (
-          <span className="text-[11px] text-amber shrink-0" title={p.error}>
-            ⚠
-          </span>
-        ) : null}
-        {p.state && (
-          <span className="ml-auto text-[11px] text-faint shrink-0" title={p.state}>
-            {p.state}
-          </span>
-        )}
+    <div className="flex flex-col items-center min-w-0" title={tip}>
+      <RingGauge innerPct={five} outerPct={week} />
+      <div className="mt-1 flex items-center gap-1 min-w-0">
+        <span className="text-[11px] font-medium text-heading truncate">
+          {p.name ?? p.id ?? "—"}
+        </span>
+        {p.error ? <span className="text-[11px] text-amber shrink-0">⚠</span> : null}
       </div>
-      <QuotaBar label={t("infra.quota5h")} window={p.five_hour} />
-      <QuotaBar label={t("infra.quotaWeek")} window={p.weekly} />
+      <div className="text-[11px] font-mono tabular-nums text-body">
+        {fmtPct(five)} <span className="text-faint">/</span> {fmtPct(week)}
+      </div>
     </div>
   );
 }
 
-/** 双水位条之一：剩余百分比 + reset_local 11px 小字；<20% 转 amber。 */
-function QuotaBar({ label, window: w }: { label: string; window?: InfraQuotaWindow | null }) {
-  const pct = typeof w?.remaining_pct === "number" ? w.remaining_pct : null;
-  const warn = quotaWarn(pct);
-  const fill = pct === null ? 0 : Math.min(100, Math.max(0, pct));
-  return (
-    <div className="mt-1.5 min-w-0">
-      <div className="flex items-center gap-1.5 text-[11px] min-w-0">
-        <span className="w-6 shrink-0 text-faint">{label}</span>
-        <span className={`font-mono tabular-nums shrink-0 ${warn ? "text-amber" : "text-body"}`}>
-          {fmtPct(pct)}
-        </span>
-        {w?.reset_local && (
-          <span className="ml-auto text-[11px] text-faint truncate" title={w.reset_local}>
-            {w.reset_local}
-          </span>
+/**
+ * 同心圆双环仪表：外环=周额度、内环=5h 额度（图例在卡头）。
+ * 橙色填充；<20%（quotaWarn）转 danger 红。pct null 时整环画满轨道色。
+ */
+function RingGauge({ innerPct, outerPct }: { innerPct: number | null; outerPct: number | null }) {
+  const R_OUT = 30;
+  const R_IN = 21.5;
+  const C_OUT = 2 * Math.PI * R_OUT;
+  const C_IN = 2 * Math.PI * R_IN;
+  const clamp = (v: number | null) => (v === null ? null : Math.min(100, Math.max(0, v)));
+  const i = clamp(innerPct);
+  const o = clamp(outerPct);
+  const ring = (r: number, c: number, pct: number | null) => {
+    const warn = quotaWarn(pct);
+    return (
+      <>
+        <circle cx="36" cy="36" r={r} fill="none" strokeWidth="5.5" className="stroke-elevated" />
+        {pct !== null && (
+          <circle
+            cx="36"
+            cy="36"
+            r={r}
+            fill="none"
+            strokeWidth="5.5"
+            strokeLinecap="round"
+            className={warn ? "stroke-danger" : "stroke-orange"}
+            strokeDasharray={pct === null ? "none" : `${(pct / 100) * c} ${c}`}
+            transform="rotate(-90 36 36)"
+          />
         )}
-      </div>
-      <div className="mt-0.5 h-1.5 rounded-full bg-elevated overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-[width] ${warn ? "bg-amber" : "bg-success"}`}
-          style={{ width: `${fill}%` }}
-        />
-      </div>
-    </div>
+      </>
+    );
+  };
+  return (
+    <svg width="72" height="72" viewBox="0 0 72 72" role="img">
+      {ring(R_OUT, C_OUT, o)}
+      {ring(R_IN, C_IN, i)}
+    </svg>
   );
 }
 
