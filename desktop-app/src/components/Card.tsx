@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
+import { invoke } from "@tauri-apps/api/core";
 import type { TodoItem } from "../types";
 import type { TodoTaskLink } from "../hooks/useFleetHealth";
 import { updateItem } from "../hooks/useStore";
@@ -45,6 +46,8 @@ export default function Card({ item, projectPath, onRefresh, dimmed, scheduleEna
   const [copied, setCopied] = useState(false);
   const [showMove, setShowMove] = useState(false);
   const moveRef = useRef<HTMLDivElement>(null);
+  // 夜间报告复核弹层：open 控制，text/error/loading 三态
+  const [report, setReport] = useState<{ open: boolean; text?: string; error?: string; loading?: boolean }>({ open: false });
 
   useEffect(() => {
     if (!showMove) return;
@@ -75,6 +78,20 @@ export default function Card({ item, projectPath, onRefresh, dimmed, scheduleEna
   async function handleStatus(status: string) {
     await updateItem(projectPath, item.id, { status: status as TodoItem["status"] });
     onRefresh();
+  }
+
+  /** 打开夜间执行报告弹层（只读归档，报告根在 todo-reports/<项目名>/ 下）。 */
+  async function handleViewReport() {
+    const ref = item.auto_result?.report_ref;
+    if (!ref) return;
+    setReport({ open: true, loading: true });
+    const tenant = projectPath.split("/").filter(Boolean).pop() ?? "";
+    try {
+      const text = await invoke<string>("read_auto_report", { tenant, reportRef: ref });
+      setReport({ open: true, text });
+    } catch (e) {
+      setReport({ open: true, error: String(e) });
+    }
   }
 
   async function handleMoveType(newType: string) {
@@ -153,12 +170,14 @@ export default function Card({ item, projectPath, onRefresh, dimmed, scheduleEna
                 </Badge>
               )}
               {!dimmed && item.auto_result && (
-                <Badge
-                  tone={item.status === "completed" && item.auto_completed_at ? "success" : "amber"}
-                  className="mr-1.5"
-                >
-                  {t(`card.autoOutcome.${item.auto_result.outcome}`, item.auto_result.outcome)}
-                </Badge>
+                <span title={item.auto_result.reason_code ?? undefined} className="inline-flex">
+                  <Badge
+                    tone={item.status === "completed" && item.auto_completed_at ? "success" : "amber"}
+                    className="mr-1.5"
+                  >
+                    {t(`card.autoOutcome.${item.auto_result.outcome}`, item.auto_result.outcome)}
+                  </Badge>
+                </span>
               )}
               {item.title}
             </h3>
@@ -198,6 +217,58 @@ export default function Card({ item, projectPath, onRefresh, dimmed, scheduleEna
             >
               {t("card.autoCancelShort")}
             </button>
+          )}
+        </div>
+      )}
+
+      {/* 夜间复核出口：needs_review 报告的人工裁决（查看报告 / 通过 / 驳回），
+          裁决后展示结论；通过走「待确认区→确认」两步，与机器 accepted 对称 */}
+      {item.auto_result && item.auto_result.outcome === "needs_review" && !dimmed && (
+        <div className="flex items-center gap-2 mt-1.5 text-[11px]">
+          {item.auto_result.review_verdict ? (
+            <span
+              className={
+                item.auto_result.review_verdict === "accepted" ? "text-success" : "text-amber"
+              }
+            >
+              {item.auto_result.review_verdict === "accepted"
+                ? t("card.reviewAccepted")
+                : t("card.reviewRejected")}
+            </span>
+          ) : (
+            item.status === "active" && (
+              <>
+                {item.auto_result.report_ref && (
+                  <button
+                    className="text-accent hover:underline"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleViewReport();
+                    }}
+                  >
+                    {t("card.reviewReport")}
+                  </button>
+                )}
+                <button
+                  className="text-success hover:underline"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    updateItem(projectPath, item.id, { auto_review: "accepted" }).then(onRefresh);
+                  }}
+                >
+                  {t("card.reviewAccept")}
+                </button>
+                <button
+                  className="text-amber hover:underline"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    updateItem(projectPath, item.id, { auto_review: "rejected" }).then(onRefresh);
+                  }}
+                >
+                  {t("card.reviewReject")}
+                </button>
+              </>
+            )
           )}
         </div>
       )}
@@ -346,6 +417,34 @@ export default function Card({ item, projectPath, onRefresh, dimmed, scheduleEna
           >
             {t("card.restore")}
           </button>
+        </div>
+      )}
+
+      {/* 夜间执行报告弹层（只读） */}
+      {report.open && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6"
+          onClick={() => setReport({ open: false })}
+        >
+          <div
+            className="max-w-3xl w-full max-h-[80vh] flex flex-col rounded-lg border border-line bg-elevated shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-line shrink-0">
+              <span className="text-[13px] font-medium text-heading">{t("card.reportTitle")}</span>
+              <button
+                className="text-[11px] text-muted hover:text-heading px-2 py-0.5 rounded transition-colors"
+                onClick={() => setReport({ open: false })}
+              >
+                {t("card.cancel")}
+              </button>
+            </div>
+            <div className="overflow-auto px-4 py-3 text-[13px] text-body whitespace-pre-wrap break-words">
+              {report.loading
+                ? t("card.reportLoading")
+                : report.error ?? report.text ?? ""}
+            </div>
+          </div>
         </div>
       )}
     </div>

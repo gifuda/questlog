@@ -76,6 +76,13 @@
       "cancelled": "已取消",
       "preflight_blocked": "前置阻断"
     },
+    "reviewReport": "查看报告",
+    "reviewAccept": "通过",
+    "reviewReject": "驳回",
+    "reviewAccepted": "✅ 已人工复核通过",
+    "reviewRejected": "⛔ 已人工驳回",
+    "reportTitle": "夜间执行报告",
+    "reportLoading": "报告加载中…",
     "autoOn": "🌙 夜间自动",
     "autoOff": "夜间自动",
     "autoToggleTitle": "开关：允许采集机在夜间窗口（03:00–06:00）自动执行这条只读研究待办并回写结果",

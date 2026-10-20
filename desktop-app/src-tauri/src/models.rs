@@ -95,6 +95,13 @@ pub struct AutoResult {
     pub reason_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification_level: Option<String>,
+    /// 人工复核裁决（needs_review 出口）：None=尚未复核。
+    /// accepted=人认可报告 → 与机器 accepted 同语义（completed+待确认区）；
+    /// rejected=人工驳回 → 卡片保持 active 等人工接手。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_verdict: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<String>,
 }
 
 fn is_zero_u32(v: &u32) -> bool {

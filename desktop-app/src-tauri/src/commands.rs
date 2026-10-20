@@ -168,6 +168,7 @@ pub fn update_todo(
     processing: Option<bool>,
     auto_process: Option<bool>,
     auto_ack: Option<bool>,
+    auto_review: Option<String>,
 ) -> Result<(), String> {
     if crate::remote_client::enabled() {
         let body = serde_json::json!({
@@ -182,6 +183,7 @@ pub fn update_todo(
             "processing": processing,
             "auto_process": auto_process,
             "auto_ack": auto_ack,
+            "auto_review": auto_review,
         });
         crate::remote_client::post_json("/api/todos/update", &body)?;
         return Ok(());
@@ -200,6 +202,7 @@ pub fn update_todo(
         processing,
         auto_process,
         auto_ack,
+        auto_review,
     )
 }
 
@@ -218,9 +221,12 @@ pub fn update_todo_impl(
     processing: Option<bool>,
     auto_process: Option<bool>,
     auto_ack: Option<bool>,
+    auto_review: Option<String>,
 ) -> Result<(), String> {
     let path = validate_project_path_list(&project_path, projects)?;
     let mut archived_quickly = false;
+    // 夜间账本定位用的 attempt_id（闭包内捕获，写回成功后再做步骤联动）
+    let mut nightly_attempt: Option<String> = None;
 
     // G1: every .todos.json write goes through mutate_todos — cross-process
     // lock held for the whole read-modify-write, unknown fields preserved.
@@ -275,6 +281,36 @@ pub fn update_todo_impl(
                 typed.auto_ack_at = Some(chrono::Utc::now().to_rfc3339());
             }
         }
+        // 夜间复核出口（needs_review 人工裁决）：accepted=人认可报告 → 与机器
+        // accepted 同语义（completed + 进待确认区，随后走 auto_ack 确认）；
+        // rejected=人工驳回 → 卡片保持 active 等人工接手。只允许复核一次，
+        // 且卡片必须已有夜间执行结果（否则是普通待办，无报告可复核）。
+        if let Some(verdict) = &auto_review {
+            if verdict != "accepted" && verdict != "rejected" {
+                return Err(format!("invalid auto_review verdict: {verdict}"));
+            }
+            if typed
+                .auto_result
+                .as_ref()
+                .and_then(|a| a.review_verdict.as_ref())
+                .is_some()
+            {
+                return Err("auto_review already recorded for this item".into());
+            }
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Some(ar) = typed.auto_result.as_mut() {
+                ar.review_verdict = Some(verdict.clone());
+                ar.reviewed_at = Some(now.clone());
+            } else {
+                return Err("auto_review requires a nightly auto_result on this item".into());
+            }
+            if verdict == "accepted" {
+                typed.status = ItemStatus::Completed;
+                typed.auto_completed_at = Some(now);
+                typed.processing = false;
+            }
+        }
+        nightly_attempt = typed.auto_result.as_ref().and_then(|a| a.attempt_id.clone());
         if let Some(ap) = auto_process {
             if ap && typed.item_type != ItemType::Todo {
                 return Err("auto_process opt-in is only valid for type='todo' items".into());
@@ -307,11 +343,175 @@ pub fn update_todo_impl(
         Ok(())
     })?;
 
+    // 夜间复核闭环·步骤联动：人工通过 → verified；用户确认(auto_ack) →
+    // observed（并在全步骤 observed 时自动收口方案）。卡片是主记录，账本或
+    // 步骤缺失时联动静默跳过，不影响复核本身。
+    let wanted_stage = if auto_review.as_deref() == Some("accepted") {
+        Some(crate::models::StepStage::Verified)
+    } else if auto_ack == Some(true) {
+        Some(crate::models::StepStage::Observed)
+    } else {
+        None
+    };
+    if let Some(stage) = wanted_stage {
+        advance_nightly_step_for_todo(&project_path, &id, nightly_attempt.as_deref(), stage);
+    }
+
     if archived_quickly {
         discovery::record_archived_soon(&project_path);
     }
 
     Ok(())
+}
+
+/// 夜间复核闭环：把待办关联的 auto-epic 步骤推进到 stage。
+/// 定位规则：夜间账本按 todo_id 匹配，attempt_id 给定时与
+/// finalization.attempt_id 精确对齐（重派后旧 attempt 的步骤不被误推），
+/// 否则取 updated_at 最新且带 step_id 的 entry。账本不可读/无匹配时跳过。
+fn advance_nightly_step_for_todo(
+    project_path: &str,
+    todo_id: &str,
+    attempt_id: Option<&str>,
+    stage: crate::models::StepStage,
+) {
+    // 账本是全机共享的：tenant（项目目录名）必须对上才认领，防止手写短 id
+    // 跨项目误推（对抗审查 F4）
+    let tenant = std::path::Path::new(project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let entries = crate::todo_ledger::read_ledger()
+        .ok()
+        .map(|l| l.entries)
+        .unwrap_or_default();
+    advance_nightly_step_with_entries(entries, project_path, &tenant, todo_id, attempt_id, stage);
+}
+
+fn advance_nightly_step_with_entries(
+    entries: std::collections::HashMap<String, crate::todo_ledger::LedgerEntry>,
+    project_path: &str,
+    tenant: &str,
+    todo_id: &str,
+    attempt_id: Option<&str>,
+    stage: crate::models::StepStage,
+) {
+    let mut chosen: Option<&crate::todo_ledger::LedgerEntry> = None;
+    for e in entries.values() {
+        if e.todo_id != todo_id || e.tenant_id != tenant || e.step_id.is_empty() {
+            continue;
+        }
+        if let Some(want) = attempt_id {
+            let att = e
+                .finalization
+                .as_ref()
+                .map(|f| f.attempt_id.as_str())
+                .unwrap_or("");
+            if att != want {
+                continue;
+            }
+        }
+        let better = match chosen {
+            None => true,
+            Some(c) => e.updated_at > c.updated_at,
+        };
+        if better {
+            chosen = Some(e);
+        }
+    }
+    let Some(entry) = chosen else { return };
+    let step_id = entry.step_id.clone();
+    let is_observed = matches!(stage, crate::models::StepStage::Observed);
+    crate::runner::Runner::advance_step_stage(project_path, &step_id, stage);
+    if !is_observed {
+        return;
+    }
+    // observed 联动收口：与 update_epic_impl 的 done 硬门禁同一谓词
+    // （epic_progress==100；混合层级取子方案均值，不绕过门禁——对抗审查 F1）。
+    let dir = std::path::PathBuf::from(project_path);
+    let _ = crate::epic_store::mutate_epics(&dir, |data| {
+        let Some(eid) = data
+            .steps
+            .iter()
+            .find(|s| s.id == step_id)
+            .map(|s| s.epic_id.clone())
+        else {
+            return Ok(());
+        };
+        if crate::epic_store::epic_progress(&eid, data) == 100 {
+            if let Some(epic) = data.epics.iter_mut().find(|e| e.id == eid) {
+                use crate::models::EpicStatus as ES;
+                match epic.status {
+                    ES::Active | ES::Verifying | ES::Observing => epic.status = ES::Done,
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    });
+}
+
+/// 读取夜间执行的归档报告（只读，供 needs_review 人工复核）。
+/// tenant=项目名，report_ref 来自卡片 auto_result.report_ref
+/// （<todo_id>/<attempt_id>/report.md），实际文件在
+/// todo-reports/<tenant>/<todo_id>/<attempt_id>/report.md（remote 模式下
+/// reports_dir 已重根到镜像）。路径限制在 todo-reports 根内，超 256KB 截断。
+#[tauri::command]
+pub fn read_auto_report(tenant: String, report_ref: String) -> Result<String, String> {
+    read_auto_report_impl(&tenant, &report_ref)
+}
+
+pub fn read_auto_report_impl(tenant: &str, report_ref: &str) -> Result<String, String> {
+    if tenant.is_empty()
+        || report_ref.is_empty()
+        || tenant.starts_with('/')
+        || report_ref.starts_with('/')
+    {
+        return Err("invalid report reference".into());
+    }
+    // 读写对称：目录段（tenant/todo/attempt）与写侧同规则 sanitize（项目名含
+    // 空格/点时写盘已归一，读侧不归一则永远 404；".." 段也被归一为 "__"）；
+    // 末段是文件名（写侧保留字面 report.md），不归一，只拒绝 . / ..
+    let seg = |s: &str| {
+        s.split('/')
+            .map(crate::todo_finalization::sanitize)
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let ref_parts: Vec<&str> = report_ref.split('/').collect();
+    let Some(file_part) = ref_parts.last() else {
+        return Err("invalid report reference".into());
+    };
+    if file_part.is_empty() || *file_part == "." || *file_part == ".." {
+        return Err("invalid report reference".into());
+    }
+    let dir_part = seg(&ref_parts[..ref_parts.len() - 1].join("/"));
+    let base = crate::todo_ledger::reports_dir();
+    let path = base.join(seg(tenant)).join(dir_part).join(file_part);
+    let canon = std::fs::canonicalize(&path).map_err(|e| format!("report not found: {e}"))?;
+    let base_canon =
+        std::fs::canonicalize(&base).map_err(|e| format!("todo-reports root missing: {e}"))?;
+    if !canon.starts_with(&base_canon) {
+        return Err("report path escapes todo-reports root".into());
+    }
+    if !std::fs::metadata(&canon)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+    {
+        return Err("report reference is not a file".into());
+    }
+    let mut text = std::fs::read_to_string(&canon).map_err(|e| e.to_string())?;
+    const CAP: usize = 256 * 1024;
+    if text.len() > CAP {
+        // 回退到字符边界再截断——中文报告下 CAP 大概率落在多字节字符内，
+        // 直接 truncate 会 panic（对抗审查 F2）
+        let mut cap = CAP;
+        while cap > 0 && !text.is_char_boundary(cap) {
+            cap -= 1;
+        }
+        text.truncate(cap);
+        text.push_str("\n\n…（超长截断）");
+    }
+    Ok(text)
 }
 
 #[tauri::command]
@@ -2679,6 +2879,454 @@ mod tests {
     fn arr_len_zero_for_empty_object() {
         let v = serde_json::json!({});
         assert_eq!(arr_len(&v), 0);
+    }
+
+    // ── 夜间复核闭环：needs_review 人工裁决 + ack→observed→epic 收口 ──
+
+    use crate::execution_store::TEST_LOCK;
+
+    /// 临时项目（.todos.json + .epics.json）+ 隔离 runtime（账本/报告根）。
+    /// items[0] = needs_review 待办（attempt att-1）；epic e1/steps 按参数定制。
+    fn review_fixture(
+        steps_json: serde_json::Value,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("QUESTLOG_RUNTIME", dir.path().join("runtime"));
+        std::fs::create_dir_all(crate::execution_store::runtime_dir()).unwrap();
+        let p = dir.path().join("proj");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            p.join(".todos.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1, "project": "proj", "revision": 1,
+                "items": [{
+                    "id": "t1", "type": "todo", "title": "夜间任务",
+                    "content": "目标。", "suggestion": "报告",
+                    "tags": [], "status": "active", "priority": "high",
+                    "source_session": "", "created_at": "2026", "updated_at": "2026",
+                    "auto_process": true, "auto_process_revision": 1,
+                    "auto_result": {
+                        "outcome": "needs_review", "attempt_id": "att-1",
+                        "report_ref": "t1/att-1/report.md", "report_hash": "h",
+                        "reason_code": "evidence reference not present"
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            p.join(".epics.json"),
+            serde_json::to_string(&serde_json::json!({
+                "version": 1, "project": "proj", "revision": 1,
+                "epics": [{"id": "e1", "title": "自动处理·夜间任务", "description": "",
+                           "status": "active", "priority": "P2", "depends_on": [],
+                           "blocks": [], "links": {},
+                           "created_at": "2026", "updated_at": "2026"}],
+                "steps": steps_json
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // 账本：t1 → step s1（attempt att-1 已终结）
+        crate::todo_ledger::mutate_ledger(|entries| {
+            entries.insert(
+                "k1".into(),
+                crate::todo_ledger::LedgerEntry {
+                    task_key: "k1".into(),
+                    tenant_id: "proj".into(),
+                    todo_id: "t1".into(),
+                    task_revision: "r".into(),
+                    consent_revision: 1,
+                    operation_id: "op".into(),
+                    state: crate::todo_ledger::LedgerState::Closed,
+                    epic_id: "e1".into(),
+                    step_id: "s1".into(),
+                    package_id: "pkg".into(),
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                    finalization: Some(crate::todo_ledger::FinalizationRecord {
+                        state: "applied".into(),
+                        attempt_id: "att-1".into(),
+                        report_hash: "h".into(),
+                        outcome: "needs_review".into(),
+                        updated_at: "2026-01-01T00:00:00Z".into(),
+                    }),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        (dir, p, guard)
+    }
+
+    fn read_back(p: &std::path::Path, file: &str) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(p.join(file)).unwrap()).unwrap()
+    }
+
+    fn one_step(stage: &str) -> serde_json::Value {
+        serde_json::json!([{
+            "id": "s1", "epic_id": "e1", "title": "S", "description": "",
+            "order": 1, "depends_on": [], "stage": stage, "links": {},
+            "created_at": "2026", "updated_at": "2026"
+        }])
+    }
+
+    #[test]
+    fn auto_review_accepted_completes_card_and_advances_verified() {
+        let (_dir, p, _guard) = review_fixture(one_step("pending"));
+        update_todo_impl(
+            &[("proj".into(), p.clone())],
+            p.to_string_lossy().to_string(),
+            "t1".into(),
+            None, None, None, None, None, None, None, None, None,
+            Some("accepted".into()),
+        )
+        .unwrap();
+        let todos = read_back(&p, ".todos.json");
+        let it = &todos["items"][0];
+        assert_eq!(it["status"], "completed");
+        assert!(it["auto_completed_at"].as_str().is_some());
+        assert_eq!(it["auto_result"]["review_verdict"], "accepted");
+        // 卡片已进待确认区语义：completed + auto_completed_at，但尚未 ack
+        assert!(it["auto_ack_at"].is_null());
+        let epics = read_back(&p, ".epics.json");
+        assert_eq!(epics["steps"][0]["stage"], "verified");
+        // verified（非 observed）不收口 epic
+        assert_eq!(epics["epics"][0]["status"], "active");
+    }
+
+    #[test]
+    fn auto_review_rejected_keeps_active_and_step_untouched() {
+        let (_dir, p, _guard) = review_fixture(one_step("pending"));
+        update_todo_impl(
+            &[("proj".into(), p.clone())],
+            p.to_string_lossy().to_string(),
+            "t1".into(),
+            None, None, None, None, None, None, None, None, None,
+            Some("rejected".into()),
+        )
+        .unwrap();
+        let todos = read_back(&p, ".todos.json");
+        let it = &todos["items"][0];
+        assert_eq!(it["status"], "active");
+        assert_eq!(it["auto_result"]["review_verdict"], "rejected");
+        assert!(it["auto_completed_at"].is_null());
+        let epics = read_back(&p, ".epics.json");
+        assert_eq!(epics["steps"][0]["stage"], "pending");
+    }
+
+    #[test]
+    fn auto_review_rejects_bad_verdict_repeat_and_missing_result() {
+        let (_dir, p, _guard) = review_fixture(one_step("pending"));
+        let proj = p.to_string_lossy().to_string();
+        let args: (&[(String, std::path::PathBuf)], String) =
+            (&[("proj".into(), p.clone())], proj.clone());
+        // 非法裁决值
+        assert!(update_todo_impl(
+            args.0, proj.clone(), "t1".into(),
+            None, None, None, None, None, None, None, None, None,
+            Some("maybe".into()),
+        )
+        .is_err());
+        // 复核两次
+        update_todo_impl(
+            args.0, proj.clone(), "t1".into(),
+            None, None, None, None, None, None, None, None, None,
+            Some("accepted".into()),
+        )
+        .unwrap();
+        assert!(update_todo_impl(
+            args.0, proj.clone(), "t1".into(),
+            None, None, None, None, None, None, None, None, None,
+            Some("rejected".into()),
+        )
+        .is_err());
+        // 无 auto_result 的普通待办
+        std::fs::write(
+            p.join(".todos.json"),
+            serde_json::to_string(&serde_json::json!({
+                "version": 1, "project": "proj",
+                "items": [{"id": "t2", "type": "todo", "title": "普通",
+                           "content": "", "suggestion": "", "tags": [],
+                           "status": "active", "priority": "medium",
+                           "source_session": "", "created_at": "2026", "updated_at": "2026"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(update_todo_impl(
+            args.0, proj.clone(), "t2".into(),
+            None, None, None, None, None, None, None, None, None,
+            Some("accepted".into()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn auto_ack_advances_observed_and_closes_all_observed_epic() {
+        let (_dir, p, _guard) = review_fixture(one_step("verified"));
+        // 先把卡片置为机器完成态（completed + auto_completed_at）
+        std::fs::write(
+            p.join(".todos.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1, "project": "proj", "revision": 1,
+                "items": [{
+                    "id": "t1", "type": "todo", "title": "夜间任务",
+                    "content": "", "suggestion": "", "tags": [],
+                    "status": "completed", "priority": "high",
+                    "source_session": "", "created_at": "2026", "updated_at": "2026",
+                    "auto_process": true, "auto_process_revision": 1,
+                    "auto_completed_at": "2026-01-02T00:00:00Z",
+                    "auto_result": {
+                        "outcome": "accepted_report", "attempt_id": "att-1",
+                        "report_ref": "t1/att-1/report.md", "report_hash": "h"
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        update_todo_impl(
+            &[("proj".into(), p.clone())],
+            p.to_string_lossy().to_string(),
+            "t1".into(),
+            None, None, None, None, None, None, None, None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        let todos = read_back(&p, ".todos.json");
+        assert!(todos["items"][0]["auto_ack_at"].as_str().is_some());
+        let epics = read_back(&p, ".epics.json");
+        assert_eq!(epics["steps"][0]["stage"], "observed");
+        assert_eq!(epics["epics"][0]["status"], "done");
+    }
+
+    #[test]
+    fn auto_ack_leaves_epic_open_with_pending_sibling() {
+        let steps = serde_json::json!([
+            {"id": "s1", "epic_id": "e1", "title": "S1", "description": "",
+             "order": 1, "depends_on": [], "stage": "verified", "links": {},
+             "created_at": "2026", "updated_at": "2026"},
+            {"id": "s2", "epic_id": "e1", "title": "S2", "description": "",
+             "order": 2, "depends_on": [], "stage": "pending", "links": {},
+             "created_at": "2026", "updated_at": "2026"}
+        ]);
+        let (_dir, p, _guard) = review_fixture(steps);
+        // 卡片已 completed+ack 待确认态，直接 ack
+        std::fs::write(
+            p.join(".todos.json"),
+            serde_json::to_string(&serde_json::json!({
+                "version": 1, "project": "proj",
+                "items": [{"id": "t1", "type": "todo", "title": "n", "content": "",
+                           "suggestion": "", "tags": [], "status": "completed",
+                           "priority": "high", "source_session": "",
+                           "created_at": "2026", "updated_at": "2026",
+                           "auto_completed_at": "2026",
+                           "auto_result": {"outcome": "accepted_report",
+                                           "attempt_id": "att-1"}}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        update_todo_impl(
+            &[("proj".into(), p.clone())],
+            p.to_string_lossy().to_string(),
+            "t1".into(),
+            None, None, None, None, None, None, None, None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        let epics = read_back(&p, ".epics.json");
+        assert_eq!(epics["steps"][0]["stage"], "observed");
+        assert_eq!(epics["steps"][1]["stage"], "pending");
+        assert_eq!(epics["epics"][0]["status"], "active");
+    }
+
+    #[test]
+    fn advance_step_matches_attempt_not_stale_entry() {
+        let (_dir, p, _guard) = review_fixture(one_step("pending"));
+        // 追加一个旧 attempt 的 entry，指向另一个 step s_old
+        crate::todo_ledger::mutate_ledger(|entries| {
+            entries.insert(
+                "k0".into(),
+                crate::todo_ledger::LedgerEntry {
+                    task_key: "k0".into(),
+                    tenant_id: "proj".into(),
+                    todo_id: "t1".into(),
+                    task_revision: "r".into(),
+                    consent_revision: 1,
+                    operation_id: "op".into(),
+                    state: crate::todo_ledger::LedgerState::Closed,
+                    epic_id: "e1".into(),
+                    step_id: "s_old".into(),
+                    package_id: "pkg".into(),
+                    created_at: "2025-01-01T00:00:00Z".into(),
+                    updated_at: "2025-01-01T00:00:00Z".into(),
+                    finalization: Some(crate::todo_ledger::FinalizationRecord {
+                        state: "applied".into(),
+                        attempt_id: "att-0".into(),
+                        report_hash: "h".into(),
+                        outcome: "needs_review".into(),
+                        updated_at: "2025-01-01T00:00:00Z".into(),
+                    }),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        update_todo_impl(
+            &[("proj".into(), p.clone())],
+            p.to_string_lossy().to_string(),
+            "t1".into(),
+            None, None, None, None, None, None, None, None, None,
+            Some("accepted".into()),
+        )
+        .unwrap();
+        let epics = read_back(&p, ".epics.json");
+        // 命中 att-1 → s1 推进；s_old 不存在于 epics（无副作用），s1 verified
+        assert_eq!(epics["steps"][0]["stage"], "verified");
+    }
+
+    #[test]
+    fn auto_ack_does_not_close_hybrid_parent_epic() {
+        // 对抗审查 F1 回归：顶级方案带子方案时进度取子方案均值——直属步骤
+        // 全 observed 也不得绕过 done 门禁收口（epic_progress != 100）。
+        let (_dir, p, _guard) = review_fixture(one_step("verified"));
+        std::fs::write(
+            p.join(".epics.json"),
+            serde_json::to_string(&serde_json::json!({
+                "version": 1, "project": "proj",
+                "epics": [
+                    {"id": "e1", "title": "父", "description": "", "status": "active",
+                     "priority": "P2", "depends_on": [], "blocks": [], "links": {},
+                     "created_at": "2026", "updated_at": "2026"},
+                    {"id": "c1", "parent_id": "e1", "title": "子", "description": "",
+                     "status": "active", "priority": "P2", "depends_on": [], "blocks": [],
+                     "links": {}, "created_at": "2026", "updated_at": "2026"}
+                ],
+                "steps": [
+                    {"id": "s1", "epic_id": "e1", "title": "夜间步", "description": "",
+                     "order": 1, "depends_on": [], "stage": "verified", "links": {},
+                     "created_at": "2026", "updated_at": "2026"},
+                    {"id": "s2", "epic_id": "c1", "title": "子步", "description": "",
+                     "order": 1, "depends_on": [], "stage": "pending", "links": {},
+                     "created_at": "2026", "updated_at": "2026"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            p.join(".todos.json"),
+            serde_json::to_string(&serde_json::json!({
+                "version": 1, "project": "proj",
+                "items": [{"id": "t1", "type": "todo", "title": "n", "content": "",
+                           "suggestion": "", "tags": [], "status": "completed",
+                           "priority": "high", "source_session": "",
+                           "created_at": "2026", "updated_at": "2026",
+                           "auto_completed_at": "2026",
+                           "auto_result": {"outcome": "accepted_report",
+                                           "attempt_id": "att-1"}}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        update_todo_impl(
+            &[("proj".into(), p.clone())],
+            p.to_string_lossy().to_string(),
+            "t1".into(),
+            None, None, None, None, None, None, None, None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        let epics = read_back(&p, ".epics.json");
+        assert_eq!(epics["steps"][0]["stage"], "observed");
+        // 父方案进度=子方案均值=0，不得收口
+        assert_eq!(epics["epics"][0]["status"], "active");
+        assert_eq!(epics["epics"][1]["status"], "active");
+    }
+
+    #[test]
+    fn advance_step_ignores_foreign_tenant_entry() {
+        // 对抗审查 F4 回归：全机共享账本，tenant 对不上不认领。
+        let (_dir, p, _guard) = review_fixture(one_step("pending"));
+        // 先移除本项目的 entry，只留外部租户的同 todo/attempt 条目
+        crate::todo_ledger::mutate_ledger(|entries| {
+            entries.remove("k1");
+            Ok(())
+        })
+        .unwrap();
+        crate::todo_ledger::mutate_ledger(|entries| {
+            entries.insert(
+                "k9".into(),
+                crate::todo_ledger::LedgerEntry {
+                    task_key: "k9".into(),
+                    tenant_id: "别的项目".into(),
+                    todo_id: "t1".into(),
+                    task_revision: "r".into(),
+                    consent_revision: 1,
+                    operation_id: "op".into(),
+                    state: crate::todo_ledger::LedgerState::Closed,
+                    epic_id: "e1".into(),
+                    step_id: "s1".into(),
+                    package_id: "pkg".into(),
+                    created_at: "2026-06-01T00:00:00Z".into(),
+                    updated_at: "2026-06-01T00:00:00Z".into(),
+                    finalization: Some(crate::todo_ledger::FinalizationRecord {
+                        state: "applied".into(),
+                        attempt_id: "att-1".into(),
+                        report_hash: "h".into(),
+                        outcome: "needs_review".into(),
+                        updated_at: "2026-06-01T00:00:00Z".into(),
+                    }),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        update_todo_impl(
+            &[("proj".into(), p.clone())],
+            p.to_string_lossy().to_string(),
+            "t1".into(),
+            None, None, None, None, None, None, None, None, None,
+            Some("accepted".into()),
+        )
+        .unwrap();
+        let epics = read_back(&p, ".epics.json");
+        // 本项目（proj）没有匹配 entry → 不推进；别动"别的项目"的步骤
+        assert_eq!(epics["steps"][0]["stage"], "pending");
+    }
+
+    #[test]
+    fn read_auto_report_happy_path_and_traversal_guard() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("QUESTLOG_RUNTIME", dir.path().join("runtime"));
+        let base = crate::todo_ledger::reports_dir();
+        let f = base.join("proj").join("t1").join("att-1").join("report.md");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, "# 报告\n正文").unwrap();
+        assert_eq!(
+            read_auto_report_impl("proj", "t1/att-1/report.md").unwrap(),
+            "# 报告\n正文"
+        );
+        assert!(read_auto_report_impl("proj", "../proj/t1/att-1/report.md").is_err());
+        assert!(read_auto_report_impl("../proj", "t1/att-1/report.md").is_err());
+        assert!(read_auto_report_impl("proj", "t1/att-9/report.md").is_err());
+        assert!(read_auto_report_impl("", "t1/att-1/report.md").is_err());
     }
 
     fn seed_retryable_fixture() -> (String, String) {

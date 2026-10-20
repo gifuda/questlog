@@ -750,6 +750,7 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
                     ob(&v, "processing"),
                     ob(&v, "auto_process"),
                     ob(&v, "auto_ack"),
+                    os(&v, "auto_review"),
                 )),
                 (Err(e), _) | (_, Err(e)) => e,
             },

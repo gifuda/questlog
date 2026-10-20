@@ -534,7 +534,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn sanitize(seg: &str) -> String {
+pub(crate) fn sanitize(seg: &str) -> String {
     seg.chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect()

@@ -22,6 +22,9 @@ export interface AutoResult {
   finished_at?: string;
   reason_code?: string;
   verification_level?: string;
+  /** 人工复核裁决（needs_review 出口）：accepted=认可报告，rejected=人工驳回。 */
+  review_verdict?: "accepted" | "rejected";
+  reviewed_at?: string;
 }
 
 export interface TodoItem {

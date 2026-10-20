@@ -44,6 +44,7 @@ pub fn run() {
             commands::get_todos,
             commands::update_todo,
             commands::add_todo,
+            commands::read_auto_report,
             commands::remove_project,
             commands::undo_remove_project,
             commands::get_trash,
