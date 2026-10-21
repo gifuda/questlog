@@ -667,7 +667,7 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
                                         .unwrap_or(serde_json::json!({"raw": String::from_utf8_lossy(&o.stdout)}));
                                     ok(r)
                                 }
-                                Ok(o) => err(409, format!("{}", String::from_utf8_lossy(&o.stdout).trim())),
+                                Ok(o) => err(409, String::from_utf8_lossy(&o.stdout).trim().to_string()),
                                 Err(e) => err(500, format!("spawn: {e}")),
                             }
                         }

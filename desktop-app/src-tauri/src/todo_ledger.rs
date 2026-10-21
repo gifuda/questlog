@@ -157,7 +157,7 @@ pub fn write_sweep_state(state: &SweepState) -> Result<(), String> {
     Ok(())
 }
 
-/// ─── Receipts ───
+// ─── Receipts ───
 
 /// A receipt dropped into `todo-receipts/` by the collector-side channel
 /// (GX adapter). All flags are supplied by the channel; the finalizer

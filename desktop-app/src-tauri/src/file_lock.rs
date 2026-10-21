@@ -17,10 +17,10 @@
 //! - owner pid known + dead        → remove and retry (safe: holder is gone)
 //! - owner pid known + alive       → wait; timeout surfaces "held by live pid"
 //! - empty file (0 bytes) + stale  → remove and retry (creator crashed between
-//!                                   O_EXCL create and writing its identity;
-//!                                   no owner can ever release it)
+//!   O_EXCL create and writing its identity;
+//!   no owner can ever release it)
 //! - non-empty, unparseable        → NEVER auto-remove; timeout returns a
-//!                                   "blocked" error for manual cleanup
+//!   "blocked" error for manual cleanup
 //!
 //! Legacy compatibility: locks written by the previous protocol as
 //! `"{pid}-{uuid}"` are still readable — the pid prefix is extracted and the

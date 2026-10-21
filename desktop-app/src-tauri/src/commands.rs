@@ -2354,7 +2354,7 @@ pub fn seal_step_impl(
         .ok_or_else(|| format!("epic '{}' not found", step.epic_id))?;
 
     // objective = 步骤标题 + 描述（+方案上下文一行）
-    let mut objective = format!("{}", step.title);
+    let mut objective = step.title.to_string();
     if !step.description.trim().is_empty() {
         objective = format!("{}\n\n{}", step.title, step.description.trim());
     }

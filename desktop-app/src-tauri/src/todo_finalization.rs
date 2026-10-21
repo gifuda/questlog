@@ -120,6 +120,7 @@ pub enum FinalizeResult {
 /// Process ONE receipt file through the full state machine.
 /// `verify` is injectable for tests; `project_dir_of` maps tenant → project
 /// directory (registry).
+#[allow(clippy::type_complexity)]
 pub fn finalize_receipt(
     receipt_path: &Path,
     verify: &dyn Fn(&Receipt, &[String]) -> Result<VerifierOutput, String>,
@@ -231,7 +232,7 @@ pub fn finalize_receipt(
     // 3. Verify (native, deterministic).
     let package_repo_sha = package_repo_and_sha(&entry.package_id);
     let snapshot: Vec<String> = match &package_repo_sha {
-        Some((repo, sha)) => snapshot_of(&repo, &sha),
+        Some((repo, sha)) => snapshot_of(repo, sha),
         None => vec![],
     };
     let verified = match verify(&receipt, &snapshot) {
@@ -459,6 +460,7 @@ fn apply_auto_result(
 
 /// Card write-back for the recovery path (lost receipt): visible
 /// needs_review result, idempotent by attempt_id, stale cards untouched.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_auto_result(
     project_dir: &Path,
     todo_id: &str,

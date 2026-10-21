@@ -24,6 +24,7 @@ use crate::executors::{
 };
 use crate::models::{EpicStatus, StepStage};
 use crate::runner_git::{self, ScopeViolation};
+use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
@@ -137,6 +138,18 @@ enum SupervisionOutcome {
     TimedOut,
 }
 
+/// One CLI run surfaced from the spawn→session closure inside
+/// process_execution: supervision outcome, cli_succeeded, stdout/stderr
+/// paths, executor events, and the resolved CLI session id.
+type RunOutcome = (
+    SupervisionOutcome,
+    bool,
+    Option<PathBuf>,
+    Option<PathBuf>,
+    Vec<ExecutorEvent>,
+    Option<String>,
+);
+
 /// The base a package's worktree must start from.
 #[derive(Debug)]
 enum EffectiveBase {
@@ -236,6 +249,38 @@ impl Runner {
                     pkg.package_id,
                     e
                 ),
+            }
+
+            // agent-base 风控闸门（时间性判定，只拦认领不拦已在跑的执行——
+            // 与底座 §7 同语义）。required 档 Defer/Unavailable 即 continue：
+            // 包保持 ready、不烧 execution、不耗 budget。off 档零调用零开销。
+            let bl = crate::runner_config::get_base_ledger();
+            if bl.mode != crate::base_ledger::LedgerMode::Off {
+                match crate::base_ledger::slot("zcode", &bl) {
+                    crate::base_ledger::SlotVerdict::Ok => {}
+                    crate::base_ledger::SlotVerdict::Defer(r) => {
+                        if bl.mode == crate::base_ledger::LedgerMode::Required {
+                            log::info!("Runner: {} deferred by base gate: {}", pkg.package_id, r);
+                            continue; // 包保持 ready/既态：不烧 execution、不耗 budget
+                        }
+                        log::info!(
+                            "Runner: {} would be deferred by base gate (advisory): {}",
+                            pkg.package_id,
+                            r
+                        );
+                    }
+                    crate::base_ledger::SlotVerdict::Unavailable(e) => {
+                        if bl.mode == crate::base_ledger::LedgerMode::Required {
+                            log::warn!(
+                                "Runner: {} base gate unavailable, fail-closed: {}",
+                                pkg.package_id,
+                                e
+                            );
+                            continue; // fail-closed；PG 侧有底座 health 探针兜底
+                        }
+                        log::warn!("Runner: base gate unavailable (advisory, proceeding): {e}");
+                    }
+                }
             }
 
             let executions = execution_store::list_executions()?;
@@ -793,6 +838,11 @@ impl Runner {
         base.saturating_mul(1u64 << exp).min(7200)
     }
 
+    /// First 8 chars of an id — short prefixes for base-ledger extern labels.
+    fn short8(s: &str) -> String {
+        s.chars().take(8).collect()
+    }
+
     /// Standard hard-boundary envelope appended to EVERY executor task. The
     /// sealed objective says WHAT to build; this says what is structurally
     /// off-limits. Production incident 2026-08-18 (S4): an executor observed
@@ -1153,54 +1203,238 @@ impl Runner {
         } else {
             &pkg.sandbox
         };
-        let mut handle = if let Some(sid) = &resume {
-            let task = format!(
-                "{}{}\n\n[续接说明] 你在恢复一个因超时中断的会话：已完成的分析和阶段不要重做，先查看工作区当前状态再继续。剩余预算约 {} 秒。",
-                pkg.objective,
-                Self::task_envelope(pkg),
-                timeout.as_secs()
-            );
-            executor.start_with_resume(&task, sid, &worktree_path, sandbox, timeout)?
+        // ─── agent-base 外部行记账：extern-start（spawn 之前落行）───
+        // 只传 prompt_sha256 + 短标签，绝不传 prompt 原文。start 失败不拦
+        // 执行（slot 已在认领前放行）——记 gap 事件、以 None 继续零记账。
+        let bl = crate::runner_config::get_base_ledger();
+        let ledger_t0 = Instant::now();
+        let prompt_sha: String = {
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(pkg.objective.as_bytes());
+            hasher.update(Self::task_envelope(pkg).as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        let label: String = format!(
+            "{}/{} {} att{}",
+            Self::short8(&pkg.epic_id),
+            Self::short8(&pkg.step_id),
+            pkg.package_id,
+            exec.attempt_no
+        )
+        .chars()
+        .take(120) // 底座 extern-start --label 上限 120
+        .collect();
+        let workspace_display = worktree_path.to_string_lossy();
+        let base_task_id: Option<i64> = if bl.mode == crate::base_ledger::LedgerMode::Off {
+            None
         } else {
-            let task = format!("{}{}{}", pkg.objective, Self::task_envelope(pkg), recovery_note);
-            // Persist the actual prompt (objective + boundaries) so audits can
-            // see what the executor was told, distinct from the sealed objective.
-            match attempt_bundle::write_task_prompt(&bundle_dir, &task) {
-                Ok(Some(ref_name)) => manifest.task_prompt_ref = Some(ref_name),
-                Ok(None) => {}
+            match crate::base_ledger::start(
+                &bl,
+                &crate::base_ledger::ExternStart {
+                    r#ref: &exec.id,
+                    label: &label,
+                    workspace: &workspace_display,
+                    // 底座 --hard-cap 校验 1..86400；effective_timeout_secs
+                    // 上限 7200 天然合规，下界钳到 1 防 0 秒包被 exit 2 拒收
+                    hard_cap: timeout.as_secs().max(1),
+                    attempt: exec.attempt_no,
+                    resume: resume.is_some(),
+                    prompt_sha256: &prompt_sha,
+                },
+            ) {
+                Ok(id) => {
+                    let _ = attempt_bundle::append_event(
+                        &bundle_dir,
+                        &serde_json::json!({
+                            "event": "base_ledger_started",
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "base_task_id": id,
+                        }),
+                    );
+                    Some(id)
+                }
                 Err(e) => {
-                    log::warn!("Failed to persist task prompt: {e}");
+                    log::warn!("base_ledger start failed (slot already passed, proceeding): {e}");
+                    let _ = attempt_bundle::append_event(
+                        &bundle_dir,
+                        &serde_json::json!({
+                            "event": "base_ledger_gap",
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "phase": "start",
+                            "error": e,
+                        }),
+                    );
+                    None
                 }
             }
-            executor.start(&task, &worktree_path, sandbox, timeout)?
         };
-        let stdout_path = Some(handle.stdout_path.clone());
-        let stderr_path = Some(handle.stderr_path.clone());
-        let supervision = Self::supervise_execution(&mut handle, &exec.id, timeout)?;
-        let events: Vec<ExecutorEvent> = executor.wait_and_collect(handle)?;
-        let cli_succeeded = events
-            .iter()
-            .rev()
-            .find(|event| event.event_type == "execution.completed")
-            .and_then(|event| event.success)
-            .unwrap_or(false);
 
-        // Persist the CLI session id so a timeout auto-retry can --resume it.
-        // The events rarely carry it (the CLI doesn't print it) — the session
-        // DB lookup by worktree directory is the reliable path.
-        {
-            let sid = events
-                .iter()
-                .find_map(|event| event.session_id.clone())
-                .or_else(|| Self::resolve_cli_session(&worktree_path));
-            if let Some(sid) = sid {
-                let _ = execution_store::update_execution(
-                    &exec.id,
-                    ExecutionUpdates {
-                        cli_session: Some(sid),
-                        ..Default::default()
-                    },
+        // spawn → supervise → collect → session 回填包进闭包；返回后统一
+        // extern-finish——早退 Err 也先把底座行收口成终态，杜绝外部行滞留
+        // running 触发底座 health 误报，然后再传播 Err。
+        let mut run = || -> Result<RunOutcome, String> {
+            let mut handle = if let Some(sid) = &resume {
+                let task = format!(
+                    "{}{}\n\n[续接说明] 你在恢复一个因超时中断的会话：已完成的分析和阶段不要重做，先查看工作区当前状态再继续。剩余预算约 {} 秒。",
+                    pkg.objective,
+                    Self::task_envelope(pkg),
+                    timeout.as_secs()
                 );
+                executor.start_with_resume(&task, sid, &worktree_path, sandbox, timeout)?
+            } else {
+                let task = format!("{}{}{}", pkg.objective, Self::task_envelope(pkg), recovery_note);
+                // Persist the actual prompt (objective + boundaries) so audits can
+                // see what the executor was told, distinct from the sealed objective.
+                match attempt_bundle::write_task_prompt(&bundle_dir, &task) {
+                    Ok(Some(ref_name)) => manifest.task_prompt_ref = Some(ref_name),
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::warn!("Failed to persist task prompt: {e}");
+                    }
+                }
+                executor.start(&task, &worktree_path, sandbox, timeout)?
+            };
+            let stdout_path = Some(handle.stdout_path.clone());
+            let stderr_path = Some(handle.stderr_path.clone());
+            let supervision = Self::supervise_execution(&mut handle, &exec.id, timeout)?;
+            let events: Vec<ExecutorEvent> = executor.wait_and_collect(handle)?;
+            let cli_succeeded = events
+                .iter()
+                .rev()
+                .find(|event| event.event_type == "execution.completed")
+                .and_then(|event| event.success)
+                .unwrap_or(false);
+
+            // Persist the CLI session id so a timeout auto-retry can --resume it.
+            // The events rarely carry it (the CLI doesn't print it) — the session
+            // DB lookup by worktree directory is the reliable path.
+            let mut cli_session: Option<String> = None;
+            {
+                let sid = events
+                    .iter()
+                    .find_map(|event| event.session_id.clone())
+                    .or_else(|| Self::resolve_cli_session(&worktree_path));
+                if let Some(sid) = sid {
+                    let _ = execution_store::update_execution(
+                        &exec.id,
+                        ExecutionUpdates {
+                            cli_session: Some(sid.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    cli_session = Some(sid);
+                }
+            }
+            Ok((supervision, cli_succeeded, stdout_path, stderr_path, events, cli_session))
+        };
+        let (supervision, cli_succeeded, stdout_path, stderr_path, events, cli_session) =
+            match run() {
+                Ok(v) => v,
+                Err(e) => {
+                    // 先以 runner internal 收口底座行，再传播 Err
+                    if let Some(id) = base_task_id {
+                        let err_text = format!("runner internal: {e}");
+                        match crate::base_ledger::finish(
+                            &bl,
+                            id,
+                            &crate::base_ledger::ExternFinish {
+                                ok: false,
+                                exit_code: 1,
+                                duration_secs: ledger_t0.elapsed().as_secs(),
+                                timed_out: false,
+                                partial: false,
+                                session: None,
+                                error: Some(&err_text),
+                                raw: None,
+                                result: None,
+                            },
+                        ) {
+                            Ok(()) => {
+                                let _ = attempt_bundle::append_event(
+                                    &bundle_dir,
+                                    &serde_json::json!({
+                                        "event": "base_ledger_finished",
+                                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                                        "base_task_id": id,
+                                        "ok": false,
+                                        "error": err_text,
+                                    }),
+                                );
+                            }
+                            Err(fe) => {
+                                log::warn!("base_ledger finish failed: {fe}");
+                                let _ = attempt_bundle::append_event(
+                                    &bundle_dir,
+                                    &serde_json::json!({
+                                        "event": "base_ledger_gap",
+                                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                                        "phase": "finish",
+                                        "error": fe,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            };
+
+        // ─── agent-base 外部行记账：extern-end（正常路径）───
+        // ok = cli_succeeded && Completed；TimedOut → timed_out（partial =
+        // 超时且 stdout 非空）；Cancelled → error="cancelled"；Paused →
+        // error="paused"（对抗审查补：用户暂停不该记成无原因失败）。
+        if let Some(id) = base_task_id {
+            let timed_out = matches!(supervision, SupervisionOutcome::TimedOut);
+            let ok = cli_succeeded && matches!(supervision, SupervisionOutcome::Completed);
+            let partial = timed_out
+                && stdout_path
+                    .as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false);
+            let error_text = match supervision {
+                SupervisionOutcome::Cancelled => Some("cancelled".to_string()),
+                SupervisionOutcome::Paused => Some("paused".to_string()),
+                _ => None,
+            };
+            match crate::base_ledger::finish(
+                &bl,
+                id,
+                &crate::base_ledger::ExternFinish {
+                    ok,
+                    exit_code: if ok { 0 } else { 1 },
+                    duration_secs: ledger_t0.elapsed().as_secs(),
+                    timed_out,
+                    partial,
+                    session: cli_session.as_deref(),
+                    error: error_text.as_deref(),
+                    raw: None,
+                    result: None,
+                },
+            ) {
+                Ok(()) => {
+                    let _ = attempt_bundle::append_event(
+                        &bundle_dir,
+                        &serde_json::json!({
+                            "event": "base_ledger_finished",
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "base_task_id": id,
+                            "ok": ok,
+                        }),
+                    );
+                }
+                Err(e) => {
+                    log::warn!("base_ledger finish failed: {e}");
+                    let _ = attempt_bundle::append_event(
+                        &bundle_dir,
+                        &serde_json::json!({
+                            "event": "base_ledger_gap",
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "phase": "finish",
+                            "error": e,
+                        }),
+                    );
+                }
             }
         }
 

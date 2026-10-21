@@ -99,6 +99,56 @@ fn default_nightly_budget() -> u64 {
     3600
 }
 
+// ─── agent-base 外部执行记账/闸门（PROTOCOL v1.5.3 §10.1）───
+
+/// Three-level switch, hot-read on every poll cycle (no restart needed):
+/// - `Off` (default) = zero behavior change (no spawn, no calls)
+/// - `Advisory` = shadow: `slot` only logs "would defer"; start/finish
+///   still record; execution is unaffected
+/// - `Required` = Defer/Unavailable at the claim gate skips the package
+///   (stays ready — no execution burned, no budget spent)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LedgerMode {
+    #[default]
+    Off,
+    Advisory,
+    Required,
+}
+
+fn default_tenant() -> String {
+    "questlog".to_string()
+}
+fn default_agent_ctl() -> PathBuf {
+    PathBuf::from("/Users/power/家庭服务器运维/agent-base/bin/agent-ctl")
+}
+fn default_call_timeout() -> u64 {
+    8
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BaseLedgerConfig {
+    #[serde(default)]
+    pub mode: LedgerMode,
+    #[serde(default = "default_tenant")]
+    pub tenant: String,
+    #[serde(default = "default_agent_ctl")]
+    pub agent_ctl_path: PathBuf,
+    #[serde(default = "default_call_timeout")]
+    pub call_timeout_secs: u64,
+}
+
+impl Default for BaseLedgerConfig {
+    fn default() -> Self {
+        Self {
+            mode: LedgerMode::Off,
+            tenant: default_tenant(),
+            agent_ctl_path: default_agent_ctl(),
+            call_timeout_secs: default_call_timeout(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerRuntimeConfig {
     pub version: u32,
@@ -119,6 +169,11 @@ pub struct RunnerRuntimeConfig {
     /// 待办租户 G4: nightly sweep schedule. Absent = sweep disabled.
     #[serde(default)]
     pub todo_schedule: Option<TodoSchedule>,
+    /// agent-base 外部执行记账/闸门（v1.5.3 §10.1）。Absent/缺省 = off =
+    /// 零行为变化。Hot-read: every poll cycle re-reads, mode flips take
+    /// effect within one cycle without a restart.
+    #[serde(default)]
+    pub base_ledger: Option<BaseLedgerConfig>,
     #[serde(default)]
     pub revision: u64,
 }
@@ -132,6 +187,7 @@ impl Default for RunnerRuntimeConfig {
             executor_model: None,
             executor_thinking: None,
             todo_schedule: None,
+            base_ledger: None,
             revision: 0,
         }
     }
@@ -334,6 +390,14 @@ pub fn set_executor_model(model: Option<String>) -> Result<(), String> {
 /// defaults (no thinking params injected).
 pub fn get_executor_thinking() -> Option<String> {
     read_config().executor_thinking
+}
+
+/// agent-base 外部执行记账配置。Re-reads the config file on EVERY call
+/// (same as `read_config`) — flipping `base_ledger.mode` in
+/// runner-config.json takes effect at the next 10s poll cycle, no restart.
+/// Absent field = all-defaults = mode Off = zero behavior change.
+pub fn get_base_ledger() -> BaseLedgerConfig {
+    read_config().base_ledger.unwrap_or_default()
 }
 
 /// 待办租户 G4: the nightly sweep schedule. None = not configured = the
@@ -594,6 +658,56 @@ mod tests {
         });
         let parsed: RunnerRuntimeConfig = serde_json::from_value(raw).unwrap();
         assert!(parsed.executor_thinking.is_none());
+    }
+
+    #[test]
+    fn base_ledger_roundtrip_and_backward_compat() {
+        let (_dir, _guard) = setup_temp_runtime();
+
+        // Default (no config file): mode off = zero behavior change
+        assert_eq!(get_base_ledger().mode, LedgerMode::Off);
+
+        // ① Old JSON without the field must deserialize (serde default) → None
+        let raw = serde_json::json!({
+            "version": 2,
+            "global_enabled": false,
+            "projects": {},
+            "revision": 89
+        });
+        let parsed: RunnerRuntimeConfig = serde_json::from_value(raw).unwrap();
+        assert!(parsed.base_ledger.is_none());
+
+        // ② mode-only object → Advisory + defaults for tenant/ctl/timeout
+        let raw = serde_json::json!({
+            "version": 2,
+            "global_enabled": false,
+            "base_ledger": {"mode": "advisory"},
+            "revision": 90
+        });
+        let parsed: RunnerRuntimeConfig = serde_json::from_value(raw).unwrap();
+        let bl = parsed.base_ledger.unwrap();
+        assert_eq!(bl.mode, LedgerMode::Advisory);
+        assert_eq!(bl.tenant, "questlog");
+        assert_eq!(bl.agent_ctl_path, PathBuf::from("/Users/power/家庭服务器运维/agent-base/bin/agent-ctl"));
+        assert_eq!(bl.call_timeout_secs, 8);
+
+        // ③ Empty object → mode = Off
+        let raw = serde_json::json!({
+            "version": 2,
+            "global_enabled": false,
+            "base_ledger": {}
+        });
+        let parsed: RunnerRuntimeConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(parsed.base_ledger.unwrap().mode, LedgerMode::Off);
+
+        // ④ Roundtrip
+        let full = BaseLedgerConfig {
+            mode: LedgerMode::Required,
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        let back: BaseLedgerConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, full);
     }
 }
 

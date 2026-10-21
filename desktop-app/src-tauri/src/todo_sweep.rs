@@ -659,7 +659,7 @@ mod tests {
 }
 
 
-/// ─── Tick thread (plan §6: lightweight, never executes AI) ───
+// ─── Tick thread (plan §6: lightweight, never executes AI) ───
 
 pub fn start_tick_thread() {
     std::thread::Builder::new()
