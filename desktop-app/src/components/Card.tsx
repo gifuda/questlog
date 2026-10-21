@@ -8,6 +8,7 @@ import { stripMd, formatDate } from "../utils";
 import { priorityDot } from "../constants";
 import Badge from "./Badge";
 import ConfirmButton from "./ConfirmButton";
+import ReportViewer from "./ReportViewer";
 
 interface CardProps {
   item: TodoItem;
@@ -439,10 +440,14 @@ export default function Card({ item, projectPath, onRefresh, dimmed, scheduleEna
                 {t("card.cancel")}
               </button>
             </div>
-            <div className="overflow-auto px-4 py-3 text-[13px] text-body whitespace-pre-wrap break-words">
-              {report.loading
-                ? t("card.reportLoading")
-                : report.error ?? report.text ?? ""}
+            <div className="overflow-auto px-4 py-3 text-[13px] text-body break-words">
+              {report.loading ? (
+                t("card.reportLoading")
+              ) : report.error ? (
+                report.error
+              ) : (
+                <ReportViewer text={report.text ?? ""} />
+              )}
             </div>
           </div>
         </div>
