@@ -87,7 +87,7 @@ export default function Column({ title, icon, type, items, projectPath, onRefres
                 {t("column.cancel")}
               </button>
               <button
-                className="text-[11px] px-2.5 py-0.5 bg-accent text-white rounded hover:opacity-90 transition-colors disabled:opacity-40"
+                className="text-[11px] px-2.5 py-0.5 bg-accent text-on-accent rounded hover:opacity-90 transition-colors disabled:opacity-40"
                 onClick={handleSubmit}
                 disabled={busy || !titleInput.trim()}
               >

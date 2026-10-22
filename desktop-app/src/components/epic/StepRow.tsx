@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { useState } from "react";
 import { stageOrder } from "../../epicConstants";
 import type { Epic, StepStage } from "../../types/epics";
+import Badge, { type BadgeTone } from "../Badge";
 import ConfirmButton from "../ConfirmButton";
 import ExecutionPanel from "../ExecutionPanel";
 import { stepStageKey } from "./helpers";
@@ -16,11 +17,11 @@ function stepVisual(step: Epic["steps"][number]): StepVisual {
   return "todo";
 }
 
-const stepVisualConfig: Record<StepVisual, { icon: string; label: string; cls: string }> = {
-  todo: { icon: "⬜", label: "待做", cls: "text-faint" },
-  running: { icon: "🔄", label: "执行中", cls: "text-accent" },
-  done: { icon: "✅", label: "完成", cls: "text-success" },
-  error: { icon: "⚠️", label: "需处理", cls: "text-danger" },
+const stepVisualConfig: Record<StepVisual, { icon: string; labelKey: string; cls: string }> = {
+  todo: { icon: "⬜", labelKey: "epic.stepStage.pending", cls: "text-faint" },
+  running: { icon: "🔄", labelKey: "epic.stepStage.running", cls: "text-accent" },
+  done: { icon: "✅", labelKey: "epic.stepStage.done", cls: "text-success" },
+  error: { icon: "⚠️", labelKey: "epic.stepStage.attention", cls: "text-danger" },
 };
 
 export function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
@@ -40,18 +41,18 @@ export function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
   const isDone = visual === "done";
 
   return (
-    <div className="rounded hover:bg-elevated/40 group">
+    <div className="rounded hover:bg-elevated group">
       <div
         className="flex items-center gap-2.5 py-1.5 px-2 cursor-pointer"
         onClick={() => setExpanded(!expanded)}
       >
         {/* 三态图标 */}
-        <span className={`text-sm shrink-0 ${cfg.cls}`} title={cfg.label}>
+        <span className={`text-sm shrink-0 ${cfg.cls}`} title={t(cfg.labelKey)}>
           {cfg.icon}
         </span>
 
         {/* 步骤进度条（5 阶段 → 百分比） */}
-        <span className="shrink-0 flex items-center gap-1" title={cfg.label}>
+        <span className="shrink-0 flex items-center gap-1" title={t(cfg.labelKey)}>
           <div className="w-12 h-1 bg-line rounded-sm overflow-hidden">
             <div
               className={`h-full rounded-sm transition-all ${
@@ -60,7 +61,7 @@ export function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
               style={{ width: `${step.stage_pct}%` }}
             />
           </div>
-          <span className="font-mono text-[10px] text-faint tabular-nums w-8">{step.stage_pct}%</span>
+          <span className="font-mono text-[11px] text-faint tabular-nums w-8">{step.stage_pct}%</span>
         </span>
 
         {/* 标题 */}
@@ -71,7 +72,7 @@ export function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
         {/* ▶ 启动按钮（仅待做步骤，始终可见） */}
         {onExecute && !isDone && visual === "todo" && (
           <button
-            className="text-[11px] text-accent bg-accent-bg px-1.5 py-px rounded shrink-0 hover:bg-accent hover:text-white transition-colors disabled:opacity-40"
+            className="text-[11px] text-accent bg-accent-bg px-1.5 py-px rounded shrink-0 hover:bg-accent hover:text-on-accent transition-colors disabled:opacity-40"
             title={t("epic.executeHint")}
             disabled={sealing}
             onClick={async (e) => {
@@ -80,7 +81,7 @@ export function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
               setFeedback(null);
               try {
                 await onExecute();
-                setFeedback("✅ 已启动");
+                setFeedback(t("epic.launched"));
                 setTimeout(() => setFeedback(null), 4000);
               } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
@@ -95,7 +96,7 @@ export function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
 
         {/* 反馈信息（非按钮位置） */}
         {feedback && feedback.startsWith("❌") && (
-          <span className="text-[10px] text-danger truncate max-w-[180px]">{feedback.slice(2)}</span>
+          <span className="text-[11px] text-danger truncate max-w-[180px]">{feedback.slice(2)}</span>
         )}
 
         {/* 依赖标记 */}
@@ -119,20 +120,22 @@ export function StepRow({ step, onUpdate, onDelete, onExecute, projectPath }: {
         <div className="pl-10 pr-2 pb-2">
           {/* 阶段胶囊（高级用户可点击推进） */}
           <div className="flex items-center gap-1 mb-1.5">
-            {stageOrder.map((st, i) => (
-              <button
-                key={st}
-                title={t(stepStageKey[st])}
-                onClick={() => onUpdate({ stage: st })}
-                className={`px-1.5 py-px text-[10px] rounded transition-colors ${
-                  i <= stageOrder.indexOf(step.stage)
-                    ? step.stage === "observed" ? "bg-success/15 text-success" : "bg-accent-bg text-accent"
-                    : "bg-elevated text-faint hover:bg-line-hover"
-                }`}
-              >
-                {t(stepStageKey[st])}
-              </button>
-            ))}
+            {stageOrder.map((st, i) => {
+              const reached = i <= stageOrder.indexOf(step.stage);
+              const tone: BadgeTone = !reached
+                ? "muted"
+                : step.stage === "observed" ? "success" : "accent";
+              return (
+                <Badge
+                  key={st}
+                  tone={tone}
+                  title={t(stepStageKey[st])}
+                  onClick={() => onUpdate({ stage: st })}
+                >
+                  {t(stepStageKey[st])}
+                </Badge>
+              );
+            })}
           </div>
           {step.description && (
             <p className="text-xs text-muted leading-relaxed mb-1">{step.description}</p>

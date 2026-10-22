@@ -14,6 +14,7 @@ import MorningBriefing from "./components/MorningBriefing";
 import { FleetHealthBand } from "./components/FleetHealth";
 import Logo from "./components/Logo";
 import Settings from "./components/Settings";
+import Badge from "./components/Badge";
 import ConfirmButton from "./components/ConfirmButton";
 import UndoBar from "./components/UndoBar";
 
@@ -230,15 +231,15 @@ function App() {
                 {p.name}
                 {activeTab === "todos" ? (
                   p.counts.todo > 0 && (
-                      <span className="ml-1 bg-danger text-white text-[11px] px-1 rounded-full tabular-nums">
-                        {p.counts.todo}
-                      </span>
+                    <Badge tone="danger" className="ml-1 rounded-full tabular-nums">
+                      {p.counts.todo}
+                    </Badge>
                   )
                 ) : activeTab === "epics" ? (
                   p.active_epics > 0 && (
-                      <span className="ml-1 bg-accent-bg text-accent text-[11px] px-1 rounded-full tabular-nums">
-                        {p.active_epics}
-                      </span>
+                    <Badge tone="accent" className="ml-1 rounded-full tabular-nums">
+                      {p.active_epics}
+                    </Badge>
                   )
                 ) : null}
               </button>
@@ -247,7 +248,7 @@ function App() {
                   label="×"
                   confirmLabel="✓"
                   onConfirm={() => handleRemove(p.name)}
-                  className="w-3.5 h-3.5 flex items-center justify-center text-[10px] bg-surface text-faint hover:text-danger rounded-full border border-line"
+                  className="w-3.5 h-3.5 flex items-center justify-center text-[11px] bg-surface text-faint hover:text-danger rounded-full border border-line"
                   title={t("app.removeProject")}
                 />
               </span>
@@ -275,10 +276,10 @@ function App() {
           {showTrash && (
             <div className="px-4 pb-2 flex flex-col gap-1 max-h-40 overflow-y-auto">
               {trash.map((tr) => (
-                <div key={tr.name} className="flex items-center gap-2 py-1 px-2 rounded bg-surface/50">
+                <div key={tr.name} className="flex items-center gap-2 py-1 px-2 rounded bg-surface-dim">
                   <span className="text-[11px] text-muted flex-1 truncate">{tr.name}</span>
                   <button
-                    className="text-[10px] text-accent hover:underline"
+                    className="text-[11px] text-accent hover:underline"
                     onClick={() => handleRestore(tr.name)}
                   >
                     {t("app.restore")}
@@ -287,7 +288,7 @@ function App() {
                     label={t("app.delete")}
                     confirmLabel={t("app.confirm")}
                     onConfirm={() => handlePermanentDelete(tr.name)}
-                    className="text-[10px] text-faint hover:text-danger"
+                    className="text-[11px] text-faint hover:text-danger"
                   />
                 </div>
               ))}

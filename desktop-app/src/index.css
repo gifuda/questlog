@@ -3,6 +3,7 @@
 @theme {
   --color-page: var(--c-page);
   --color-surface: var(--c-surface);
+  --color-surface-dim: var(--c-surface-dim);
   --color-elevated: var(--c-elevated);
   --color-chip: var(--c-chip);
   --color-line: var(--c-line);
@@ -19,6 +20,7 @@
   --color-danger: var(--c-danger);
   --color-info: var(--c-info);
   --color-info-bg: var(--c-info-bg);
+  --color-on-accent: var(--c-on-accent);
 
   /* 科技风字体栈：UI 用系统无衬线（中文 PingFang/Noto 回退），
      数字/ID/阶段名用等宽并开 tabular-nums */
@@ -30,6 +32,9 @@
 :root {
   background: transparent;
   --c-page: #0b0e14;
+  /* surface-dim：page 与 surface 的中间梯度（≈50% surface 叠 page），
+     用于替代 bg-surface/30|40|50|60 的 alpha 叠加（替换语义会发灰） */
+  --c-surface-dim: #0f1319;
   --c-surface: #12161f;
   --c-elevated: #1a2030;
   --c-chip: #1c2333;
@@ -49,11 +54,14 @@
   /* 信息色（验证中/进行中派生）：青蓝，与 accent 蓝、amber 黄拉开色相 */
   --c-info: #4cc3d9;
   --c-info-bg: rgba(76, 195, 217, 0.12);
+  /* 强调色底上的文字色：始终纯白（danger/accent 实心徽章用） */
+  --c-on-accent: #ffffff;
 }
 
 /* ── Light ── */
 [data-theme="light"] {
   --c-page: #f3f4f6;
+  --c-surface-dim: #f9fafb;
   --c-surface: #ffffff;
   --c-elevated: #e5e7eb;
   --c-chip: #f3f4f6;
@@ -71,4 +79,5 @@
   --c-danger: #dc2626;
   --c-info: #0e7490;
   --c-info-bg: #cffafe;
+  --c-on-accent: #ffffff;
 }

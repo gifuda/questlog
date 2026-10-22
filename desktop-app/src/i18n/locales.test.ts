@@ -55,7 +55,7 @@ describe("i18n dictionaries", () => {
     for (const f of files) {
       const text = readFileSync(f, "utf8");
       // t("literal.key") — string literals
-      for (const m of text.matchAll(/t\("([a-z][a-z0-9.]*)"\s*[,)]/g)) {
+      for (const m of text.matchAll(/t\("([a-z][a-zA-Z0-9.]*)"\s*[,)]/g)) {
         literalKeys.add(m[1]);
       }
       // : "card.itemTypeTodo" style key-map values (Record<string, string>)

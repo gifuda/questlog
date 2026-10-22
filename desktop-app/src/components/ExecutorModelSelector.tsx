@@ -66,13 +66,13 @@ function ModelPicker({
 
       {open && (
         <div className="absolute right-0 top-full mt-1 w-64 bg-surface border border-line rounded-lg shadow-xl py-2 z-[60]">
-          <div className="px-3 pb-2 text-[10px] text-faint uppercase tracking-wider">
+          <div className="px-3 pb-2 text-[11px] text-faint uppercase tracking-wider">
             {t(titleKey)}
           </div>
           {options && options.providers.length > 0 ? (
             options.providers.map((provider) => (
               <div key={provider.name}>
-                <div className="px-3 pt-1.5 pb-0.5 text-[10px] text-faint">{provider.display_name}</div>
+                <div className="px-3 pt-1.5 pb-0.5 text-[11px] text-faint">{provider.display_name}</div>
                 {provider.models.map((model) => (
                   <button
                     key={model.id}
@@ -113,7 +113,7 @@ function ModelPicker({
 
           <div className="my-1 border-t border-line" />
 
-          <div className="px-3 pb-1 pt-1.5 text-[10px] text-faint uppercase tracking-wider">
+          <div className="px-3 pb-1 pt-1.5 text-[11px] text-faint uppercase tracking-wider">
             {t("execution.thinkingTitle")}
           </div>
           {levels.length > 0 ? (

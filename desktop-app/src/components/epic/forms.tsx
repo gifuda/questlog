@@ -20,7 +20,7 @@ export function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
   const [acceptance, setAcceptance] = useState("");
 
   return (
-    <div className={`rounded-lg border border-accent/40 bg-accent-bg/30 ${compact ? "p-2" : "p-3"}`}>
+    <div className={`rounded-lg border border-accent/40 bg-accent-bg ${compact ? "p-2" : "p-3"}`}>
       <input
         autoFocus
         className="w-full bg-transparent border-b border-line px-1 py-1 text-[13px] text-heading focus:outline-none focus:border-accent"
@@ -74,7 +74,7 @@ export function NewEpicForm({ existingTitles, onCancel, onSubmit, compact }: {
       </div>
       <div className="flex items-center gap-3 mt-2">
         <button
-          className="text-xs px-2 py-1 bg-accent text-white rounded hover:opacity-90 disabled:opacity-40"
+          className="text-xs px-2 py-1 bg-accent text-on-accent rounded hover:opacity-90 disabled:opacity-40"
           disabled={!title.trim()}
           onClick={() => onSubmit(title.trim(), { description: description.trim() || undefined, priority, dependsOn: dependsOn.length ? dependsOn : undefined, acceptance: acceptance.trim() || undefined })}
         >
@@ -185,7 +185,7 @@ export function EpicEditForm({ epic, allEpics, onSubmit, onCancel }: {
       </div>
       <div className="flex items-center gap-3">
         <button
-          className="text-xs px-2 py-1 bg-accent text-white rounded hover:opacity-90 disabled:opacity-40"
+          className="text-xs px-2 py-1 bg-accent text-on-accent rounded hover:opacity-90 disabled:opacity-40"
           disabled={!title.trim()}
           onClick={() => onSubmit({
             title: title.trim(), description,
@@ -219,7 +219,7 @@ export function StepAddForm({ onCancel, onSubmit, existingSteps }: {
       <div className="flex items-center gap-2">
         <input
           autoFocus
-          className="flex-1 bg-elevated/50 rounded px-2 py-1 text-[13px] text-heading focus:outline-none focus:ring-1 focus:ring-accent"
+          className="flex-1 bg-surface rounded px-2 py-1 text-[13px] text-heading focus:outline-none focus:ring-1 focus:ring-accent"
           placeholder={t("epic.stepTitlePlaceholder")}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
@@ -229,7 +229,7 @@ export function StepAddForm({ onCancel, onSubmit, existingSteps }: {
           }}
         />
         <button
-          className="text-xs px-1.5 py-0.5 bg-accent text-white rounded disabled:opacity-40"
+          className="text-xs px-1.5 py-0.5 bg-accent text-on-accent rounded disabled:opacity-40"
           disabled={!title.trim()}
           onClick={() => onSubmit(title.trim(), desc.trim() || undefined, dependsOn)}
         >
@@ -242,7 +242,7 @@ export function StepAddForm({ onCancel, onSubmit, existingSteps }: {
           <span className="text-[11px] text-faint shrink-0">{t("epic.depsOptional")}</span>
           <select
             multiple
-            className="flex-1 bg-elevated/50 text-[11px] text-body rounded px-1 py-0.5 focus:outline-none h-10"
+            className="flex-1 bg-surface text-[11px] text-body rounded px-1 py-0.5 focus:outline-none h-10"
             value={dependsOn}
             onChange={(e) => setDependsOn(Array.from(e.target.selectedOptions).map((o) => o.value))}
             title={t("epic.stepDepsTitle")}

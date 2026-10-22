@@ -5,11 +5,23 @@ import { getEpicAutoExecute, setEpicAutoExecute } from "../../hooks/useExecution
 import { epicStatusBadge } from "../../epicConstants";
 import { formatDate } from "../../utils";
 import type { Epic, EpicStatus, GlobalEpic, StepStage } from "../../types/epics";
+import Badge, { type BadgeTone } from "../Badge";
 import ConfirmButton from "../ConfirmButton";
 import { GRID, IN_PROGRESS_STAGES, epicStatusKey, type EpicPatch } from "./helpers";
 import { SignalCell } from "./SignalCell";
 import { StepRow } from "./StepRow";
 import { EpicEditForm, NewEpicForm, StepAddForm } from "./forms";
+
+/** 方案状态 → Badge tone（与 epicStatusBadge 的 dot/bg/text 语义就近映射）。 */
+const statusTone: Record<EpicStatus, BadgeTone> = {
+  draft: "muted",
+  active: "accent",
+  verifying: "info",
+  observing: "amber",
+  done: "success",
+  blocked: "danger",
+  paused: "muted",
+};
 
 export interface EpicRowProps {
   epic: Epic;
@@ -89,15 +101,15 @@ export function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAdd
     <>
       {/* ── 行 ── */}
       <div
-        className={`${GRID} py-2.5 border-b border-line/60 cursor-pointer hover:bg-surface/60 transition-colors ${
+        className={`${GRID} py-2.5 border-b border-line/60 cursor-pointer hover:bg-surface-dim transition-colors ${
           isDone ? "opacity-50" : isBlocked ? "opacity-70" : ""
         } ${depth === 1 ? "bg-heading/[.02]" : ""}`}
         onClick={() => setExpanded(!expanded)}
       >
         {/* 方案 */}
         <div className="flex items-center gap-2 min-w-0">
-          {depth === 1 && <span className="text-faint shrink-0 w-4 text-center text-[10px]">└</span>}
-          <span className={`text-faint shrink-0 w-4 text-center text-[10px] transition-transform ${expanded ? "rotate-90" : ""}`}>▶</span>
+          {depth === 1 && <span className="text-faint shrink-0 w-4 text-center text-[11px]">└</span>}
+          <span className={`text-faint shrink-0 w-4 text-center text-[11px] transition-transform ${expanded ? "rotate-90" : ""}`}>▶</span>
           <div className="min-w-0">
             <div className={`break-words leading-snug ${depth === 0 ? "text-sm font-semibold" : "text-[13px] font-medium"} ${isDone ? "text-faint line-through" : "text-heading"}`}>
               {/* 夜间待办自动产出的方案：标题由 producer 固定以"自动处理·"开头 */}
@@ -114,9 +126,9 @@ export function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAdd
               {formatDate(epic.updated_at, lang)}
             </div>
           </div>
-          <span className={`text-[11px] font-mono px-1.5 py-px rounded shrink-0 ${priorityBadge(epic.priority)}`}>
+          <Badge tone={priorityTone(epic.priority)} className="font-mono shrink-0">
             {epic.priority}
-          </span>
+          </Badge>
           {projectPath && (
             <button
               onClick={toggleAutoExec}
@@ -142,21 +154,22 @@ export function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAdd
             </button>
           )}
           {epic.close_reason && (
-            <span
-              className="text-[11px] px-1.5 py-px rounded shrink-0 bg-amber-bg text-amber"
+            <Badge
+              tone="amber"
+              className="shrink-0"
               title={`${t("epic.earlyClose")}: ${epic.close_reason}`}
             >
               ⚠{t("epic.earlyClose")}
-            </span>
+            </Badge>
           )}
         </div>
 
         {/* 状态 */}
         <div>
-          <span className={`inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded w-fit ${badge.bg} ${badge.text}`}>
+          <Badge tone={statusTone[epic.status]} className="inline-flex items-center gap-1.5">
             <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
             {t(epicStatusKey[epic.status])}
-          </span>
+          </Badge>
         </div>
 
         {/* 进度 */}
@@ -176,7 +189,7 @@ export function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAdd
 
       {/* ── 展开的详情 ── */}
       {expanded && (
-        <div className={`border-b border-line/60 bg-surface/30 px-4 py-3 space-y-3 ${depth === 1 ? "pl-12" : "pl-10"}`}>
+        <div className={`border-b border-line/60 bg-surface-dim px-4 py-3 space-y-3 ${depth === 1 ? "pl-12" : "pl-10"}`}>
           {editing ? (
             <EpicEditForm
               epic={epic}
@@ -194,7 +207,7 @@ export function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAdd
                 epic.close_reason ||
                 epic.links.doc || epic.links.branch || epic.links.note) && (
                 <section>
-                  <div className="font-mono text-[10px] tracking-widest uppercase text-faint mb-1.5">{t("epic.secDetails")}</div>
+                  <div className="font-mono text-[11px] tracking-widest uppercase text-faint mb-1.5">{t("epic.secDetails")}</div>
                   <div className="space-y-1.5">
                     {epic.description && (
                       <p className="text-[13px] text-body leading-relaxed">{epic.description}</p>
@@ -234,7 +247,7 @@ export function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAdd
 
               {/* 步骤区 */}
               <section>
-                <div className="font-mono text-[10px] tracking-widest uppercase text-faint mb-1">{t("epic.secSteps")}</div>
+                <div className="font-mono text-[11px] tracking-widest uppercase text-faint mb-1">{t("epic.secSteps")}</div>
                 <div className="flex flex-col gap-0.5">
                   {epic.steps.length === 0 && (
                     <div className="text-xs text-faint py-1">{t("epic.noSteps")}</div>
@@ -332,13 +345,13 @@ export function EpicRow({ epic, depth, allEpics, lang, onUpdate, onDelete, onAdd
 // StepRow — 简化三态（⬜🔄✅/⚠️）+ 白盒详情可展开 + ▶ 启动 + ⚠️ 内联处置
 // ══════════════════════════════════════════════
 
-/** 优先级徽章配色（P0 红 / P1 蓝 / P2 黄 / P3 灰）。 */
-export function priorityBadge(priority: string): string {
+/** 优先级徽章 tone（P0 红 / P1 蓝 / P2 黄 / P3 灰，语义就近映射 Badge）。 */
+export function priorityTone(priority: string): BadgeTone {
   switch ((priority || "").toUpperCase()) {
-    case "P0": return "bg-danger/15 text-danger";
-    case "P1": return "bg-accent-bg text-accent";
-    case "P2": return "bg-amber-bg text-amber";
-    default: return "bg-elevated text-faint";
+    case "P0": return "danger";
+    case "P1": return "accent";
+    case "P2": return "amber";
+    default: return "muted";
   }
 }
 

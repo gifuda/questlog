@@ -42,7 +42,9 @@
     "empty": "暂无条目",
     "nightlyReview": "🌙 夜间完成·待确认",
     "ackNightly": "确认归档",
-    "ackNightlyTitle": "确认夜间处理结果没问题，归入普通完成区（与手动完成并列）"
+    "ackNightlyTitle": "确认夜间处理结果没问题，归入普通完成区（与手动完成并列）",
+    "loadError": "清单数据加载失败",
+    "retry": "重试"
   },
   "card": {
     "itemTypeKnowhow": "经验",
@@ -198,7 +200,16 @@
     "archivedHint": "已完成方案自动归档，改回未完成状态即可恢复",
     "autoOrigin": "来自待办的夜间自动处理",
     "executeHint": "一键封包并启动执行（Runner 自动领取）",
-    "reExecuteHint": "重新封包执行（覆盖旧包）"
+    "reExecuteHint": "重新封包执行（覆盖旧包）",
+    "stepStage": {
+      "pending": "待做",
+      "running": "执行中",
+      "done": "完成",
+      "attention": "需处理"
+    },
+    "launched": "✅ 已启动",
+    "loadError": "方案数据加载失败",
+    "retry": "重试"
   },
   "arb": {
     "title": "套利机会",
@@ -252,6 +263,7 @@
     "leadToResearch": "转研究",
     "leadToResearchHint": "复制研究请求 → 粘贴到 GROS 会话发起（放行走审核流，app 不写库）",
     "leadCreatedAt": "账房落库时间",
+    "leadCognitiveGap": "认知差",
     "leadVerifiableData": "可核数据",
     "briefWaiting": "等待 GROS 侧数据",
     "decisionsTitle": "决策清单",
@@ -346,6 +358,10 @@
     "runningNow": "运行中",
     "sceneRecovered": "断点恢复",
     "recoveredFrom": "成果已恢复自",
+    "attemptNo": "第 {{no}} 次尝试",
+    "attemptShort": "尝试 #{{no}}",
+    "retryTag": "（重试）",
+    "retryLineage": "↳ 重试 #{{no}} · 源自 {{parent}}",
     "nightlySelectorTitle": "夜间链模型"
   },
   "timeline": {
@@ -464,7 +480,8 @@
     "tsFailed": "失败",
     "tsTimeout": "超时",
     "runningTitle": "在办",
-    "queuedListTitle": "排队中"
+    "queuedListTitle": "排队中",
+    "resetAt": "（重置于 {{time}}）"
   },
   "overview": {
     "empty": "各项目暂无在办事项",
@@ -483,6 +500,7 @@
     "pendingAckRow": "夜间待确认",
     "activeCount": "在办 {{count}}",
     "noProjects": "暂无项目",
+    "loading": "加载中…",
     "oldView": "项目与时间线 ›"
   },
   "morning": {

@@ -155,13 +155,13 @@ export default function ReportViewer({ text }: { text: string }) {
             </div>
           )}
           {structured.summary && (
-            <div className="rounded-md border border-line bg-surface/60 px-3 py-2.5">
+            <div className="rounded-md border border-line bg-surface-dim px-3 py-2.5">
               <div className="text-[11px] text-faint mb-1">{t("card.reportResult")}</div>
               <p className="text-[13px] text-body leading-relaxed">{structured.summary}</p>
             </div>
           )}
           {structured.unresolved && structured.unresolved.length > 0 && (
-            <div className="rounded-md border border-line bg-surface/60 px-3 py-2.5">
+            <div className="rounded-md border border-line bg-surface-dim px-3 py-2.5">
               <div className="text-[11px] text-faint mb-1">{t("card.reportImpact")}</div>
               <ul className="space-y-1">
                 {structured.unresolved.map((u, i) => (

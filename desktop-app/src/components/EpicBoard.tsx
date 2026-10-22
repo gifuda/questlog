@@ -1,4 +1,4 @@
-import { useState, useEffect, Fragment } from "react";
+import { useState, useEffect, useCallback, Fragment } from "react";
 import { useTranslation } from "react-i18next";
 import { useEpics } from "../hooks/useEpics";
 import { useProjectRunner, useRunnerStatus } from "../hooks/useExecutions";
@@ -20,7 +20,20 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
   const { status: runnerStatus, lastPollSecsAgo } = useRunnerStatus();
   const [showNewEpic, setShowNewEpic] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const lang = i18n.resolvedLanguage ?? "zh";
+
+  // 最小 error 分支：useEpics 不暴露 error（hook 内部 refresh 失败为未处理
+  // rejection），这里只捕获本组件发起的刷新（重试/onRefresh）。首载失败仍由
+  // hook 吞掉（loading 停留 true）——完整修复需 hook 暴露 error，见施工报告。
+  const refreshBoard = useCallback(async () => {
+    try {
+      await refreshEpics();
+      setLoadError(false);
+    } catch {
+      setLoadError(true);
+    }
+  }, [refreshEpics]);
 
   const sorted = sortEpics(epics);
   // 自动归档：done 的方案沉到归档折叠区，主列表只留在办方案。
@@ -32,7 +45,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
     <div className="flex flex-col h-full">
       {/* 摘要条 — 大号等宽数字 + Runner 心跳，3 秒扫读 */}
       {summary && summary.total > 0 && (
-        <div className="px-4 py-3 border-b border-line bg-surface/40 flex items-center gap-6 flex-wrap">
+        <div className="px-4 py-3 border-b border-line bg-surface-dim flex items-center gap-6 flex-wrap">
           <Metric num={summary.total} label={t("epic.sumTotal")} />
           <Metric num={summary.active} label={t("epic.sumActive")} numClass="text-accent" />
           <Metric num={summary.observing} label={t("epic.sumObserving")} numClass="text-amber" />
@@ -86,7 +99,16 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
 
       {/* 总表 */}
       <div className="flex-1 overflow-auto">
-        {loading ? (
+        {loadError && !data ? (
+          /* 刷新失败且无数据可展示：居中错误提示 + 重试（参照 InfraBoard 降级面板） */
+          <div className="flex flex-col items-center justify-center h-full gap-3">
+            <span className="text-3xl">📊</span>
+            <span className="text-[13px] text-danger">{t("epic.loadError")}</span>
+            <button className="text-[13px] text-accent hover:underline" onClick={refreshBoard}>
+              {t("epic.retry")}
+            </button>
+          </div>
+        ) : loading ? (
           /* 首载期间不渲染空态，避免"暂无方案"闪现 */
           <div className="h-full" />
         ) : sorted.length === 0 && !showNewEpic ? (
@@ -95,7 +117,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
             <span className="text-sm">{t("epic.emptyTitle")}</span>
             <span className="text-xs">{t("epic.emptyDesc")}</span>
             <button
-              className="text-[13px] px-3 py-1.5 bg-accent text-white rounded-lg hover:opacity-90"
+              className="text-[13px] px-3 py-1.5 bg-accent text-on-accent rounded-lg hover:opacity-90"
               onClick={() => setShowNewEpic(true)}
             >
               {t("epic.newPlan")}
@@ -125,7 +147,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                   onDeleteStep={(stepId) => deleteStep(stepId)}
                   onAddChild={(id, title, opts) => addEpic(title, { ...opts, parentId: id })}
                   projectPath={projectPath}
-                  onRefresh={refreshEpics}
+                  onRefresh={refreshBoard}
                   globalEnabled={projectStatus?.global_enabled}
                   projectEnabled={projectStatus?.project_enabled}
                 />
@@ -142,7 +164,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                     onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
                     onDeleteStep={(stepId) => deleteStep(stepId)}
                     projectPath={projectPath}
-                  onRefresh={refreshEpics}
+                  onRefresh={refreshBoard}
                     globalEnabled={projectStatus?.global_enabled}
                     projectEnabled={projectStatus?.project_enabled}
                   />
@@ -154,14 +176,14 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
             {archivedEpics.length > 0 && (
               <>
                 <button
-                  className={`${GRID} w-full h-9 border-b border-line/60 text-left text-[11px] text-faint hover:text-muted hover:bg-surface/40 transition-colors`}
+                  className={`${GRID} w-full h-9 border-b border-line/60 text-left text-[11px] text-faint hover:text-muted hover:bg-surface-dim transition-colors`}
                   onClick={() => setShowArchived(!showArchived)}
                 >
                   <span className="flex items-center gap-1.5">
                     <span className={`inline-block transition-transform ${showArchived ? "rotate-90" : ""}`}>▸</span>
                     🗂 {t("epic.archived")}（{archivedEpics.length}）
                   </span>
-                  <span className="col-span-3 text-[10px] text-faint/70">{t("epic.archivedHint")}</span>
+                  <span className="col-span-3 text-[11px] text-muted">{t("epic.archivedHint")}</span>
                 </button>
                 {showArchived &&
                   archivedEpics.map((epic) => (
@@ -178,7 +200,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                         onDeleteStep={(stepId) => deleteStep(stepId)}
                         onAddChild={(id, title, opts) => addEpic(title, { ...opts, parentId: id })}
                         projectPath={projectPath}
-                  onRefresh={refreshEpics}
+                  onRefresh={refreshBoard}
                         globalEnabled={projectStatus?.global_enabled}
                         projectEnabled={projectStatus?.project_enabled}
                       />
@@ -195,7 +217,7 @@ export default function EpicBoard({ projectPath }: EpicBoardProps) {
                           onUpdateStep={(stepId, patch) => updateStep(stepId, patch)}
                           onDeleteStep={(stepId) => deleteStep(stepId)}
                           projectPath={projectPath}
-                  onRefresh={refreshEpics}
+                  onRefresh={refreshBoard}
                           globalEnabled={projectStatus?.global_enabled}
                           projectEnabled={projectStatus?.project_enabled}
                         />

@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useInfraSnapshot } from "../hooks/useInfraSnapshot";
+import Badge from "./Badge";
 import {
   DSH_DAILY_GATE,
   dshPct,
@@ -99,7 +100,7 @@ export default function InfraBoard() {
 
   // 页头（含 F4 手动刷新按钮，任何状态下常驻）
   const header = (
-    <div className="px-4 py-2.5 border-b border-line bg-surface/30 flex items-center gap-3 text-[11px] flex-wrap shrink-0">
+    <div className="px-4 py-2.5 border-b border-line bg-surface-dim flex items-center gap-3 text-[11px] flex-wrap shrink-0">
       <span className="text-[13px] font-bold text-heading">🖥 {t("infra.title")}</span>
       <span className="text-faint">{t("infra.readOnlyHint")}</span>
       <span className="ml-auto text-faint tabular-nums" title={file?.fetched_at ?? ""}>
@@ -188,7 +189,7 @@ function QuotaCard({
 }) {
   const { t } = useTranslation();
   return (
-    <section className="rounded-lg border border-line bg-surface/30 p-3">
+    <section className="rounded-lg border border-line bg-surface-dim p-3">
       <div className="flex items-center gap-2 mb-1.5">
         <h2 className="text-[13px] font-medium text-heading">🔋 {t("infra.quotaTitle")}</h2>
         <span className="text-[11px] text-faint">{t("infra.quotaLegend")}</span>
@@ -215,9 +216,9 @@ function ProviderCard({ provider: p }: { provider: InfraProvider }) {
   const week = typeof p.weekly?.remaining_pct === "number" ? p.weekly.remaining_pct : null;
   const tip =
     `${t("infra.quota5h")} ${fmtPct(five)}` +
-    (p.five_hour?.reset_local ? `（重置于 ${p.five_hour.reset_local}）` : "") +
+    (p.five_hour?.reset_local ? t("infra.resetAt", { time: p.five_hour.reset_local }) : "") +
     ` · ${t("infra.quotaWeek")} ${fmtPct(week)}` +
-    (p.weekly?.reset_local ? `（重置于 ${p.weekly.reset_local}）` : "") +
+    (p.weekly?.reset_local ? t("infra.resetAt", { time: p.weekly.reset_local }) : "") +
     (p.error ? ` · ${p.error}` : "") +
     (p.state ? ` · ${p.state}` : "");
   return (
@@ -304,7 +305,7 @@ function BaseStatusCard({ base }: { base?: InfraBase }) {
   const dshBar = dshPct(dsh);
 
   return (
-    <section className="rounded-lg border border-line bg-surface/30 p-3">
+    <section className="rounded-lg border border-line bg-surface-dim p-3">
       <h2 className="text-[13px] font-medium text-heading mb-2">🧱 {t("infra.baseTitle")}</h2>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {/* worker 运行态 */}
@@ -362,7 +363,7 @@ function BaseStatusCard({ base }: { base?: InfraBase }) {
               <div key={r.id ?? `run-${i}`} className="flex items-center gap-2 text-[11px] min-w-0">
                 <span className="text-faint font-mono w-8 shrink-0">#{r.id ?? "?"}</span>
                 <span className="truncate min-w-0" title={r.title}>{r.title}</span>
-                <span className="text-[11px] px-1 rounded bg-info/10 text-info shrink-0 font-mono">{r.harness}</span>
+                <Badge tone="info" className="font-mono shrink-0">{r.harness}</Badge>
                 <span className="ml-auto text-faint shrink-0 font-mono tabular-nums">{sinceLabel(r.at, nowMs)}</span>
               </div>
             ))}
@@ -377,7 +378,7 @@ function BaseStatusCard({ base }: { base?: InfraBase }) {
               <div key={r.id ?? `wait-${i}`} className="flex items-center gap-2 text-[11px] min-w-0">
                 <span className="text-faint font-mono w-8 shrink-0">#{r.id ?? "?"}</span>
                 <span className="truncate min-w-0" title={r.title}>{r.title}</span>
-                <span className="text-[11px] px-1 rounded bg-elevated text-muted shrink-0 font-mono">{r.harness}</span>
+                <Badge tone="muted" className="font-mono shrink-0">{r.harness}</Badge>
                 <span className="ml-auto text-faint shrink-0 font-mono tabular-nums">{sinceLabel(r.at, nowMs)}</span>
               </div>
             ))}
@@ -421,11 +422,11 @@ function HealthStrip({ health }: { health?: Record<string, string> }) {
   const { t } = useTranslation();
   const items = healthItems(health);
   return (
-    <section className="rounded-lg border border-line bg-surface/30 p-3">
+    <section className="rounded-lg border border-line bg-surface-dim p-3">
       <div className="flex items-center gap-2 mb-2">
         <h2 className="text-[13px] font-medium text-heading">🩺 {t("infra.healthTitle")}</h2>
         {typeof health?.checked_at === "string" && (
-          <span className="text-[11px] text-faint ml-auto tabular-nums">{health.checked_at}</span>
+          <span className="text-[11px] text-muted ml-auto tabular-nums">{health.checked_at}</span>
         )}
       </div>
       {items.length === 0 ? (

@@ -81,7 +81,7 @@ export default function ArbBoard() {
   return (
     <div className="flex flex-col h-full">
       {/* 汇总条（需求 3.5）——置顶横贯，双栏之上 */}
-      <div className="px-4 py-2.5 border-b border-line bg-surface/30 flex items-center gap-3 text-[11px] text-muted flex-wrap shrink-0">
+      <div className="px-4 py-2 border-b border-line bg-surface-dim flex items-center gap-3 text-[11px] text-muted flex-wrap shrink-0">
         <span className="font-bold text-heading">📈 {t("arb.title")}</span>
         <span className="text-accent">{t("arb.summaryOpen", { count: summary.open })}</span>
         <span className="text-muted">{t("arb.summarySettled", { count: summary.settled })}</span>
@@ -91,7 +91,7 @@ export default function ArbBoard() {
         <span className="text-amber">
           {t("arb.summaryBias")}: {summary.mean_bias === null ? "—" : fmtSigned(summary.mean_bias, 4)}
         </span>
-        <span className="text-faint ml-auto">{t("arb.readOnlyHint")}</span>
+        <span className="text-muted ml-auto">{t("arb.readOnlyHint")}</span>
       </div>
 
       {/* 自动化控制条（契约 v3 B；GROS-01 增量 #2 未落地时置灰）——
@@ -107,7 +107,7 @@ export default function ArbBoard() {
         {/* 左行动栏：决策处置区（契约 v4，第一行动区=栏顶）→ 侦察线索
             （契约 v3 A，GROS-01 增量 #2 未落地时置灰）。晨报概要已并入
             晨报页（D2），这里只留处置。 */}
-        <div className="w-80 shrink-0 border-r border-line overflow-y-auto">
+        <div className="w-80 shrink-0 border-r border-line overflow-y-auto flex flex-col">
           <DecisionsSection decisions={data.decisions} />
           <LeadsSection leads={data.leads} />
         </div>
@@ -119,7 +119,7 @@ export default function ArbBoard() {
               <button
                 key={f}
                 className={`text-[11px] px-2.5 py-1 rounded-full transition-colors ${
-                  filter === f ? "bg-accent text-white" : "text-muted hover:bg-elevated"
+                  filter === f ? "bg-accent text-on-accent" : "text-muted hover:bg-elevated"
                 }`}
                 onClick={() => setFilter(f)}
               >
@@ -127,7 +127,7 @@ export default function ArbBoard() {
               </button>
             ))}
             <div className="ml-auto flex items-center gap-1.5">
-              <span className="text-[10px] text-faint">{t("arb.sortBy")}</span>
+              <span className="text-[11px] text-faint">{t("arb.sortBy")}</span>
               {(["diff", "annualized"] as ArbSort[]).map((s) => (
                 <button
                   key={s}
@@ -225,19 +225,19 @@ function OpenCard({ item }: { item: ArbOpenHypothesis }) {
   }
 
   return (
-    <div className="rounded-lg border border-line bg-surface/50 hover:border-accent/30 transition-colors">
+    <div className="rounded-lg border border-line bg-surface-dim hover:border-accent transition-colors">
       <div className="px-3 py-2.5 cursor-pointer" onClick={() => setExpanded(!expanded)}>
         <div className="flex items-center gap-2">
           <Badge tone="accent" className="shrink-0">
             {t("arb.statusOpen")}
           </Badge>
           <span className="text-xs font-medium flex-1 truncate text-heading">{item.title}</span>
-          <span className="text-xs font-mono font-bold text-heading shrink-0">
+          <span className="text-xs font-mono font-bold tabular-nums text-heading shrink-0">
             {fmtSigned(item.price_diff, 4)}
           </span>
-          <span className="text-[10px] text-faint shrink-0">{expanded ? "▾" : "▸"}</span>
+          <span className="text-[11px] text-faint shrink-0">{expanded ? "▾" : "▸"}</span>
         </div>
-        <div className="mt-1.5 flex items-center gap-3 text-[10px] text-muted flex-wrap">
+        <div className="mt-1.5 flex items-center gap-3 text-[11px] text-muted tabular-nums flex-wrap">
           <span title={t("arb.annualized")}>
             {t("arb.annualizedShort")}: {fmtSigned(item.annualized)}
           </span>
@@ -279,11 +279,11 @@ function OpenCard({ item }: { item: ArbOpenHypothesis }) {
           )}
           {/* 复制结算命令（需求 3.7） */}
           <div className="flex items-center gap-2">
-            <code className="flex-1 text-[10px] font-mono text-muted bg-elevated/50 rounded px-2 py-1 truncate">
+            <code className="flex-1 text-[11px] font-mono text-muted bg-elevated rounded px-2 py-1 truncate">
               {item.settle_hint}
             </code>
             <button
-              className="text-[10px] px-2 py-1 rounded bg-accent text-white hover:opacity-90 shrink-0"
+              className="text-[11px] px-2 py-1 rounded bg-accent text-on-accent hover:opacity-90 shrink-0"
               onClick={(e) => { e.stopPropagation(); copySettle(); }}
             >
               {copied ? t("arb.copied") : t("arb.copySettle")}
@@ -306,16 +306,16 @@ function SettledCard({ item }: { item: ArbSettledHypothesis }) {
     expired: "muted",
   };
   return (
-    <div className="rounded-lg border border-line bg-surface/30 px-3 py-2 opacity-80">
+    <div className="rounded-lg border border-line bg-surface-dim px-3 py-2 opacity-80">
       <div className="flex items-center gap-2">
         <Badge tone={outcomeTone[item.outcome] ?? "muted"} className="shrink-0">
           {t(`arb.outcome_${item.outcome}`)}
         </Badge>
         <span className="text-xs flex-1 truncate text-muted line-through">{item.title}</span>
-        <span className="text-[10px] font-mono text-faint shrink-0">
+        <span className="text-[11px] font-mono tabular-nums text-faint shrink-0">
           {t("arb.realized")}: {fmtNum(item.realized_value, 2)}
         </span>
-        <span className="text-[10px] text-faint shrink-0">
+        <span className="text-[11px] text-faint tabular-nums shrink-0">
           {typeof item.settled_at === "string" ? item.settled_at.slice(0, 10) : "—"}
         </span>
       </div>
@@ -368,9 +368,9 @@ function ControlBar({ control }: { control?: ArbControl }) {
   if (!control) {
     // undefined = GROS-01 增量 #2 未落地 → 按约定置灰
     return (
-      <div className="px-4 py-1.5 border-b border-line/50 text-[10px] text-faint/70 flex items-center gap-2">
+      <div className="px-4 py-2 border-b border-line/50 text-[11px] text-muted flex items-center gap-2">
         <span>🎛 {t("arb.controlTitle")}</span>
-        <span className="px-1.5 py-px rounded bg-elevated text-faint/70">{t("arb.controlPending")}</span>
+        <span className="px-1.5 py-px rounded bg-elevated text-muted">{t("arb.controlPending")}</span>
       </div>
     );
   }
@@ -416,7 +416,7 @@ function ControlBar({ control }: { control?: ArbControl }) {
 
   // 顶部全宽横排（2026-10-08 用户裁定：配置旋钮回顶部，不放左栏）。
   return (
-    <div className="px-4 py-1.5 border-b border-line/50 flex items-center gap-3 text-[11px] flex-wrap shrink-0">
+    <div className="px-4 py-2 border-b border-line/50 flex items-center gap-3 text-[11px] flex-wrap shrink-0">
       <span className="text-faint shrink-0">🎛 {t("arb.controlTitle")}</span>
 
       {/* 雷达模型 */}
@@ -468,14 +468,14 @@ function ControlBar({ control }: { control?: ArbControl }) {
 
       {/* 提交反馈：错误 > 待应用 > 最后更新时间 */}
       {error ? (
-        <span className="text-danger ml-auto text-[10px] truncate max-w-[280px]" title={error}>
+        <span className="text-danger ml-auto text-[11px] truncate max-w-[280px]" title={error}>
           ✗ {error}
         </span>
       ) : anyPending ? (
-        <span className="text-amber ml-auto text-[10px] shrink-0">{t("arb.controlSubmitted")}</span>
+        <span className="text-amber ml-auto text-[11px] shrink-0">{t("arb.controlSubmitted")}</span>
       ) : (
         control.updated_at && (
-          <span className="text-faint/70 ml-auto text-[10px] shrink-0">{control.updated_at.replace("T", " ").slice(0, 16)}</span>
+          <span className="text-muted ml-auto text-[11px] shrink-0">{control.updated_at.replace("T", " ").slice(0, 16)}</span>
         )
       )}
     </div>
@@ -524,9 +524,9 @@ function LeadsSection({ leads }: { leads?: ArbLead[] }) {
   if (leads === undefined) {
     // undefined = GROS-01 增量 #2 未落地 → 按约定置灰
     return (
-      <div className="px-4 py-2 border-b border-line/50 text-[10px] text-faint/70 flex items-center gap-2 shrink-0">
+      <div className="px-4 py-2 border-b border-line/50 text-[11px] text-muted flex items-center gap-2 shrink-0">
         <span>🛰 {t("arb.leadsTitle")}</span>
-        <span className="px-1.5 py-px rounded bg-elevated text-faint/70">{t("arb.controlPending")}</span>
+        <span className="px-1.5 py-px rounded bg-elevated text-muted">{t("arb.controlPending")}</span>
       </div>
     );
   }
@@ -537,11 +537,11 @@ function LeadsSection({ leads }: { leads?: ArbLead[] }) {
     <div className="px-3 pt-2.5 pb-3">
       <div className="flex items-center gap-2 mb-1.5">
         <span className="text-[11px] font-medium text-heading">🛰 {t("arb.leadsTitle")}</span>
-        <span className="text-[10px] text-faint">{visible.length}</span>
-        <span className="text-[11px] text-faint/70 ml-auto">{t("arb.leadsHint")}</span>
+        <span className="text-[11px] text-faint">{visible.length}</span>
+        <span className="text-[11px] text-muted ml-auto">{t("arb.leadsHint")}</span>
       </div>
       {visible.length === 0 ? (
-        <div className="text-[10px] text-faint py-1">{t("arb.noLeads")}</div>
+        <div className="text-[11px] text-faint py-1">{t("arb.noLeads")}</div>
       ) : (
         <div className="flex flex-col gap-1.5">
           {visible.map((lead) => (
@@ -582,7 +582,7 @@ function LeadCard({ lead }: { lead: ArbLead }) {
   }
 
   return (
-    <div className="rounded-lg border border-line bg-surface/40 px-2.5 py-1.5">
+    <div className="rounded-lg border border-line bg-surface-dim px-2.5 py-1.5">
       <div className="flex items-center gap-2">
         {lead.status === "promoted" ? (
           <Badge tone="success" className="shrink-0"
@@ -598,9 +598,9 @@ function LeadCard({ lead }: { lead: ArbLead }) {
           {lead.phenomenon ?? "—"}
         </span>
         {lead.domain && (
-          <span className="text-[11px] px-1.5 py-px rounded bg-accent/10 text-accent shrink-0">
+          <Badge tone="accent" className="shrink-0">
             {lead.domain}
-          </span>
+          </Badge>
         )}
         <span className="text-[11px] text-faint shrink-0"
           title={`${t("arb.leadCreatedAt")}: ${lead.created_at ?? "—"}\n${lead.conversation_id ?? ""}`}>
@@ -616,7 +616,7 @@ function LeadCard({ lead }: { lead: ArbLead }) {
         </span>
         {lead.status === "open" && (
           <button
-            className="ml-auto text-[10px] px-1.5 py-px rounded bg-accent/15 text-accent hover:bg-accent/25 shrink-0"
+            className="ml-auto text-[11px] px-1.5 py-px rounded bg-accent/15 text-accent hover:bg-accent/25 shrink-0"
             onClick={copyResearchPrompt}
             title={t("arb.leadToResearchHint")}
           >
@@ -662,9 +662,9 @@ function DecisionsSection({ decisions }: { decisions?: ArbDecisionItem[] }) {
 
   if (decisions === undefined) {
     return (
-      <div className="px-4 py-1.5 border-b border-line/50 text-[11px] text-faint/70 flex items-center gap-2 shrink-0">
+      <div className="px-4 py-2 border-b border-line/50 text-[11px] text-muted flex items-center gap-2 shrink-0">
         <span>☑ {t("arb.decisionsTitle")}</span>
-        <span className="px-1.5 py-px rounded bg-elevated text-faint/70">{t("arb.briefWaiting")}</span>
+        <span className="px-1.5 py-px rounded bg-elevated text-muted">{t("arb.briefWaiting")}</span>
       </div>
     );
   }
@@ -688,11 +688,11 @@ function DecisionsSection({ decisions }: { decisions?: ArbDecisionItem[] }) {
   };
 
   return (
-    <div className="px-3 pt-2.5 pb-2 border-b border-line/50">
+    <div className="px-3 pt-2.5 pb-2 border-b border-line/50 flex-1">
       <div className="flex items-center gap-2 mb-1.5">
         <span className="text-[13px] font-medium text-heading">☑ {t("arb.decisionsTitle")}</span>
         <span className="text-[11px] text-faint tabular-nums">{items.length}</span>
-        <span className="text-[11px] text-faint/70 ml-auto shrink-0">{t("arb.decisionHint")}</span>
+        <span className="text-[11px] text-muted ml-auto shrink-0">{t("arb.decisionHint")}</span>
       </div>
       <div className="flex flex-col gap-1.5">
         {items.map((d, i) => (
@@ -768,7 +768,7 @@ function DecisionRow({ item: d, mark, onExecuted, onReset }: {
   const deadlineNear = isDeadlineNear(d.deadline);
 
   return (
-    <div className={`rounded-lg border px-2.5 py-1.5 ${executedHere ? "border-amber/30 bg-amber/5" : "border-line bg-surface/40"}`}>
+    <div className={`rounded-lg border px-2.5 py-1.5 ${executedHere ? "border-amber/30 bg-amber-bg" : "border-line bg-surface-dim"}`}>
       <div className="flex items-center gap-2 min-w-0">
         <Badge tone={executedHere ? "amber" : "accent"} className="shrink-0 font-mono">
           {id}
@@ -778,7 +778,7 @@ function DecisionRow({ item: d, mark, onExecuted, onReset }: {
         </span>
         {/* 已挂 N 天角标（pending_days） */}
         {typeof d.pending_days === "number" && !Number.isNaN(d.pending_days) && (
-          <span className="text-[10px] text-faint shrink-0" title={t("arb.decisionPendingDays")}>
+          <span className="text-[11px] text-faint shrink-0" title={t("arb.decisionPendingDays")}>
             {t("arb.decisionPendingDays", { days: d.pending_days })}
           </span>
         )}
@@ -832,7 +832,7 @@ function DecisionRow({ item: d, mark, onExecuted, onReset }: {
       </div>
       {/* 失败：错误输出原样显示（不重试） */}
       {error && (
-        <div className="mt-1 text-[10px] text-danger whitespace-pre-wrap break-all max-h-24 overflow-y-auto" title={error}>
+        <div className="mt-1 text-[11px] text-danger whitespace-pre-wrap break-all max-h-24 overflow-y-auto" title={error}>
           ✗ {error}
         </div>
       )}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { useTodos } from "../hooks/useStore";
 import { useTodoStatus } from "../hooks/useFleetHealth";
@@ -24,6 +24,21 @@ export default function KanbanBoard({ projectPath, onOpenEpics }: KanbanBoardPro
   const nightlyItems = doneItems.filter((i) => i.auto_completed_at && !i.auto_ack_at);
   const regularDone = doneItems.filter((i) => !(i.auto_completed_at && !i.auto_ack_at));
 
+  // 最小 error 分支：useTodos 不暴露 error（hook 内部 refresh 失败为未处理
+  // rejection），这里只捕获本组件发起的刷新（重试）。首载失败仍由 hook 吞掉
+  // （loading 停留 true）——完整修复需 hook 暴露 error，见施工报告。
+  const [loadError, setLoadError] = useState(false);
+  const refreshBoard = useCallback(async () => {
+    try {
+      await refresh();
+      setLoadError(false);
+    } catch {
+      setLoadError(true);
+    }
+  }, [refresh]);
+  const boardEmpty =
+    knowhow.length === 0 && todos.length === 0 && ideas.length === 0 && doneItems.length === 0;
+
   return (
     <div className="flex flex-col h-full">
       {/* Tag filter bar */}
@@ -32,7 +47,7 @@ export default function KanbanBoard({ projectPath, onOpenEpics }: KanbanBoardPro
           <span className="text-[11px] text-faint mr-1 shrink-0">{t("kanban.tagFilter")}</span>
           <button
             className={`text-[11px] px-2 py-0.5 rounded transition-colors shrink-0 ${
-              !tagFilter ? "bg-accent text-white" : "text-muted hover:text-heading hover:bg-elevated"
+              !tagFilter ? "bg-accent text-on-accent" : "text-muted hover:text-heading hover:bg-elevated"
             }`}
             onClick={() => setTagFilter(null)}
           >
@@ -42,7 +57,7 @@ export default function KanbanBoard({ projectPath, onOpenEpics }: KanbanBoardPro
             <button
               key={tag}
               className={`text-[11px] px-2 py-0.5 rounded transition-colors shrink-0 ${
-                tagFilter === tag ? "bg-accent text-white" : "text-muted hover:text-heading hover:bg-elevated"
+                tagFilter === tag ? "bg-accent text-on-accent" : "text-muted hover:text-heading hover:bg-elevated"
               }`}
               onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
             >
@@ -53,7 +68,16 @@ export default function KanbanBoard({ projectPath, onOpenEpics }: KanbanBoardPro
       )}
 
       {/* Three columns — 首载期间不渲染空态，避免"暂无"闪现 */}
-      {loading ? (
+      {loadError && boardEmpty ? (
+        /* 刷新失败且无数据可展示：居中错误提示 + 重试（参照 InfraBoard 降级面板） */
+        <div className="flex-1 flex flex-col items-center justify-center gap-3">
+          <span className="text-3xl">📋</span>
+          <span className="text-[13px] text-danger">{t("kanban.loadError")}</span>
+          <button className="text-[13px] text-accent hover:underline" onClick={refreshBoard}>
+            {t("kanban.retry")}
+          </button>
+        </div>
+      ) : loading ? (
         <div className="flex-1" />
       ) : (
       <div className="flex gap-4 flex-1 p-4 overflow-y-auto">
@@ -85,7 +109,7 @@ export default function KanbanBoard({ projectPath, onOpenEpics }: KanbanBoardPro
                     <Card item={item} projectPath={projectPath} onRefresh={refresh} dimmed scheduleEnabled={scheduleEnabled} taskLink={taskLinks[item.id]} onOpenEpics={onOpenEpics} />
                   </div>
                   <button
-                    className="shrink-0 text-[11px] px-2.5 py-1.5 mt-1 rounded bg-accent text-white hover:opacity-90 transition-colors"
+                    className="shrink-0 text-[11px] px-2.5 py-1.5 mt-1 rounded bg-accent text-on-accent hover:opacity-90 transition-colors"
                     onClick={() => updateItem(projectPath, item.id, { auto_ack: true }).then(refresh)}
                     title={t("kanban.ackNightlyTitle")}
                   >

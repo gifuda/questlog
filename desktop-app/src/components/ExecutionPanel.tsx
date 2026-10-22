@@ -15,21 +15,23 @@
 import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useExecutions, useExecutionActions, useDecisionRequests, useCurrentExecution, type Execution, type ExecutionStatus } from "../hooks/useExecutions";
+import Badge, { type BadgeTone } from "./Badge";
 import ConfirmButton from "./ConfirmButton";
 
-const STATUS_COLORS: Record<ExecutionStatus, string> = {
-  queued: "bg-elevated text-muted",
-  running: "bg-accent-bg text-accent animate-pulse",
-  candidate: "bg-amber-bg text-amber",
-  verifying: "bg-info-bg text-info animate-pulse",
-  passed: "bg-success/15 text-success",
-  failed: "bg-danger/15 text-danger",
-  cancelled: "bg-elevated text-faint",
-  cancel_requested: "bg-amber-bg text-amber animate-pulse",
-  pause_requested: "bg-amber-bg text-amber animate-pulse",
-  timed_out: "bg-danger/15 text-danger",
-  blocked: "bg-amber-bg text-amber",
-  stale: "bg-elevated text-faint",
+/** 执行状态 → Badge tone（原 STATUS_COLORS 语义色就近映射）。 */
+const STATUS_TONE: Record<ExecutionStatus, { tone: BadgeTone; className?: string }> = {
+  queued: { tone: "muted" },
+  running: { tone: "accent", className: "animate-pulse" },
+  candidate: { tone: "amber" },
+  verifying: { tone: "info", className: "animate-pulse" },
+  passed: { tone: "success" },
+  failed: { tone: "danger" },
+  cancelled: { tone: "muted" },
+  cancel_requested: { tone: "amber", className: "animate-pulse" },
+  pause_requested: { tone: "amber", className: "animate-pulse" },
+  timed_out: { tone: "danger" },
+  blocked: { tone: "amber" },
+  stale: { tone: "muted" },
 };
 
 function formatTimestamp(ts: number): string {
@@ -84,47 +86,54 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
     >
       <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(!expanded)}>
         <div className="flex items-center gap-2 flex-wrap">
-          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[exec.status]}`}>
+          <Badge
+            tone={STATUS_TONE[exec.status].tone}
+            className={`font-medium ${STATUS_TONE[exec.status].className ?? ""}`.trim()}
+          >
             {t(statusKey, exec.status)}
-          </span>
+          </Badge>
           {/* Attempt number — prominent lineage marker */}
-          <span className="text-xs font-semibold text-muted">
+          <span className="text-xs font-semibold text-muted tabular-nums">
             {isRetry ? (
               <>
-                Attempt {exec.attempt_no} <span className="font-normal text-faint">(retry)</span>
+                {t("execution.attemptNo", { no: exec.attempt_no })}{" "}
+                <span className="font-normal text-faint">{t("execution.retryTag")}</span>
               </>
             ) : (
-              <>Attempt {exec.attempt_no}</>
+              t("execution.attemptNo", { no: exec.attempt_no })
             )}
           </span>
           {exec.executor && (
-            <span className="text-[11px] px-1.5 py-0.5 rounded bg-chip text-muted border border-line">
+            <Badge tone="muted" className="border border-line">
               {exec.executor}
-            </span>
+            </Badge>
           )}
           {exec.package_display_no !== undefined && (
-            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-accent-bg text-accent border border-accent/30">
+            <Badge tone="accent" className="font-mono border border-accent/30">
               #{exec.package_display_no}
-            </span>
+            </Badge>
           )}
           {exec.scene_recovered_from && (
-            <span
+            <Badge
+              tone="amber"
+              className="border border-amber/30"
               title={`${t("execution.recoveredFrom", "成果已恢复自")} ${exec.scene_recovered_from.slice(0, 16)}…`}
-              className="text-[11px] px-1.5 py-0.5 rounded bg-amber-bg text-amber border border-amber/30"
             >
               ⏫ {t("execution.sceneRecovered", "断点恢复")}
-            </span>
+            </Badge>
           )}
           <span className="text-xs text-muted tabular-nums">
             #{exec.attempts} · {formatTimestamp(exec.updated_at)}
           </span>
           {/* Lineage badge — how this attempt links into the retry chain */}
           {parentAttemptId ? (
-            <span className="text-[11px] text-muted" title={`parent: ${parentAttemptId}`}>
-              ↳ retry #{exec.attempt_no} from {parentAttemptId.slice(0, 8)}
+            <span className="text-[11px] text-muted tabular-nums" title={`parent: ${parentAttemptId}`}>
+              {t("execution.retryLineage", { no: exec.attempt_no, parent: parentAttemptId.slice(0, 8) })}
             </span>
           ) : (
-            <span className="text-[11px] text-muted">attempt #{exec.attempt_no}</span>
+            <span className="text-[11px] text-muted tabular-nums">
+              {t("execution.attemptShort", { no: exec.attempt_no })}
+            </span>
           )}
         </div>
         <span className="text-xs text-faint">{expanded ? "▼" : "▶"}</span>
@@ -298,7 +307,7 @@ export function DecisionInbox() {
               <button
                 disabled={submitting === request.request_id || !(custom[request.request_id] ?? "").trim()}
                 onClick={() => answer(request.request_id, custom[request.request_id] ?? "")}
-                className="px-2 py-0.5 rounded bg-accent text-white disabled:opacity-40"
+                className="px-2 py-0.5 rounded bg-accent text-on-accent disabled:opacity-40"
               >
                 {t("execution.submitDecision")}
               </button>
@@ -398,13 +407,13 @@ export function RunningBanner() {
       <span className="animate-pulse">⚙</span>
       <span className="font-medium text-accent">{t("execution.runningNow", "运行中")}</span>
       {current.package_display_no !== null && (
-        <span className="font-mono px-1 rounded bg-surface/60 text-accent">
+        <span className="font-mono px-1 rounded bg-surface-dim text-accent">
           #{current.package_display_no}
         </span>
       )}
       <span className="truncate">{current.step_title}</span>
       <span className="text-faint">· {t(`execution.status.${current.status}`, current.status)}</span>
-      <span className="text-faint">· attempt {current.attempt_no}</span>
+      <span className="text-faint">· {t("execution.attemptShort", { no: current.attempt_no })}</span>
       {current.scene_recovered_from && (
         <span className="px-1 rounded bg-amber-bg text-amber">
           ⏫ {t("execution.sceneRecovered", "断点恢复")}

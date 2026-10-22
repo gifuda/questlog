@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTranslation } from "react-i18next";
+import Badge from "./Badge";
 import ConfirmButton from "./ConfirmButton";
 import UndoBar from "./UndoBar";
 import { useUndo } from "../hooks/useUndo";
@@ -81,15 +82,28 @@ export default function TimelinePanel() {
   const [allItems, setAllItems] = useState<ItemSummary[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [briefing, setBriefing] = useState<BriefingData | null>(null);
+  // 首载门闩：数据未返回前显示加载态，避免空列表闪现"暂无"（参考 KanbanBoard 首载门闩）。
+  const [loading, setLoading] = useState(true);
 
   const refreshProjects = useCallback(async () => {
-    const list = await invoke<ProjectSummary[]>("get_projects");
-    setProjects(list);
+    try {
+      const list = await invoke<ProjectSummary[]>("get_projects");
+      setProjects(list);
+    } catch {
+      // invoke 失败 → 落空数据，由各视图的空态渲染，不白屏。
+      setProjects([]);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   const refreshAll = useCallback(async () => {
-    const list = await invoke<ItemSummary[]>("get_all_active");
-    setAllItems(list);
+    try {
+      const list = await invoke<ItemSummary[]>("get_all_active");
+      setAllItems(list);
+    } catch {
+      setAllItems([]);
+    }
   }, []);
 
   /**
@@ -222,28 +236,34 @@ export default function TimelinePanel() {
 
       {/* ---- body ---- */}
       <div className="flex-1 overflow-y-auto min-h-0">
-        {view.kind === "briefing" && (
-          <BriefingView
-            data={briefing}
-            projects={projects}
-            totalActive={totalActive}
-            onOpenMain={openMain}
-            onProjects={() => setView({ kind: "projects" })}
-          />
-        )}
-        {view.kind === "projects" && (
-          <ProjectList projects={projects} onSelect={openProject} onAll={openAll} totalActive={totalActive} onRemove={handleRemoveProject} />
-        )}
-        {view.kind === "all" && (
-          <AllItems items={allItems} onNavigate={openInMain} />
-        )}
-        {view.kind === "project" && (
-          <ProjectDetailList
-            data={view.data}
-            collapsed={collapsed}
-            onToggle={toggleCollapse}
-            onNavigate={openInMain}
-          />
+        {loading ? (
+          <p className="text-[13px] text-muted text-center py-8">{t("tray.loading")}</p>
+        ) : (
+          <>
+            {view.kind === "briefing" && (
+              <BriefingView
+                data={briefing}
+                projects={projects}
+                totalActive={totalActive}
+                onOpenMain={openMain}
+                onProjects={() => setView({ kind: "projects" })}
+              />
+            )}
+            {view.kind === "projects" && (
+              <ProjectList projects={projects} onSelect={openProject} onAll={openAll} totalActive={totalActive} onRemove={handleRemoveProject} />
+            )}
+            {view.kind === "all" && (
+              <AllItems items={allItems} onNavigate={openInMain} />
+            )}
+            {view.kind === "project" && (
+              <ProjectDetailList
+                data={view.data}
+                collapsed={collapsed}
+                onToggle={toggleCollapse}
+                onNavigate={openInMain}
+              />
+            )}
+          </>
         )}
       </div>
     </div>
@@ -276,7 +296,7 @@ function BriefingView({
   return (
     <div>
       {/* ---- head：☀ 晨报速览 + 待决断总数（大数字，琥珀） ---- */}
-      <div className="flex items-center gap-2 px-3.5 py-2.5 border-b border-line">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-line">
         <span className="text-[13px]">☀</span>
         <span className="text-[12px] font-semibold text-heading">{t("tray.title")}</span>
         <span className="font-mono text-[16px] font-bold text-amber tabular-nums">
@@ -363,7 +383,7 @@ function BriefingView({
 
       {/* 底部小字入口：切回项目/时间线旧视图 */}
       <button
-        className="w-full text-left px-3.5 py-2 text-[11px] text-faint hover:text-accent transition-colors"
+        className="w-full text-left px-3 py-2 text-[11px] text-faint hover:text-accent transition-colors"
         onClick={onProjects}
       >
         {t("tray.oldView")}
@@ -393,7 +413,7 @@ function TrayRow({
 }) {
   return (
     <button
-      className={`w-full flex items-center gap-2 px-3.5 py-[7px] text-left text-[11px] hover:bg-surface transition-colors cursor-pointer ${
+      className={`w-full flex items-center gap-2 px-3.5 py-1.5 text-left text-[11px] hover:bg-surface transition-colors cursor-pointer ${
         last ? "" : "border-b"
       } border-line ${dimmed ? "opacity-50" : ""}`}
       onClick={onClick}
@@ -437,13 +457,13 @@ function Header({
         ←
       </button>
       <span className="font-bold flex-1 truncate">{title}</span>
-      <span className="text-[10px] text-faint">{t("timeline.count", { total: totalActive })}</span>
-      <button onClick={showMain} className="text-[10px] text-faint hover:text-heading" title={t("timeline.showMain")}>⊞</button>
+      <span className="text-[11px] text-faint">{t("timeline.count", { total: totalActive })}</span>
+      <button onClick={showMain} className="text-[11px] text-faint hover:text-heading" title={t("timeline.showMain")}>⊞</button>
       <ConfirmButton
         label="✕"
         confirmLabel="✕"
         onConfirm={() => invoke("quit_app").catch(() => {})}
-        className="text-[10px] text-faint hover:text-danger"
+        className="text-[11px] text-faint hover:text-danger"
         title={t("timeline.quit")}
       />
     </div>
@@ -493,19 +513,22 @@ function ProjectList({
         <div className="flex items-center gap-2">
           <span className="text-xs">📋</span>
           <span className="flex-1">{t("timeline.allActive")}</span>
-          <span className="text-[10px] text-faint">{totalActive}</span>
+          <span className="text-[11px] text-faint">{totalActive}</span>
         </div>
       </button>
+      {projects.length === 0 && (
+        <p className="text-faint text-center py-8">{t("tray.noProjects")}</p>
+      )}
       {active.map((p) => (
         <ProjectRow key={p.path} project={p} onSelect={onSelect} onRemove={handleRemove} />
       ))}
       {inactive.length > 0 && (
         <>
           <button
-            className="w-full text-left px-3 py-1.5 border-b border-line/30 bg-surface/30 hover:bg-surface/50 transition-colors"
+            className="w-full text-left px-3 py-2 border-b border-line/30 bg-surface-dim hover:bg-surface transition-colors"
             onClick={() => setShowInactive((v) => !v)}
           >
-            <span className="text-[10px] text-faint">
+            <span className="text-[11px] text-faint">
               {showInactive ? "▼" : "▶"} {t("timeline.inactive", { count: inactive.length })}
             </span>
           </button>
@@ -540,16 +563,16 @@ function ProjectRow({
     >
       <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
         <span className="truncate text-heading">{project.name}</span>
-        <span className="text-[10px] text-faint shrink-0">
+        <span className="text-[11px] text-faint shrink-0">
           📘{project.counts.knowhow} ✅{project.counts.todo} 💡{project.counts.idea}
         </span>
-        <span className="text-[10px] text-faint shrink-0">{total}</span>
+        <span className="text-[11px] text-faint shrink-0">{total}</span>
       </div>
       <ConfirmButton
         label="✕"
         confirmLabel={t("timeline.confirm")}
         onConfirm={() => onRemove(project.name)}
-        className="text-[10px] text-faint hover:text-danger transition-colors shrink-0 ml-1"
+        className="text-[11px] text-faint hover:text-danger transition-colors shrink-0 ml-1"
         title={t("timeline.removeProject")}
       />
     </div>
@@ -583,7 +606,7 @@ function AllItems({
             <div className="flex items-center gap-2">
               <span className="text-xs">{typeIcons[item.type]}</span>
               {item.type === "todo" && item.processing && (
-                <span className="text-[9px] px-1 py-0.5 rounded bg-accent-bg text-accent shrink-0">🔄</span>
+                <Badge tone="accent" className="shrink-0">🔄</Badge>
               )}
               <span className="truncate flex-1">{item.title}</span>
               {item.type === "todo" && (
@@ -591,9 +614,9 @@ function AllItems({
               )}
             </div>
             <div className="flex items-center gap-2 mt-0.5">
-              <span className="text-[10px] text-faint">{item.project}</span>
-              <span className="text-[10px] text-faint">·</span>
-              <span className="text-[10px] text-faint">
+              <span className="text-[11px] text-faint">{item.project}</span>
+              <span className="text-[11px] text-faint">·</span>
+              <span className="text-[11px] text-faint">
                 {formatDate(item.updated_at, i18n.resolvedLanguage ?? "zh")}
               </span>
             </div>
@@ -645,13 +668,13 @@ function ProjectDetailList({
         return (
           <div key={g.type}>
             <button
-              className="w-full flex items-center gap-2 px-3 py-1.5 border-b border-line/30 bg-surface/50"
+              className="w-full flex items-center gap-2 px-3 py-1.5 border-b border-line/30 bg-surface-dim"
               onClick={() => onToggle(g.type)}
             >
-              <span className="text-[10px] text-faint">{isCollapsed ? "▶" : "▼"}</span>
+              <span className="text-[11px] text-faint">{isCollapsed ? "▶" : "▼"}</span>
               <span>{g.icon}</span>
               <span className="font-medium">{g.label}</span>
-              <span className="text-[10px] text-faint">({g.items.length})</span>
+              <span className="text-[11px] text-faint">({g.items.length})</span>
             </button>
             {!isCollapsed &&
               g.items.map((item) => (
@@ -665,13 +688,13 @@ function ProjectDetailList({
                   >
                     <div className="flex items-center gap-2">
                       {g.type === "todo" && item.processing && (
-                        <span className="text-[9px] px-1 py-0.5 rounded bg-accent-bg text-accent shrink-0">🔄</span>
+                        <Badge tone="accent" className="shrink-0">🔄</Badge>
                       )}
                       <span className="flex-1 truncate">{item.title}</span>
                       {g.type === "todo" && (
                         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${priorityDot[item.priority]}`} />
                       )}
-                      <span className="text-[10px] text-faint shrink-0">
+                      <span className="text-[11px] text-faint shrink-0">
                         {formatDate(item.updated_at, i18n.resolvedLanguage ?? "zh")}
                       </span>
                     </div>
@@ -725,7 +748,7 @@ function CopyRefButton({
 
   return (
     <button
-      className="text-[10px] text-faint hover:text-accent px-1 shrink-0"
+      className="text-[11px] text-faint hover:text-accent px-1 shrink-0"
       onClick={(e) => { e.stopPropagation(); handleCopy(); }}
       title={t("timeline.copyRef")}
     >

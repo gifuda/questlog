@@ -62,8 +62,8 @@ export default function ConfirmButton({
     // 保留调用方的尺寸/布局类，避免确认态布局跳动；配色与 hover 全部钉死。
     const toneCls =
       tone === "accent"
-        ? "bg-accent! text-white! hover:bg-accent!"
-        : "bg-danger! text-white! hover:bg-danger!";
+        ? "bg-accent! text-on-accent! hover:bg-accent!"
+        : "bg-danger! text-on-accent! hover:bg-danger!";
     return (
       <button
         className={`${className} ${toneCls} animate-pulse`}

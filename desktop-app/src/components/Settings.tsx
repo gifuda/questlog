@@ -83,7 +83,7 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
 
       {open && (
         <div className="absolute right-0 top-full mt-1 w-72 max-h-[80vh] overflow-y-auto bg-surface border border-line rounded-lg shadow-xl py-2 z-50">
-          <div className="px-3 pb-2 text-[10px] text-faint uppercase tracking-wider">{t("app.appearance")}</div>
+          <div className="px-3 pb-2 text-[11px] text-faint uppercase tracking-wider">{t("app.appearance")}</div>
           {themeOptions.map((opt) => (
             <button
               key={opt.value}
@@ -124,14 +124,14 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
                   title={t("arb.toggleHint")}
                 >
                   <span
-                    className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${
+                    className={`absolute top-0.5 w-3 h-3 rounded-full bg-on-accent transition-all ${
                       arbCfg?.enabled ? "left-4" : "left-0.5"
                     }`}
                   />
                 </button>
               </div>
               <input
-                className="w-full mt-1.5 bg-elevated/50 rounded px-1.5 py-0.5 text-[10px] text-muted focus:outline-none"
+                className="w-full mt-1.5 bg-surface rounded px-1.5 py-0.5 text-[11px] text-muted focus:outline-none"
                 value={boardPath}
                 onChange={(e) => setBoardPath(e.target.value)}
                 onBlur={async () => {
@@ -153,7 +153,7 @@ export default function Settings({ theme, onThemeChange }: SettingsProps) {
           <>
             <div className="my-1 border-t border-line" />
             <div className="px-3 py-1.5">
-              <div className="text-[10px] text-faint uppercase tracking-wider mb-1.5">
+              <div className="text-[11px] text-faint uppercase tracking-wider mb-1.5">
                 {t("settings.automationTitle")}
               </div>
               <div className="text-xs text-body mb-1" title={t("settings.executorHint")}>

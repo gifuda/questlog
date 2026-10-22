@@ -190,7 +190,7 @@ export default function MorningBriefing({ projects, onGoto }: MorningProps) {
       )}
       {/* ── 晨报卡（D2 合一；各源独立降级） ── */}
       <div className="rounded-xl border border-line bg-surface">
-        <div className="flex items-center gap-2 px-3.5 pt-2.5 pb-1.5">
+        <div className="flex items-center gap-2 px-3.5 pt-2.5 pb-2">
           <span className="text-[14px] font-semibold text-heading">☀ {t("morning.briefTitle")}</span>
           <span className="text-[11px] font-mono text-faint">{brief?.brief_date ?? "—"}</span>
           <AgeBadge date={brief?.brief_date} />
@@ -200,14 +200,14 @@ export default function MorningBriefing({ projects, onGoto }: MorningProps) {
           </span>
         </div>
         {brief === undefined || brief === null ? (
-          <div className="px-3.5 pb-2.5 text-[11px] text-faint">{t("morning.briefWaiting")}</div>
+          <div className="px-3.5 pb-2 text-[11px] text-faint">{t("morning.briefWaiting")}</div>
         ) : (
           <>
             {brief.headline && (
               <div className="px-3.5 pb-2 text-[13px] text-body">{brief.headline}</div>
             )}
             {(brief.opportunities ?? []).length > 0 && (
-              <div className="px-3.5 pb-2.5 border-t border-line/50 pt-2">
+              <div className="px-3.5 pb-2 border-t border-line/50 pt-2">
                 <div className="text-[11px] text-faint mb-1">{t("morning.opps")}</div>
                 {(brief.opportunities ?? []).map((o, i) => (
                   <div key={i} className="flex items-center gap-1.5 py-0.5 min-w-0">
@@ -221,7 +221,7 @@ export default function MorningBriefing({ projects, onGoto }: MorningProps) {
             )}
           </>
         )}
-        <div className="px-3.5 pb-2.5 border-t border-line/50 pt-2">
+        <div className="px-3.5 pb-2 border-t border-line/50 pt-2">
           <div className="flex items-center gap-2 text-[11px] text-faint mb-1">
             {/* digest 语义诚实：只有真的是昨夜才说"昨夜"，否则标明是最近一次 */}
             <span>
@@ -295,7 +295,7 @@ export default function MorningBriefing({ projects, onGoto }: MorningProps) {
                 disabled={empty}
                 onClick={() => onGoto("epics", r.name)}
                 title={t("overview.jumpTitle")}
-                className={`w-full text-left px-3 py-2 rounded-lg border border-line bg-surface/60 transition-colors ${
+                className={`w-full text-left px-3 py-2 rounded-lg border border-line bg-surface-dim transition-colors ${
                   empty ? "opacity-45 cursor-default" : "hover:bg-surface hover:border-accent/40"
                 }`}
               >

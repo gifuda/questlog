@@ -20,10 +20,11 @@ export const stepStageKey: Record<StepStage, string> = {
   observed: "epic.stageObserved",
 };
 
-/** 总表四列的栅格模板（表头与行共用，保证对齐）。 */
+/** 总表四列的栅格模板（表头与行共用，保证对齐）。
+ *  焦点列给 1fr：SignalCell 内容常只 2-4 字，1.8fr 在宽窗下留大片空白。 */
 
 export const GRID =
-  "grid grid-cols-[minmax(240px,2.2fr)_110px_150px_minmax(200px,1.8fr)] items-center gap-3 px-4";
+  "grid grid-cols-[minmax(240px,2.2fr)_110px_150px_minmax(200px,1fr)] items-center gap-3 px-4";
 
 /** 在办步骤 = 处于中段（已设计/已实施/已验证）的步骤。 */
 export const IN_PROGRESS_STAGES: StepStage[] = ["designed", "coded", "verified"];
