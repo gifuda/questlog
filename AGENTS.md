@@ -32,3 +32,14 @@
   8. 每次快照前形成预期项目/文件清单，逐项标记为“预期入快照”“明确不存在/不适用”或“读取/校验失败”；预期必须存在却缺失的文件必须使作业失败，或明确阻止恢复/删除审批。作业后将预期清单与实际 manifest 逐项对账，并核对来源、版本及哈希。`skipped=0` 只表示没有报告跳过，不能单独证明覆盖完整；任何 `skipped` 非零（包括因 macOS TCC 权限造成的跳过）均为部分备份，不能视为可恢复副本或删除许可。
   9. “已备份”必须核实对应的数据产物；只备份或修改 plist 仅表示作业配置已留副本，不表示项目数据已备份。
 - Runner 开关语义：总闸 + 项目开关 + epic auto_execute 三层，包只封存不入队，开关全开才被领取。
+
+
+## 家庭服务器自动化源码治理（2026-10-23）
+
+统一标准与最新逐工具准入见 `/Users/abo/Documents/ChatGPT/家庭服务器运维/docs/16-租户Git协作与交付标准.md`、同目录第18号约束及实际登记册。既有唯一源码权威保持 `https://github.com/gifuda/questlog.git` 的 `main`，NAS bundle 仅备份。不要在运行目录开发，保留原工作区脏改。
+
+当前已实际接线的工具是 M4 `codex-desktop`；其他 IDE/CLI 不继承其资格。新写任务从固定入口创建全新私有 clone/branch：`/Users/abo/Library/Application Support/HomeSupervisionQuestLogGit/intake/intakectl begin`，stdin 精确传 `schema_version/change_id/harness`。不复用他人可写目录，也不自选远端/工作区路径。交付使用同一入口的 `admit`，stdin 提交固定 candidate SHA、expected-old SHA、候选分支、scope 与真实 review 引用；验证命令由固定实现选择。main 的 required status、管理员保护、禁非快进/删除与 exact lease 不得绕过，不自行写 PASS 状态或放宽规则。凭据沿现有 gh/Keychain，不复制进源码、请求或聊天。
+
+开发前核当前租户合同与正式旁路准入回执：NAS `/volume2/db-backup/home-supervision/tenant-lifecycle/bin/lifecyclectl` 及 operation ledger 是权威。合同/保护 pin/harness 变化须重新绑定验收；raw shadow、context、源码测试或 status 汇总标签都不单独构成准入。当前 status 的 BOUND_AT_ADMISSION 仅对 active 输出，旁路准入需查成功 observe 的当前合同绑定，不能为改变标签而启用业务。固定入口的 harness 名称仍是声明、同 UID shell 不是恶意代码沙箱；不宣称其他机器/全部平台已受强制隔离。
+
+Git 接纳、发布加载与业务验收分别留证。不得顺带开启 Runner、自动恢复、业务重跑或修改原 TaskPackage/DR/三层权限边界；生产加载仍须按已授权范围、无冲突窗口、原件备份和回滚执行。
