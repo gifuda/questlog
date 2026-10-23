@@ -54,9 +54,11 @@ Runner 验收阶段在隔离 worktree 中执行**受信命令**（command_id →
 
 ## 真实 ZCode E2E
 
-`desktop-app/src-tauri/tests/e2e_bridge.rs` 中两个 live-ZCode 测试默认标记为
-`ignored`，普通 `cargo test` 不会启动真实模型或读取用户 CLI 凭据。默认运行
-`cargo test --test e2e_bridge` 时应显示 0 executed、2 ignored。
+`desktop-app/src-tauri/tests/e2e_bridge.rs` 中两个及
+`desktop-app/src-tauri/tests/e2e_decision_request.rs` 中一个 live-ZCode 测试默认
+标记为 `ignored`，普通 `cargo test` 不会启动真实模型或读取用户 CLI 凭据。运行
+`cargo test --test e2e_bridge --test e2e_decision_request` 时应显示 0 executed、
+3 ignored。
 
 仅在获得本次人工授权、具备相应模型预算，并确认本机 ZCode 与
 `~/.zcode/cli/config.json` 已配置后，才逐项显式运行，例如：
@@ -64,6 +66,7 @@ Runner 验收阶段在隔离 worktree 中执行**受信命令**（command_id →
 ```sh
 QUESTLOG_LIVE_ZCODE_E2E=1 cargo test --test e2e_bridge bridge_ready_package_to_zcode_execution -- --ignored --exact
 QUESTLOG_LIVE_ZCODE_E2E=1 cargo test --test e2e_bridge bridge_readonly_package_no_diff_counts_as_passed -- --ignored --exact
+QUESTLOG_LIVE_ZCODE_E2E=1 cargo test --test e2e_decision_request acceptance_failure_creates_decision_request -- --ignored --exact
 ```
 
 显式选择 ignored 测试却缺少 opt-in、ZCode CLI 或当前 `HOME` 下的配置文件时，

@@ -7,6 +7,25 @@ fn zcode_available() -> bool {
     std::path::Path::new("/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs").exists()
 }
 
+fn require_live_zcode_environment() {
+    assert_eq!(
+        std::env::var("QUESTLOG_LIVE_ZCODE_E2E").as_deref(),
+        Ok("1"),
+        "live ZCode E2E requires explicit opt-in: QUESTLOG_LIVE_ZCODE_E2E=1"
+    );
+    assert!(
+        zcode_available(),
+        "live ZCode E2E was explicitly requested, but ZCode CLI is missing at /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
+    );
+    let home = std::env::var_os("HOME").expect("live ZCode E2E requires HOME to be set");
+    let config = std::path::PathBuf::from(home).join(".zcode/cli/config.json");
+    assert!(
+        config.is_file(),
+        "live ZCode E2E was explicitly requested, but CLI config is missing: {}",
+        config.display()
+    );
+}
+
 fn init_git_repo(dir: &std::path::Path) -> String {
     Command::new("git")
         .args(["init"])
@@ -47,11 +66,9 @@ fn init_git_repo(dir: &std::path::Path) -> String {
 }
 
 #[test]
+#[ignore = "requires real ZCode, credentials, and explicit operator opt-in"]
 fn acceptance_failure_creates_decision_request() {
-    if !zcode_available() {
-        eprintln!("Skipping — ZCode CLI not available");
-        return;
-    }
+    require_live_zcode_environment();
 
     let runtime_dir = tempfile::tempdir().unwrap();
     std::env::set_var("QUESTLOG_RUNTIME", runtime_dir.path().join("runtime"));
