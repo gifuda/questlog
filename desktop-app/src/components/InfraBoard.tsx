@@ -1,7 +1,9 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useInfraSnapshot } from "../hooks/useInfraSnapshot";
+import { useTaskMaintenance } from "../hooks/useTaskMaintenance";
 import Badge from "./Badge";
+import { InfraTaskMaintenanceCard } from "./TaskMaintenance";
 import {
   DSH_DAILY_GATE,
   dshPct,
@@ -66,6 +68,7 @@ function fmtFetched(iso: string | null | undefined): string | null {
 export default function InfraBoard() {
   const { t } = useTranslation();
   const { envelope, loaded, refresh } = useInfraSnapshot();
+  const maintenance = useTaskMaintenance();
 
   // 信封 ok 时才解析 body；解析失败（防御兜底）→ null → 未就绪
   const file = useMemo<InfraSnapshotFile | null>(
@@ -95,7 +98,10 @@ export default function InfraBoard() {
     : t("infra.lastUnknown");
 
   if (!loaded) {
-    return <div className="flex items-center justify-center h-full text-faint text-sm">…</div>;
+    return <div className="flex flex-col h-full gap-3 p-3">
+      <div className="flex items-center justify-center text-faint text-sm">…</div>
+      <InfraTaskMaintenanceCard {...maintenance} />
+    </div>;
   }
 
   // 页头（含 F4 手动刷新按钮，任何状态下常驻）
@@ -122,6 +128,9 @@ export default function InfraBoard() {
     return (
       <div className="flex flex-col h-full">
         {header}
+        <div className="px-3 pt-3">
+          <InfraTaskMaintenanceCard {...maintenance} />
+        </div>
         <div className="flex flex-col items-center justify-center flex-1 text-faint gap-2 px-6 text-center">
           <span className="text-3xl">🖥</span>
           <span className="text-sm text-body">{t("infra.notReadyTitle")}</span>
@@ -155,6 +164,10 @@ export default function InfraBoard() {
           </button>
         </div>
       )}
+
+      <div className="px-3 pt-3">
+        <InfraTaskMaintenanceCard {...maintenance} />
+      </div>
 
       <div className={`flex-1 overflow-y-auto p-3 flex flex-col gap-3 ${notReadyCause ? "opacity-60" : ""}`}>
         {/* F1 顶部 LLM 额度卡：四家 × 5h/周双水位条 */}

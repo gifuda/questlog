@@ -14,6 +14,10 @@
 
 import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { useTaskMaintenance } from "../hooks/useTaskMaintenance";
+import { matchTaskMaintenanceLink } from "../taskMaintenanceLogic";
+import { ExecutionTaskMaintenance } from "./TaskMaintenance";
+import type { TaskMaintenance } from "../types/taskMaintenance";
 import { useExecutions, useExecutionActions, useDecisionRequests, useCurrentExecution, type Execution, type ExecutionStatus } from "../hooks/useExecutions";
 import Badge, { type BadgeTone } from "./Badge";
 import ConfirmButton from "./ConfirmButton";
@@ -44,7 +48,7 @@ function formatSha(sha: string | null): string {
   return sha.length > 12 ? `${sha.slice(0, 8)}…` : sha;
 }
 
-function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) {
+function ExecutionRow({ exec, depth = 0, maintenance }: { exec: Execution; depth?: number; maintenance: TaskMaintenance | null }) {
   const { t } = useTranslation();
   const { cancel, retry, pause } = useExecutionActions();
   const [expanded, setExpanded] = useState(false);
@@ -138,6 +142,12 @@ function ExecutionRow({ exec, depth = 0 }: { exec: Execution; depth?: number }) 
         </div>
         <span className="text-xs text-faint">{expanded ? "▼" : "▶"}</span>
       </div>
+
+      <ExecutionTaskMaintenance
+        projection={maintenance}
+        link={maintenance ? matchTaskMaintenanceLink(maintenance, exec.id, exec.attempt_no) : null}
+        covered={Boolean(maintenance?.state === "observed" && maintenance.links.some((link) => link.execution_id === exec.id && link.attempt_no === exec.attempt_no))}
+      />
 
       {expanded && (
         <div className="mt-2 space-y-1 text-xs text-muted">
@@ -323,6 +333,7 @@ export function DecisionInbox() {
 export default function ExecutionPanel({ stepId }: { stepId?: string }) {
   const { t } = useTranslation();
   const { executions, loading } = useExecutions();
+  const { projection: maintenance } = useTaskMaintenance();
 
   const filtered = useMemo(() => {
     if (!stepId) return executions;
@@ -389,7 +400,7 @@ export default function ExecutionPanel({ stepId }: { stepId?: string }) {
       {chains.map((attempts) => (
         <div key={attempts[0].id}>
           {attempts.map((exec, depth) => (
-            <ExecutionRow key={exec.id} exec={exec} depth={depth} />
+            <ExecutionRow key={exec.id} exec={exec} depth={depth} maintenance={maintenance} />
           ))}
         </div>
       ))}

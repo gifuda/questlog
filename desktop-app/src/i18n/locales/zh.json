@@ -362,7 +362,13 @@
     "attemptShort": "尝试 #{{no}}",
     "retryTag": "（重试）",
     "retryLineage": "↳ 重试 #{{no}} · 源自 {{parent}}",
-    "nightlySelectorTitle": "夜间链模型"
+    "nightlySelectorTitle": "夜间链模型",
+    "maintenanceUnknown": "维护关联状态未知。",
+    "maintenanceNotCovered": "本次摘要未覆盖，状态未知。",
+    "maintenanceStatus": "{{status}}",
+    "maintenanceCase": "问题 {{id}}",
+    "maintenanceDecision": "决策记录",
+    "maintenanceCandidate": "恢复候选：沿原决策流程确认；NAS 独立确认未提供，自动恢复关闭。"
   },
   "timeline": {
     "projectList": "项目列表",
@@ -481,7 +487,18 @@
     "tsTimeout": "超时",
     "runningTitle": "在办",
     "queuedListTitle": "排队中",
-    "resetAt": "（重置于 {{time}}）"
+    "resetAt": "（重置于 {{time}}）",
+    "maintenanceTitle": "任务与系统维护",
+    "maintenanceReadonly": "只读观察 · 不代表系统健康",
+    "maintenanceCaptured": "采集 {{time}}",
+    "maintenanceUnknownCaptured": "采集状态未知",
+    "maintenanceLoading": "读取中…",
+    "maintenanceUnknown": "当前无法确认执行关联与恢复候选；数据不可用或已过期。",
+    "maintenanceExecutions": "执行记录 {{count}}",
+    "maintenanceLinks": "明确关联 {{count}}",
+    "maintenanceCandidates": "恢复候选 {{count}}",
+    "maintenanceCoverage": "摘要覆盖 {{shown}}/{{total}}",
+    "maintenanceSource": "源数据 {{time}} · 未提供 NAS 独立确认 · 自动恢复关闭"
   },
   "overview": {
     "empty": "各项目暂无在办事项",
@@ -527,7 +544,17 @@
     "exportedAt": "导出于 {{ts}}",
     "alertStaleBrief": "晨报内容已 {{days}} 天未更新（雷达轮 {{date}}），请检查采集机雷达管线",
     "alertExportStale": "board.json 导出管线停滞（最后导出 {{ts}}）",
-    "alertOverdue": "{{id}} 决策已逾期 {{days}} 天"
+    "alertOverdue": "{{id}} 决策已逾期 {{days}} 天",
+    "maintenanceTitle": "任务与系统维护",
+    "maintenanceReadonly": "只读观察",
+    "maintenanceGoto": "打开方案追踪处理",
+    "maintenanceLoading": "读取中…",
+    "maintenanceUnknown": "状态未知，当前无法确认是否有待处理候选。",
+    "maintenanceCandidates": "有 {{count}} 条恢复候选，需按原决策流程由人确认。",
+    "maintenanceNoCandidates": "当前尚无恢复候选；这不表示所有业务健康。",
+    "maintenanceLinked": "已明确关联 {{count}} 条。",
+    "maintenanceCoverage": "关联摘要仅覆盖 {{shown}}/{{total}} 条。",
+    "maintenanceClosed": "自动恢复关闭，NAS 独立确认未提供。"
   },
   "settings": {
     "automationTitle": "自动化与模型",

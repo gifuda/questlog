@@ -7,7 +7,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useState, useCallback, useEffect } from "react";
 import { useRefreshFallback } from "../hooks/useRefreshFallback";
+import { useTaskMaintenance } from "../hooks/useTaskMaintenance";
 import Badge from "./Badge";
+import { MorningTaskMaintenance } from "./TaskMaintenance";
 import { epicStatusBadge } from "../epicConstants";
 import type { EpicStatus } from "../types/epics";
 
@@ -113,6 +115,7 @@ export default function MorningBriefing({ projects, onGoto }: MorningProps) {
   const { data: arb } = useArbBoard();
   const { health } = useFleetHealth();
   const { requests } = useDecisionRequests();
+  const maintenance = useTaskMaintenance();
 
   // 跨项目焦点（原 Overview 的数据面）
   const [epics, setEpics] = useState<OverviewEpic[]>([]);
@@ -280,6 +283,11 @@ export default function MorningBriefing({ projects, onGoto }: MorningProps) {
           onClick={drqCount > 0 ? () => onGoto("epics") : undefined}
         />
       </div>
+
+      <MorningTaskMaintenance
+        {...maintenance}
+        onGoto={() => onGoto("epics")}
+      />
 
       {/* ── 各项目焦点（D4） ── */}
       <div>
