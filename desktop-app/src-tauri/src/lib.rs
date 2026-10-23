@@ -20,6 +20,7 @@ pub mod todo_finalization;
 pub mod todo_ledger;
 pub mod todo_sweep;
 pub mod store;
+pub mod task_maintenance;
 mod tray;
 mod watcher;
 
@@ -93,6 +94,8 @@ pub fn run() {
             commands::resolve_decision_request,
             // 跨机链路健康（只读聚合）
             commands::get_fleet_health,
+            // 待办维护（显式关联只读投影）
+            commands::get_task_maintenance,
             // 服务器监控 (Infra Board — snapshot-local.json 只读视图)
             commands::get_infra_snapshot,
         ])

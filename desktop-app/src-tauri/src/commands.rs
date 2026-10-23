@@ -2546,6 +2546,17 @@ pub fn get_fleet_health_impl(
     crate::fleet_health::collect(projects)
 }
 
+/// Read-only desktop projection of linked task-maintenance evidence. The
+/// response preserves UNKNOWN as data and never activates execution behavior.
+#[tauri::command]
+pub async fn get_task_maintenance() -> serde_json::Value {
+    if crate::remote_client::enabled() {
+        crate::remote_client::get_task_maintenance()
+    } else {
+        crate::task_maintenance::get()
+    }
+}
+
 /// Get the Runner status for a specific project (global + project + effective).
 #[tauri::command]
 pub fn get_runner_project_status(

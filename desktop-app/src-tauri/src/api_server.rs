@@ -11,7 +11,7 @@
 //! command layer — single-writer discipline is unchanged.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -73,6 +73,7 @@ struct Request {
 
 fn handle(mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let peer = stream.peer_addr().ok().map(|addr| addr.ip());
     let Some(req) = read_request(&mut stream) else {
         return;
     };
@@ -80,7 +81,9 @@ fn handle(mut stream: TcpStream) {
     // simple-request forgeries (sendBeacon/form posts are text/plain or
     // urlencoded and get rejected without ever reaching a route; a JSON
     // cross-origin fetch needs a CORS preflight this server never grants).
-    let (code, body) = if req.method == "POST"
+    let (code, body) = if req.path == "/api/task-maintenance" {
+        route_for_peer(&req, peer)
+    } else if req.method == "POST"
         && !req
             .content_type
             .as_deref()
@@ -92,14 +95,7 @@ fn handle(mut stream: TcpStream) {
         route(&req)
     };
     let payload = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
-    let status = match code {
-        200 => "200 OK",
-        400 => "400 Bad Request",
-        404 => "404 Not Found",
-        405 => "405 Method Not Allowed",
-        415 => "415 Unsupported Media Type",
-        _ => "500 Internal Server Error",
-    };
+    let status = status_line(code);
     // Compress only when the client asked and it actually pays: small
     // payloads gzip to roughly the same size with header overhead.
     let (payload, encoding) = if req.accept_gzip && payload.len() > GZIP_MIN_BYTES {
@@ -122,6 +118,36 @@ fn handle(mut stream: TcpStream) {
         payload.len()
     );
     let _ = stream.write_all(&payload);
+}
+
+fn status_line(code: u16) -> &'static str {
+    match code {
+        200 => "200 OK",
+        400 => "400 Bad Request",
+        403 => "403 Forbidden",
+        404 => "404 Not Found",
+        405 => "405 Method Not Allowed",
+        415 => "415 Unsupported Media Type",
+        _ => "500 Internal Server Error",
+    }
+}
+
+/// The task-maintenance projection is only for the authenticated local SSH
+/// tunnel peer. Its fixed endpoint accepts no query or request body.
+fn route_for_peer(req: &Request, peer: Option<IpAddr>) -> (u16, serde_json::Value) {
+    if req.path != "/api/task-maintenance" {
+        return route(req);
+    }
+    if !peer.map(|addr| addr.is_loopback()).unwrap_or(false) {
+        return err(403, "loopback peer required");
+    }
+    if req.method != "GET" {
+        return err(405, "method not allowed");
+    }
+    if !req.query.is_empty() || !req.body.is_empty() {
+        return err(400, "task-maintenance accepts no query or body");
+    }
+    ok(crate::task_maintenance::get())
 }
 
 /// Below this size a gzipped JSON body is not meaningfully smaller.
@@ -325,6 +351,7 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
             "remote_mode": crate::data_root::is_remote(),
             "todo_schedule": crate::runner_config::get_todo_schedule(),
         })),
+        ("GET", "/api/task-maintenance") => err(403, "peer-bound route required"),
         ("GET", "/api/projects") => {
             let projects: Vec<serde_json::Value> = crate::discovery::discover_projects()
                 .into_iter()
@@ -861,6 +888,13 @@ fn route(req: &Request) -> (u16, serde_json::Value) {
 mod tests {
     use super::*;
 
+    fn task_request(method: &str, query: Vec<(String, String)>, body: Vec<u8>) -> Request {
+        Request {
+            method: method.into(), path: "/api/task-maintenance".into(), query,
+            content_type: None, body, accept_gzip: false,
+        }
+    }
+
     #[test]
     fn finds_header_boundary() {
         assert_eq!(find_subslice(b"abc\r\n\r\nbody", b"\r\n\r\n"), Some(3));
@@ -929,6 +963,28 @@ mod tests {
         let (code, body) = route(&req);
         assert_eq!(code, 404);
         assert!(body.get("error").is_some());
+    }
+
+    #[test]
+    fn task_maintenance_is_loopback_only_and_has_no_parameters() {
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let external: IpAddr = "100.64.0.8".parse().unwrap();
+        let (code, _) = route_for_peer(&task_request("GET", vec![], vec![]), Some(external));
+        assert_eq!(code, 403);
+        let (code, _) = route_for_peer(&task_request("GET", vec![], vec![]), None);
+        assert_eq!(code, 403);
+        let (code, _) = route_for_peer(&task_request("GET", vec![("x".into(), "1".into())], vec![]), Some(loopback));
+        assert_eq!(code, 400);
+        let (code, _) = route_for_peer(&task_request("GET", vec![], b"{}".to_vec()), Some(loopback));
+        assert_eq!(code, 400);
+        let (code, _) = route_for_peer(&task_request("POST", vec![], vec![]), Some(loopback));
+        assert_eq!(code, 405);
+        let (code, body) = route_for_peer(&task_request("GET", vec![], vec![]), Some(loopback));
+        assert_eq!(code, 200);
+        assert_eq!(body["state"], "UNKNOWN");
+        let (code, _) = route(&task_request("GET", vec![], vec![]));
+        assert_eq!(code, 403);
+        assert_eq!(status_line(403), "403 Forbidden");
     }
 
     #[test]
