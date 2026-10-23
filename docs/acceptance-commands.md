@@ -23,7 +23,7 @@ Runner 验收阶段在隔离 worktree 中执行**受信命令**（command_id →
 | `cargo:check` | `cargo check` | `desktop-app/src-tauri` | 快速类型/编译检查 |
 | `cargo:clippy` | `cargo clippy -- -D warnings` | `desktop-app/src-tauri` | 严格 lint（warning 当 error） |
 | `cargo:build` | `cargo build` | `desktop-app/src-tauri` | 编译（不跑测试） |
-| `test:desktop` | `cargo test` | `desktop-app/src-tauri` | 全套 Rust 测试 |
+| `test:desktop` | `cargo test` | `desktop-app/src-tauri` | 确定性 Rust 测试；明确标记的真实 CLI E2E 默认 ignored |
 | **前端（desktop web）** | | | |
 | `build:web` | `npm run build` | `desktop-app` | 前端生产构建（vite） |
 | `test:web` | `npm test` | `desktop-app` | 前端单元测试（vitest） |
@@ -51,6 +51,23 @@ Runner 验收阶段在隔离 worktree 中执行**受信命令**（command_id →
 ```
 
 ---
+
+## 真实 ZCode E2E
+
+`desktop-app/src-tauri/tests/e2e_bridge.rs` 中两个 live-ZCode 测试默认标记为
+`ignored`，普通 `cargo test` 不会启动真实模型或读取用户 CLI 凭据。默认运行
+`cargo test --test e2e_bridge` 时应显示 0 executed、2 ignored。
+
+仅在获得本次人工授权、具备相应模型预算，并确认本机 ZCode 与
+`~/.zcode/cli/config.json` 已配置后，才逐项显式运行，例如：
+
+```sh
+QUESTLOG_LIVE_ZCODE_E2E=1 cargo test --test e2e_bridge bridge_ready_package_to_zcode_execution -- --ignored --exact
+QUESTLOG_LIVE_ZCODE_E2E=1 cargo test --test e2e_bridge bridge_readonly_package_no_diff_counts_as_passed -- --ignored --exact
+```
+
+显式选择 ignored 测试却缺少 opt-in、ZCode CLI 或当前 `HOME` 下的配置文件时，
+测试会明确失败，不会将缺少外部依赖报告为通过。不要复制凭据到隔离环境。
 
 ## 常见错误
 
